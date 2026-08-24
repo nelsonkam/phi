@@ -1,0 +1,6 @@
+/vendor/pi/
+node_modules/
+.phi/
+*.db
+*.db-shm
+*.db-wal
