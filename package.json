@@ -1,10 +1,23 @@
 {
   "name": "phi",
-  "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "dev": "bun --hot src/cli.ts serve",
+    "start": "bun src/cli.ts serve"
+  },
+  "dependencies": {
+    "bun-plugin-tailwind": "^0.0.15",
+    "clsx": "^2.1.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tailwind-merge": "^3.3.1",
+    "tailwindcss": "^4.1.11"
+  },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
   },
   "peerDependencies": {
     "typescript": "^5"

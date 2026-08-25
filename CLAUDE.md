@@ -6,6 +6,10 @@ alwaysApply: false
 
 Default to using Bun instead of Node.js.
 
+## Imports
+
+Use the `@/*` alias for imports from `src/` (e.g. `import { PhiStore } from "@/core/store/store"`). Do not use deep relative chains like `../../..`. Relative imports (`./`, `../`) are fine within the same feature folder.
+
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
 - Use `bun test` instead of `jest` or `vitest`
 - Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
@@ -26,6 +30,9 @@ Default to using Bun instead of Node.js.
 ## Testing
 
 Use `bun test` to run tests.
+
+Put tests in a `test/` folder next to the code they exercise, e.g.
+`src/core/store/store.ts` → `src/core/store/test/store.test.ts`.
 
 ```ts#index.test.ts
 import { test, expect } from "bun:test";

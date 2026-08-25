@@ -1,0 +1,34 @@
+import type { Database } from "bun:sqlite";
+import m001 from "./migrations/001_init.sql" with { type: "text" };
+
+// Explicit list keeps migrations ordered and bundle-safe (no directory scan).
+const MIGRATIONS: Array<{ id: string; sql: string }> = [
+  { id: "001_init", sql: m001 },
+];
+
+export function migrate(db: Database): void {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+  `);
+
+  const applied = new Set(
+    db
+      .query<{ id: string }, []>("SELECT id FROM schema_migrations")
+      .all()
+      .map((row) => row.id),
+  );
+
+  for (const migration of MIGRATIONS) {
+    if (applied.has(migration.id)) continue;
+    db.transaction(() => {
+      db.run(migration.sql);
+      db.query("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
+        migration.id,
+        new Date().toISOString(),
+      );
+    })();
+  }
+}
