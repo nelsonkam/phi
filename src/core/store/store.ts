@@ -1,23 +1,20 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { dbPath, phiRoot, workspaceRoot } from "@/core/paths";
 import { migrate } from "@/db/migrate";
 import type { Channel, Workspace } from "@/shared/types";
 
 const DEFAULT_WORKSPACE_ID = "ws_default";
 const DEFAULT_CHANNEL_ID = "ch_general";
 
-export function defaultDbPath(): string {
-  return process.env.PHI_DB ?? join(homedir(), ".phi", "phi.db");
-}
-
 export class PhiStore {
   readonly db: Database;
+  private readonly root: string;
 
-  constructor(path: string = defaultDbPath()) {
-    mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path, { create: true, strict: true });
+  constructor(root: string = phiRoot()) {
+    this.root = root;
+    mkdirSync(root, { recursive: true });
+    this.db = new Database(dbPath(root), { create: true, strict: true });
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA foreign_keys = ON;");
     this.db.run("PRAGMA busy_timeout = 5000;");
@@ -32,7 +29,14 @@ export class PhiStore {
         `INSERT OR IGNORE INTO workspaces (id, name, root_path, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(DEFAULT_WORKSPACE_ID, "default", process.cwd(), now, now);
+      .run(DEFAULT_WORKSPACE_ID, "default", workspaceRoot(this.root), now, now);
+    // The default workspace root derives from PHI_ROOT; keep the row in sync
+    // when the root moves.
+    this.db
+      .query(
+        "UPDATE workspaces SET root_path = ?, updated_at = ? WHERE id = ? AND root_path != ?",
+      )
+      .run(workspaceRoot(this.root), now, DEFAULT_WORKSPACE_ID, workspaceRoot(this.root));
     this.db
       .query(
         `INSERT OR IGNORE INTO channels (id, workspace_id, name, purpose, created_at, updated_at)

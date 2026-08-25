@@ -46,6 +46,21 @@ export interface Message {
   createdAt: string;
 }
 
+// An agent definition, loaded from `.agents/agents/<name>.md` in the
+// workspace. The name is the filename and doubles as the @-mention handle.
+export interface Agent {
+  name: string;
+  description: string | null;
+  harness: string;
+  model: string | null;
+  warnings: string[];
+}
+
+export interface AgentLoadError {
+  file: string;
+  message: string;
+}
+
 // WebSocket frames, server -> client. `v` is the protocol version.
 export type ServerFrame =
   | { v: 1; type: "hello"; workspaceId: string }

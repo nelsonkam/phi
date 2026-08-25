@@ -1,4 +1,4 @@
-import type { Channel } from "@/shared/types";
+import type { Agent, AgentLoadError, Channel } from "@/shared/types";
 
 // The only file (with ws.ts) that knows the transport. Everything else
 // consumes typed results, so a future mobile client mirrors just these two.
@@ -11,4 +11,11 @@ async function get<T>(path: string): Promise<T> {
 
 export function fetchChannels(): Promise<{ channels: Channel[] }> {
   return get("/channels");
+}
+
+export function fetchAgents(): Promise<{
+  agents: Agent[];
+  errors: AgentLoadError[];
+}> {
+  return get("/agents");
 }

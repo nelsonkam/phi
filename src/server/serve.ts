@@ -1,5 +1,7 @@
 import index from "@/web/index.html";
 import { PhiStore } from "@/core/store/store";
+import { loadAgents } from "@/core/agents/registry";
+import { ensureWorkspace } from "@/core/workspace";
 import type { ServerFrame } from "@/shared/types";
 
 const DEFAULT_PORT = 3141;
@@ -7,6 +9,7 @@ const DEFAULT_PORT = 3141;
 export function startServer(): void {
   const store = new PhiStore();
   const workspace = store.defaultWorkspace();
+  ensureWorkspace(workspace.rootPath);
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
 
   const server = Bun.serve({
@@ -21,6 +24,13 @@ export function startServer(): void {
         Response.json({ ok: true, workspaceId: workspace.id }),
       "/api/v1/channels": () =>
         Response.json({ channels: store.listChannels(workspace.id) }),
+      "/api/v1/agents": async () => {
+        const { agents, errors } = await loadAgents(workspace.rootPath);
+        return Response.json({
+          agents: agents.map(({ instructions, filePath, ...agent }) => agent),
+          errors,
+        });
+      },
     },
     fetch(req, server) {
       const url = new URL(req.url);
