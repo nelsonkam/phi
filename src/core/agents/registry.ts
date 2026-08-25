@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
 import { join } from "node:path";
+import matter from "gray-matter";
+import { strictObject, string } from "zod";
 import type { Agent, AgentLoadError } from "@/shared/types";
 
 // Harnesses phi knows how to launch over ACP. Launch commands land with the
@@ -17,7 +18,12 @@ export interface AgentRegistry {
 }
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
-const FRONTMATTER_PATTERN = /^---\n([\s\S]*?)\n---\n?/;
+
+const FrontmatterSchema = strictObject({
+  description: string().trim().min(1).nullish(),
+  harness: string().trim().min(1),
+  model: string().trim().min(1).nullish(),
+});
 
 export function agentsDir(workspaceRoot: string): string {
   return join(workspaceRoot, ".agents", "agents");
@@ -27,11 +33,12 @@ export function agentsDir(workspaceRoot: string): string {
 // directory is small and a watcher can layer on later without API changes.
 export async function loadAgents(workspaceRoot: string): Promise<AgentRegistry> {
   const dir = agentsDir(workspaceRoot);
-  if (!existsSync(dir)) return { agents: [], errors: [] };
 
   const agents: AgentDefinition[] = [];
   const errors: AgentLoadError[] = [];
-  const files = await Array.fromAsync(new Bun.Glob("*.md").scan({ cwd: dir }));
+  // A missing directory scans as empty rather than erroring.
+  const scan = new Bun.Glob("*.md").scan({ cwd: dir });
+  const files = await Array.fromAsync(scan).catch(() => [] as string[]);
 
   for (const file of files.sort()) {
     const filePath = join(dir, file);
@@ -44,10 +51,10 @@ export async function loadAgents(workspaceRoot: string): Promise<AgentRegistry> 
       continue;
     }
     const result = parseAgentFile(name, filePath, await Bun.file(filePath).text());
-    if ("message" in result) {
+    if (!result.ok) {
       errors.push({ file, message: result.message });
     } else {
-      agents.push(result);
+      agents.push(result.agent);
     }
   }
 
@@ -58,40 +65,35 @@ function parseAgentFile(
   name: string,
   filePath: string,
   content: string,
-): AgentDefinition | { message: string } {
-  const match = content.match(FRONTMATTER_PATTERN);
-  if (!match) {
-    return { message: "missing frontmatter (--- block at top of file)" };
-  }
-
-  let frontmatter: unknown;
+): { ok: true; agent: AgentDefinition } | { ok: false; message: string } {
+  let parsed: matter.GrayMatterFile<string>;
   try {
-    frontmatter = Bun.YAML.parse(match[1]!);
+    parsed = matter(content);
   } catch (error) {
-    return { message: `invalid frontmatter YAML: ${(error as Error).message}` };
+    return { ok: false, message: `invalid frontmatter YAML: ${(error as Error).message}` };
   }
-  if (typeof frontmatter !== "object" || frontmatter === null) {
-    return { message: "frontmatter must be a YAML mapping" };
-  }
-  const fields = frontmatter as Record<string, unknown>;
 
-  const harness = fields.harness;
-  if (typeof harness !== "string" || harness.length === 0) {
-    return { message: "frontmatter requires a `harness` field" };
+  const result = FrontmatterSchema.safeParse(parsed.data);
+  if (!result.success) {
+    const issue = result.error.issues[0]!;
+    return { ok: false, message: `frontmatter ${issue.path.join(".")}: ${issue.message}` };
   }
 
   const warnings: string[] = [];
-  if (!(KNOWN_HARNESSES as readonly string[]).includes(harness)) {
-    warnings.push(`unknown harness "${harness}"`);
+  if (!(KNOWN_HARNESSES as readonly string[]).includes(result.data.harness)) {
+    warnings.push(`unknown harness "${result.data.harness}"`);
   }
 
   return {
-    name,
-    description: typeof fields.description === "string" ? fields.description : null,
-    harness,
-    model: typeof fields.model === "string" ? fields.model : null,
-    warnings,
-    instructions: content.slice(match[0].length).trim(),
-    filePath,
+    ok: true,
+    agent: {
+      name,
+      description: result.data.description ?? null,
+      harness: result.data.harness,
+      model: result.data.model ?? null,
+      warnings,
+      instructions: parsed.content.trim(),
+      filePath,
+    },
   };
 }
