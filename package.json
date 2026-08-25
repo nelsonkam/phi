@@ -9,6 +9,7 @@
   "dependencies": {
     "bun-plugin-tailwind": "^0.0.15",
     "clsx": "^2.1.1",
+    "lucide-react": "^1.34.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwind-merge": "^3.3.1",
