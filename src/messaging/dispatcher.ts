@@ -1,33 +1,28 @@
+import { DrainLoop } from "../drain-loop.ts";
 import type { PhiStore } from "../db/store.ts";
 import type { MessageTransport } from "./transport.ts";
 
 export class OutboxDispatcher {
-  private stopped = false;
-  private draining = false;
-  private wakePending = false;
+  private readonly loop: DrainLoop;
   constructor(
     private readonly store: PhiStore,
     private readonly transport: MessageTransport,
-  ) {}
+  ) {
+    this.loop = new DrainLoop(() => this.drainOnce());
+  }
   start(): void {
-    this.stopped = false;
-    this.wake();
+    this.loop.start();
   }
   stop(): void {
-    this.stopped = true;
+    this.loop.stop();
   }
   isIdle(): boolean {
-    return !this.draining && !this.wakePending;
+    return this.loop.isIdle();
   }
   wake(): void {
-    if (this.stopped) return;
-    if (this.draining) {
-      this.wakePending = true;
-      return;
-    }
-    void this.drain();
+    this.loop.wake();
   }
-  async drainOnce(): Promise<boolean> {
+  private async drainOnce(): Promise<boolean> {
     const message = this.store.claimOutbox();
     if (!message) return false;
     try {
@@ -45,17 +40,5 @@ export class OutboxDispatcher {
       );
     }
     return true;
-  }
-  private async drain(): Promise<void> {
-    this.draining = true;
-    try {
-      while (!this.stopped && (await this.drainOnce())) {}
-    } finally {
-      this.draining = false;
-      if (this.wakePending) {
-        this.wakePending = false;
-        this.wake();
-      }
-    }
   }
 }

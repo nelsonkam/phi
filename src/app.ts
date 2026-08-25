@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { PhiConfig } from "./config.ts";
 import { CoordinatorLoop } from "./coordinator/loop.ts";
 import {
@@ -8,6 +6,7 @@ import {
   type CoordinatorRuntime,
 } from "./coordinator/runtime.ts";
 import { CoordinatorTools } from "./coordinator/tools.ts";
+import type { CoordinatorTraceStore } from "./coordinator/trace.ts";
 import { TurnContext } from "./coordinator/turn-context.ts";
 import { PhiDatabase } from "./db/database.ts";
 import { PhiStore } from "./db/store.ts";
@@ -23,52 +22,25 @@ import {
 } from "./messaging/transport.ts";
 import { ensureRuntimeDirectories } from "./paths.ts";
 import { GitService } from "./workspace/git.ts";
-import { WorkerAdapterRegistry } from "./workers/adapter.ts";
-import { ClaudeWorkerAdapter } from "./workers/claude.ts";
-import { CodexWorkerAdapter } from "./workers/codex.ts";
-import { CursorWorkerAdapter } from "./workers/cursor.ts";
-import { FakeWorkerAdapter } from "./workers/fake.ts";
-
-function credential(path: string, envName: string): string | undefined {
-  if (existsSync(path)) return readFileSync(path, "utf8").trim();
-  return process.env[envName];
-}
+import type { WorkerAdapterRegistry } from "./workers/adapter.ts";
+import { buildAdapterRegistry } from "./workers/registry.ts";
 
 export class PhiApp {
-  readonly database: PhiDatabase;
-  readonly store: PhiStore;
-  readonly adapters = new WorkerAdapterRegistry();
-  readonly git: GitService;
-  readonly scheduler: JobScheduler;
-  readonly coordinatorLoop: CoordinatorLoop;
-  readonly outbox: OutboxDispatcher;
-  readonly followUps: FollowUpDispatcher;
-  private readonly coordinator: CoordinatorRuntime;
+  readonly coordinatorTraces: CoordinatorTraceStore;
 
   private constructor(
     readonly config: PhiConfig,
-    services: {
-      database: PhiDatabase;
-      store: PhiStore;
-      git: GitService;
-      scheduler: JobScheduler;
-      coordinatorLoop: CoordinatorLoop;
-      outbox: OutboxDispatcher;
-      followUps: FollowUpDispatcher;
-      coordinator: CoordinatorRuntime;
-      adapters: WorkerAdapterRegistry;
-    },
+    readonly database: PhiDatabase,
+    readonly store: PhiStore,
+    readonly adapters: WorkerAdapterRegistry,
+    readonly git: GitService,
+    readonly scheduler: JobScheduler,
+    readonly coordinatorLoop: CoordinatorLoop,
+    readonly outbox: OutboxDispatcher,
+    readonly followUps: FollowUpDispatcher,
+    private readonly coordinator: CoordinatorRuntime,
   ) {
-    this.database = services.database;
-    this.store = services.store;
-    this.git = services.git;
-    this.scheduler = services.scheduler;
-    this.coordinatorLoop = services.coordinatorLoop;
-    this.outbox = services.outbox;
-    this.followUps = services.followUps;
-    this.coordinator = services.coordinator;
-    for (const adapter of services.adapters.list())
-      this.adapters.register(adapter);
+    this.coordinatorTraces = coordinator.traces;
   }
 
   static async create(
@@ -87,57 +59,7 @@ export class PhiApp {
       throw error;
     }
     const workspace = store.registerWorkspace(config.paths.workspace);
-    const adapters = new WorkerAdapterRegistry();
-    adapters.register(new FakeWorkerAdapter());
-    const isolatedCredentials = config.credentialMode === "isolated";
-    const cursorApiKey = isolatedCredentials
-      ? credential(
-          join(config.paths.credentialsDir, "cursor-api-key"),
-          "CURSOR_API_KEY",
-        )
-      : undefined;
-    adapters.register(
-      new CursorWorkerAdapter({
-        stateDir: join(config.paths.workerSessionsDir, "cursor"),
-        workspace: config.paths.workspace,
-        model: config.cursorModel,
-        nativeCredentials: !isolatedCredentials,
-        ...(cursorApiKey ? { apiKey: cursorApiKey } : {}),
-      }),
-    );
-    const claudeApiKey = isolatedCredentials
-      ? credential(
-          join(config.paths.credentialsDir, "anthropic-api-key"),
-          "ANTHROPIC_API_KEY",
-        )
-      : undefined;
-    const claudeModel = process.env.PHI_CLAUDE_MODEL;
-    adapters.register(
-      new ClaudeWorkerAdapter({
-        ...(isolatedCredentials
-          ? { configDir: join(config.paths.credentialsDir, "claude") }
-          : {}),
-        nativeCredentials: !isolatedCredentials,
-        ...(claudeApiKey ? { apiKey: claudeApiKey } : {}),
-        ...(claudeModel ? { model: claudeModel } : {}),
-      }),
-    );
-    const codexApiKey = isolatedCredentials
-      ? credential(
-          join(config.paths.credentialsDir, "openai-api-key"),
-          "OPENAI_API_KEY",
-        )
-      : undefined;
-    const codexModel = process.env.PHI_CODEX_MODEL;
-    adapters.register(
-      new CodexWorkerAdapter({
-        ...(isolatedCredentials
-          ? { codexHome: join(config.paths.credentialsDir, "codex") }
-          : {}),
-        ...(codexApiKey ? { apiKey: codexApiKey } : {}),
-        ...(codexModel ? { model: codexModel } : {}),
-      }),
-    );
+    const adapters = buildAdapterRegistry(config);
     const outbox = new OutboxDispatcher(
       store,
       options.transport ?? new ConsoleTransport(),
@@ -166,6 +88,7 @@ export class PhiApp {
       followUps,
       cancellation,
       outbox,
+      adapters,
     });
     const coordinator = options.directCoordinator
       ? new DirectCoordinatorRuntime(tools)
@@ -179,10 +102,6 @@ export class PhiApp {
             : {}),
         });
     coordinatorLoop = new CoordinatorLoop(store, coordinator, turn);
-    if (coordinator instanceof PiCoordinatorRuntime)
-      coordinator.setInputHandler((text) =>
-        coordinatorLoop!.submitUserMessage(text).then(() => undefined),
-      );
     const recovery = new RecoveryService({
       store,
       adapters,
@@ -191,17 +110,18 @@ export class PhiApp {
       git,
     });
     await recovery.recover();
-    return new PhiApp(config, {
+    return new PhiApp(
+      config,
       database,
       store,
+      adapters,
       git,
       scheduler,
       coordinatorLoop,
       outbox,
       followUps,
       coordinator,
-      adapters,
-    });
+    );
   }
 
   start(): void {
@@ -217,11 +137,8 @@ export class PhiApp {
     return this.coordinatorLoop.submitUserMessage(text, metadata);
   }
   async runDeveloperTui(): Promise<void> {
-    if (!(this.coordinator instanceof PiCoordinatorRuntime))
-      throw new Error(
-        "Pi developer TUI requires the Pi coordinator; omit --direct",
-      );
-    await this.coordinator.runDeveloperTui();
+    const { runPhiTui } = await import("./ui/tui.tsx");
+    await runPhiTui(this);
   }
   async waitUntilIdle(timeoutMs = 10_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;

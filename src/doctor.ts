@@ -1,15 +1,10 @@
 import { existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PhiConfig } from "./config.ts";
 import { PhiDatabase } from "./db/database.ts";
 import { ensureRuntimeDirectories } from "./paths.ts";
 import { GitService } from "./workspace/git.ts";
-import { WorkerAdapterRegistry } from "./workers/adapter.ts";
-import { ClaudeWorkerAdapter } from "./workers/claude.ts";
-import { CodexWorkerAdapter } from "./workers/codex.ts";
-import { CursorWorkerAdapter } from "./workers/cursor.ts";
-import { FakeWorkerAdapter } from "./workers/fake.ts";
+import { buildAdapterRegistry } from "./workers/registry.ts";
 
 export interface DoctorCheck {
   name: string;
@@ -56,49 +51,30 @@ export async function doctor(config: PhiConfig): Promise<DoctorCheck[]> {
       .get() as { version: number };
     checks.push({
       name: "sqlite",
-      ok: version.version === 1,
+      ok: version.version === 2,
       detail: `${config.paths.database}; schema ${version.version}`,
     });
   } finally {
     database.close();
   }
-  const adapters = new WorkerAdapterRegistry();
-  adapters.register(new FakeWorkerAdapter());
-  adapters.register(
-    new CursorWorkerAdapter({
-      stateDir: join(config.paths.workerSessionsDir, "cursor"),
-      workspace: config.paths.workspace,
-      model: config.cursorModel,
-      nativeCredentials: !isolatedCredentials,
-    }),
-  );
-  adapters.register(
-    new ClaudeWorkerAdapter({
-      ...(isolatedCredentials
-        ? { configDir: join(config.paths.credentialsDir, "claude") }
-        : {}),
-      nativeCredentials: !isolatedCredentials,
-    }),
-  );
-  adapters.register(
-    new CodexWorkerAdapter({
-      ...(isolatedCredentials
-        ? { codexHome: join(config.paths.credentialsDir, "codex") }
-        : {}),
-    }),
-  );
-  for (const adapter of adapters.list())
+  const adapters = buildAdapterRegistry(config);
+  const adapterDescriptions = await adapters.describeAll();
+  for (const adapter of adapterDescriptions)
     checks.push({
       name: `adapter ${adapter.id}`,
       ok: true,
-      detail: JSON.stringify(adapter.capabilities),
+      detail: JSON.stringify({
+        ...adapter.capabilities,
+        defaultModel: adapter.modelCatalog.defaultModel,
+        models: adapter.modelCatalog.models.map((model) => model.id),
+      }),
     });
   checks.push({
     name: "credential mode",
     ok: true,
     detail: isolatedCredentials
       ? `isolated; SDK configuration and key files use ${config.paths.credentialsDir}`
-      : "native; each SDK reuses its normal user-home authentication",
+      : "native; each official SDK resolves its supported user-home authentication",
   });
   if (isolatedCredentials) {
     for (const [name, files, envs] of [
@@ -130,34 +106,18 @@ export async function doctor(config: PhiConfig): Promise<DoctorCheck[]> {
       });
     }
   } else {
-    const userHome = homedir();
-    const nativeCredentials = [
-      {
-        name: "Cursor credential",
-        envs: ["CURSOR_API_KEY"],
-        files: [join(userHome, ".cursor", "sdk", "auth.json")],
-        fallback: "Cursor SDK native login store",
-      },
-      {
-        name: "Anthropic credential",
-        envs: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
-        files: [join(userHome, ".claude", ".credentials.json")],
-        fallback: "Claude Code native login (including the macOS Keychain)",
-      },
-      {
-        name: "OpenAI credential",
-        envs: ["OPENAI_API_KEY"],
-        files: [join(userHome, ".codex", "auth.json")],
-        fallback: "Codex native login (including the OS credential store)",
-      },
-    ];
-    for (const native of nativeCredentials) {
-      const env = native.envs.find((name) => Boolean(process.env[name]));
-      const file = native.files.find((path) => existsSync(path));
+    for (const [name, id] of [
+      ["Cursor credential", "cursor"],
+      ["Anthropic credential", "claude"],
+      ["OpenAI credential", "codex"],
+    ] as const) {
+      const descriptor = adapterDescriptions.find(
+        (adapter) => adapter.id === id,
+      )!;
       checks.push({
-        name: native.name,
-        ok: true,
-        detail: env ? `${env} environment variable` : (file ?? native.fallback),
+        name,
+        ok: descriptor.readiness !== "login_required",
+        detail: descriptor.detail,
       });
     }
     checks.push({

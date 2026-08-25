@@ -1,18 +1,44 @@
-import { Codex, type Thread, type ThreadEvent } from "@openai/codex-sdk";
-import { mkdirSync } from "node:fs";
-import { UnsupportedCapabilityError } from "../errors.ts";
 import {
-  AsyncQueue,
-  type WorkerAdapter,
-  type WorkerEvent,
-  type WorkerReconciliation,
+  Codex,
+  type ModelReasoningEffort,
+  type Thread,
+  type ThreadEvent,
+} from "@openai/codex-sdk";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { WorkerEffort } from "../domain.ts";
+import { UnsupportedCapabilityError } from "../errors.ts";
+import type {
+  WorkerAdapter,
+  WorkerEvent,
+  WorkerModelCatalog,
+  WorkerReconciliation,
+  WorkerStatus,
 } from "./adapter.ts";
+import {
+  awaitStartId,
+  createLiveRun,
+  LiveRunTable,
+  type LiveRun,
+} from "./live-run.ts";
 
-interface CodexRun {
+interface CodexRun extends LiveRun {
   thread: Thread;
   controller: AbortController;
-  queue: AsyncQueue<WorkerEvent>;
-  terminal?: WorkerEvent;
+  lastAssistant?: string;
+}
+
+export function codexCompletionEvent(
+  lastAssistant: string | undefined,
+  usage: unknown,
+): Extract<WorkerEvent, { type: "completed" }> {
+  return {
+    type: "completed",
+    nativeId: "turn.completed",
+    summary: lastAssistant?.trim() || "Codex turn completed",
+    data: { usage },
+  };
 }
 
 export class CodexWorkerAdapter implements WorkerAdapter {
@@ -26,8 +52,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     toolEvents: true,
     needsInput: false,
     isolation: "optional_sdk_sandbox",
+    modelSelection: "per_job",
+    modelScope: "root",
+    webSearch: "sdk_managed",
   } as const;
-  private readonly runs = new Map<string, CodexRun>();
+  private readonly runs = new LiveRunTable<CodexRun>("Codex thread");
   private readonly codex: Codex;
 
   constructor(
@@ -35,6 +64,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       codexHome?: string;
       apiKey?: string;
       model?: string;
+      models?: string[];
     },
   ) {
     if (options.codexHome)
@@ -49,29 +79,93 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     this.codex = new Codex({ env, ...(apiKey ? { apiKey } : {}) });
   }
 
+  async status(): Promise<WorkerStatus> {
+    if (this.options.apiKey || process.env.OPENAI_API_KEY)
+      return {
+        readiness: "unverified",
+        detail: "OpenAI API key configured",
+        interactiveAuth: false,
+      };
+    const codexHome =
+      this.options.codexHome ??
+      process.env.CODEX_HOME ??
+      join(homedir(), ".codex");
+    if (existsSync(join(codexHome, "auth.json")))
+      return {
+        readiness: "ready",
+        detail: `Codex login found under ${codexHome}`,
+        interactiveAuth: false,
+      };
+    return {
+      readiness: "unverified",
+      detail: "Codex OS credential-store login is checked when a job launches",
+      interactiveAuth: false,
+    };
+  }
+
+  async modelCatalog(): Promise<WorkerModelCatalog> {
+    const effortLevels: WorkerEffort[] = [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ];
+    const ids = new Set([
+      ...(this.options.models ?? []),
+      ...(this.options.model ? [this.options.model] : []),
+    ]);
+    return {
+      defaultModel: this.options.model ?? null,
+      models: [...ids].map((id) => ({
+        id,
+        label: id,
+        description:
+          "Host-configured Codex model; the SDK does not expose model discovery",
+        source: "configured" as const,
+        tier: "unknown" as const,
+        effortLevels,
+      })),
+      defaultEffortLevels: effortLevels,
+      discovery: "configured",
+      note: ids.size
+        ? "Selectable models come from PHI_CODEX_MODELS."
+        : "The Codex SDK exposes model selection but not catalog discovery; set PHI_CODEX_MODELS to enable explicit choices.",
+    };
+  }
+
   async launch(input: {
     prompt: string;
     cwd: string;
     mode: "read_only" | "mutating";
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<{ externalRunId: string; continuationHandle: string }> {
     const thread = this.codex.startThread({
       workingDirectory: input.cwd,
       skipGitRepoCheck: false,
       sandboxMode: input.mode === "read_only" ? "read-only" : "workspace-write",
       approvalPolicy: "never",
-      ...(this.options.model ? { model: this.options.model } : {}),
+      ...((input.model ?? this.options.model)
+        ? { model: input.model ?? this.options.model }
+        : {}),
+      ...(input.effort
+        ? { modelReasoningEffort: input.effort as ModelReasoningEffort }
+        : {}),
     });
-    const controller = new AbortController();
-    const queue = new AsyncQueue<WorkerEvent>();
-    const record: CodexRun = { thread, controller, queue };
+    const record: CodexRun = {
+      ...createLiveRun(),
+      thread,
+      controller: new AbortController(),
+    };
     const started = Promise.withResolvers<string>();
     void this.pump(record, input.prompt, started);
-    const threadId = await Promise.race([
+    const threadId = await awaitStartId(
       started.promise,
-      Bun.sleep(30_000).then(() => {
-        throw new Error("Codex SDK did not emit a thread id within 30 seconds");
-      }),
-    ]);
+      "Codex SDK did not emit a thread id",
+    );
     this.runs.set(threadId, record);
     return { externalRunId: threadId, continuationHandle: threadId };
   }
@@ -84,13 +178,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         category: "status",
         message: "Codex thread started",
       };
-    if (event.type === "turn.completed")
-      return {
-        type: "completed",
-        nativeId: "turn.completed",
-        summary: "Codex turn completed",
-        data: { usage: event.usage },
-      };
+    if (event.type === "turn.completed") return null;
     if (event.type === "turn.failed")
       return {
         type: "failed",
@@ -171,6 +259,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     prompt: string,
     started: PromiseWithResolvers<string>,
   ): Promise<void> {
+    let error: unknown;
     try {
       const streamed = await record.thread.runStreamed(prompt, {
         signal: record.controller.signal,
@@ -178,46 +267,33 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       for await (const sdkEvent of streamed.events) {
         if (sdkEvent.type === "thread.started")
           started.resolve(sdkEvent.thread_id);
-        const event = this.map(sdkEvent);
+        const event =
+          sdkEvent.type === "turn.completed"
+            ? codexCompletionEvent(record.lastAssistant, sdkEvent.usage)
+            : this.map(sdkEvent);
         if (!event) continue;
-        record.queue.push(event);
-        if (
-          event.type === "completed" ||
-          event.type === "failed" ||
-          event.type === "cancelled"
-        )
-          record.terminal = event;
+        if (event.type === "activity" && event.category === "assistant")
+          record.lastAssistant = event.message;
+        this.runs.emit(record, event);
       }
-      if (!record.terminal) {
-        const terminal: WorkerEvent = record.controller.signal.aborted
-          ? { type: "cancelled", summary: "Codex turn aborted" }
-          : {
-              type: "failed",
-              error: "Codex stream ended without a terminal event",
-            };
-        record.terminal = terminal;
-        record.queue.push(terminal);
-      }
-    } catch (error) {
-      started.reject(error);
-      const terminal: WorkerEvent = record.controller.signal.aborted
-        ? { type: "cancelled", summary: "Codex turn aborted" }
-        : {
-            type: "failed",
-            error: error instanceof Error ? error.message : String(error),
-          };
-      record.terminal = terminal;
-      record.queue.push(terminal);
+    } catch (caught) {
+      started.reject(caught);
+      error = caught;
     } finally {
-      record.queue.close();
+      this.runs.finishStream(
+        record,
+        record.controller.signal.aborted,
+        {
+          cancelled: "Codex turn aborted",
+          failed: "Codex stream ended without a terminal event",
+        },
+        error,
+      );
     }
   }
 
   watch(externalRunId: string): AsyncIterable<WorkerEvent> {
-    const record = this.runs.get(externalRunId);
-    if (!record)
-      throw new Error(`Codex thread is not attached: ${externalRunId}`);
-    return record.queue;
+    return this.runs.watch(externalRunId);
   }
   async followUp(): Promise<void> {
     throw new UnsupportedCapabilityError(
@@ -232,7 +308,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       );
     record.controller.abort();
   }
-  async reconcile(): Promise<WorkerReconciliation> {
+  async reconcile(_input?: {
+    dispatchKey: string;
+    externalRunId?: string;
+    model?: string;
+    effort?: WorkerEffort;
+  }): Promise<WorkerReconciliation> {
     return {
       state: "unavailable",
       reason:

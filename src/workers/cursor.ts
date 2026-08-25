@@ -1,25 +1,28 @@
 import {
   Agent,
+  Cursor,
   JsonlLocalAgentStore,
   type Run,
   type SDKAgent,
   type SDKMessage,
 } from "@cursor/sdk/bundled";
 import { mkdirSync } from "node:fs";
+import type { WorkerEffort } from "../domain.ts";
 import { UnsupportedCapabilityError } from "../errors.ts";
-import {
-  AsyncQueue,
-  type WorkerAdapter,
-  type WorkerEvent,
-  type WorkerReconciliation,
+import type {
+  WorkerAdapter,
+  WorkerEvent,
+  WorkerModelCatalog,
+  WorkerModelDescriptor,
+  WorkerReconciliation,
+  WorkerStatus,
 } from "./adapter.ts";
+import { createLiveRun, LiveRunTable, type LiveRun } from "./live-run.ts";
 
-interface CursorRun {
+interface CursorRun extends LiveRun {
   agent: SDKAgent;
   run: Run;
-  queue: AsyncQueue<WorkerEvent>;
   cwd: string;
-  terminal?: WorkerEvent;
 }
 
 export class CursorWorkerAdapter implements WorkerAdapter {
@@ -33,10 +36,14 @@ export class CursorWorkerAdapter implements WorkerAdapter {
     toolEvents: true,
     needsInput: false,
     isolation: "none",
+    modelSelection: "per_job",
+    modelScope: "root",
+    webSearch: "unknown",
   } as const;
-  private readonly runs = new Map<string, CursorRun>();
+  private readonly runs = new LiveRunTable<CursorRun>("Cursor run");
   private readonly agents = new Map<string, SDKAgent>();
   private readonly store: JsonlLocalAgentStore;
+  private sessionApiKey?: string;
 
   constructor(
     private readonly options: {
@@ -45,18 +52,108 @@ export class CursorWorkerAdapter implements WorkerAdapter {
       apiKey?: string;
       nativeCredentials?: boolean;
       model: string;
+      models?: string[];
     },
   ) {
     mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
     this.store = new JsonlLocalAgentStore(options.stateDir);
   }
 
+  async status(): Promise<WorkerStatus> {
+    const interactiveAuth = this.options.nativeCredentials ?? true;
+    if (this.sessionApiKey || this.options.apiKey)
+      return {
+        readiness: "ready",
+        detail: "explicit Cursor SDK credential configured",
+        interactiveAuth,
+      };
+    if (process.env.CURSOR_API_KEY)
+      return {
+        readiness: "unverified",
+        detail:
+          "CURSOR_API_KEY is set and takes precedence over stored SDK login",
+        interactiveAuth,
+      };
+    if (this.options.nativeCredentials ?? true) {
+      const status = await Cursor.auth.status();
+      if (status.status === "logged-in")
+        return {
+          readiness: "ready",
+          detail: status.email
+            ? `Cursor SDK login: ${status.email}`
+            : "Cursor SDK browser login",
+          interactiveAuth,
+        };
+    }
+    return {
+      readiness: "login_required",
+      detail: "Cursor SDK browser login required",
+      interactiveAuth,
+    };
+  }
+
+  async modelCatalog(): Promise<WorkerModelCatalog> {
+    const models = new Map<string, WorkerModelDescriptor>();
+    for (const id of new Set([
+      this.options.model,
+      ...(this.options.models ?? []),
+    ]).values()) {
+      if (!/grok|composer/i.test(id)) continue;
+      models.set(id, {
+        id,
+        label:
+          {
+            "grok-4.6": "Cursor Grok 4.6",
+            "grok-4.5": "Cursor Grok 4.5",
+            "composer-2.5": "Composer 2.5",
+            "composer-2": "Composer 2",
+          }[id] ?? id,
+        source: "configured",
+        tier: "unknown",
+        effortLevels: [],
+      });
+    }
+    return {
+      defaultModel: this.options.model,
+      models: [...models.values()],
+      defaultEffortLevels: [],
+      discovery: "configured",
+      note: "Phi intentionally restricts Cursor to the SDK-validated Grok and Composer model families.",
+    };
+  }
+
+  async authenticate(options?: {
+    onLoginUrl?: (url: string) => void;
+    signal?: AbortSignal;
+  }): Promise<WorkerStatus> {
+    if (!(this.options.nativeCredentials ?? true))
+      throw new Error(
+        "Cursor SDK browser login is disabled in isolated credential mode",
+      );
+    const result = await Cursor.auth.login({
+      apiKeyName: "Phi harness",
+      ...(options?.onLoginUrl ? { onLoginUrl: options.onLoginUrl } : {}),
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
+    this.sessionApiKey = result.apiKey;
+    return {
+      readiness: "ready",
+      detail: result.email
+        ? `Cursor SDK login: ${result.email}`
+        : "Cursor SDK browser login complete",
+      interactiveAuth: true,
+    };
+  }
+
   async launch(input: {
     dispatchKey: string;
     prompt: string;
     cwd: string;
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<{ externalRunId: string; continuationHandle: string }> {
-    const apiKey = this.options.apiKey ?? process.env.CURSOR_API_KEY;
+    const apiKey =
+      this.sessionApiKey ?? this.options.apiKey ?? process.env.CURSOR_API_KEY;
     const nativeCredentials = this.options.nativeCredentials ?? true;
     if (!nativeCredentials && !apiKey)
       throw new Error(
@@ -64,16 +161,16 @@ export class CursorWorkerAdapter implements WorkerAdapter {
       );
     const agent = await Agent.create({
       ...(apiKey ? { apiKey } : {}),
-      model: { id: this.options.model },
+      model: { id: input.model ?? this.options.model },
       local: { cwd: input.cwd, store: this.store, settingSources: [] },
     });
     const run = await agent.send(input.prompt, {
       idempotencyKey: input.dispatchKey,
     });
     const record: CursorRun = {
+      ...createLiveRun(),
       agent,
       run,
-      queue: new AsyncQueue(),
       cwd: input.cwd,
     };
     this.runs.set(run.id, record);
@@ -129,13 +226,15 @@ export class CursorWorkerAdapter implements WorkerAdapter {
   }
 
   private async pump(record: CursorRun): Promise<void> {
+    let error: unknown;
     try {
       for await (const message of record.run.stream()) {
         const event = this.map(message);
-        if (event) record.queue.push(event);
+        if (event) this.runs.emit(record, event);
       }
       const result = await record.run.wait();
-      const terminal: WorkerEvent =
+      this.runs.emit(
+        record,
         result.status === "finished"
           ? {
               type: "completed",
@@ -153,26 +252,25 @@ export class CursorWorkerAdapter implements WorkerAdapter {
                 type: "failed",
                 nativeId: result.id,
                 error: result.error?.message ?? "Cursor run failed",
-              };
-      record.terminal = terminal;
-      record.queue.push(terminal);
-    } catch (error) {
-      const terminal: WorkerEvent = {
-        type: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      };
-      record.terminal = terminal;
-      record.queue.push(terminal);
+              },
+      );
+    } catch (caught) {
+      error = caught;
     } finally {
-      record.queue.close();
+      this.runs.finishStream(
+        record,
+        false,
+        {
+          cancelled: "Cursor run cancelled",
+          failed: "Cursor stream ended without a terminal event",
+        },
+        error,
+      );
     }
   }
 
   watch(externalRunId: string): AsyncIterable<WorkerEvent> {
-    const record = this.runs.get(externalRunId);
-    if (!record)
-      throw new Error(`Cursor run is not attached: ${externalRunId}`);
-    return record.queue;
+    return this.runs.watch(externalRunId);
   }
 
   async followUp(handle: string, text: string): Promise<void> {
@@ -182,7 +280,7 @@ export class CursorWorkerAdapter implements WorkerAdapter {
         "Cursor follow-up requires an attached agent; resume through a new dispatch after restart",
       );
     const run = await agent.send(text);
-    const record: CursorRun = { agent, run, queue: new AsyncQueue(), cwd: "" };
+    const record: CursorRun = { ...createLiveRun(), agent, run, cwd: "" };
     this.runs.set(run.id, record);
     void this.pump(record);
   }
@@ -200,6 +298,7 @@ export class CursorWorkerAdapter implements WorkerAdapter {
 
   async reconcile(input: {
     externalRunId?: string;
+    model?: string;
   }): Promise<WorkerReconciliation> {
     if (!input.externalRunId)
       return {
@@ -213,10 +312,13 @@ export class CursorWorkerAdapter implements WorkerAdapter {
         store: this.store,
       });
       if (run.status === "running") {
-        const apiKey = this.options.apiKey ?? process.env.CURSOR_API_KEY;
+        const apiKey =
+          this.sessionApiKey ??
+          this.options.apiKey ??
+          process.env.CURSOR_API_KEY;
         const agent = await Agent.resume(run.agentId, {
           ...(apiKey ? { apiKey } : {}),
-          model: { id: this.options.model },
+          model: { id: input.model ?? this.options.model },
           local: {
             cwd: this.options.workspace,
             store: this.store,
@@ -224,9 +326,9 @@ export class CursorWorkerAdapter implements WorkerAdapter {
           },
         });
         const record: CursorRun = {
+          ...createLiveRun(),
           agent,
           run,
-          queue: new AsyncQueue(),
           cwd: this.options.workspace,
         };
         this.runs.set(run.id, record);

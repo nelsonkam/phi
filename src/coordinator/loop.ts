@@ -1,33 +1,35 @@
+import { DrainLoop } from "../drain-loop.ts";
 import type { PhiStore } from "../db/store.ts";
 import type { CoordinatorRuntime } from "./runtime.ts";
 import type { TurnContext } from "./turn-context.ts";
 
 export class CoordinatorLoop {
-  private stopped = false;
-  private draining = false;
-  private wakePending = false;
+  private readonly loop: DrainLoop;
   constructor(
     private readonly store: PhiStore,
     private readonly runtime: CoordinatorRuntime,
     private readonly turn: TurnContext,
-  ) {}
+  ) {
+    this.loop = new DrainLoop(
+      () => this.drainOnce(),
+      (error) => {
+        process.stderr.write(
+          `\n[phi:coordinator-error] ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      },
+    );
+  }
   start(): void {
-    this.stopped = false;
-    this.wake();
+    this.loop.start();
   }
   stop(): void {
-    this.stopped = true;
+    this.loop.stop();
   }
   isIdle(): boolean {
-    return !this.draining && !this.wakePending;
+    return this.loop.isIdle();
   }
   wake(): void {
-    if (this.stopped) return;
-    if (this.draining) {
-      this.wakePending = true;
-      return;
-    }
-    void this.drain();
+    this.loop.wake();
   }
   async submitUserMessage(
     text: string,
@@ -37,7 +39,7 @@ export class CoordinatorLoop {
     this.wake();
     return event.id;
   }
-  async drainOnce(): Promise<boolean> {
+  private async drainOnce(): Promise<boolean> {
     const event = this.store.claimNextEvent();
     if (!event) return false;
     try {
@@ -51,21 +53,5 @@ export class CoordinatorLoop {
       throw error;
     }
     return true;
-  }
-  private async drain(): Promise<void> {
-    this.draining = true;
-    try {
-      while (!this.stopped && (await this.drainOnce())) {}
-    } catch (error) {
-      process.stderr.write(
-        `\n[phi:coordinator-error] ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    } finally {
-      this.draining = false;
-      if (this.wakePending) {
-        this.wakePending = false;
-        this.wake();
-      }
-    }
   }
 }

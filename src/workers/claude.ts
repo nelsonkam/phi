@@ -1,23 +1,31 @@
 import {
   query,
+  type EffortLevel,
   type Query,
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { mkdirSync } from "node:fs";
+import type { WorkerEffort } from "../domain.ts";
 import { UnsupportedCapabilityError } from "../errors.ts";
-import {
-  AsyncQueue,
-  type WorkerAdapter,
-  type WorkerEvent,
-  type WorkerReconciliation,
+import type {
+  WorkerAdapter,
+  WorkerEvent,
+  WorkerModelCatalog,
+  WorkerModelDescriptor,
+  WorkerReconciliation,
+  WorkerStatus,
 } from "./adapter.ts";
+import {
+  awaitStartId,
+  createLiveRun,
+  LiveRunTable,
+  type LiveRun,
+} from "./live-run.ts";
 
-interface ClaudeRun {
+interface ClaudeRun extends LiveRun {
   query: Query;
   controller: AbortController;
-  queue: AsyncQueue<WorkerEvent>;
   sessionId?: string;
-  terminal?: WorkerEvent;
 }
 
 function textOf(value: unknown): string {
@@ -42,8 +50,11 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
     toolEvents: true,
     needsInput: false,
     isolation: "none",
+    modelSelection: "per_job",
+    modelScope: "root",
+    webSearch: "sdk_managed",
   } as const;
-  private readonly runs = new Map<string, ClaudeRun>();
+  private readonly runs = new LiveRunTable<ClaudeRun>("Claude run");
 
   constructor(
     private readonly options: {
@@ -51,15 +62,90 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       apiKey?: string;
       nativeCredentials?: boolean;
       model?: string;
+      models?: string[];
     },
   ) {
     if (options.configDir)
       mkdirSync(options.configDir, { recursive: true, mode: 0o700 });
   }
 
+  async status(): Promise<WorkerStatus> {
+    if (
+      this.options.apiKey ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.CLAUDE_CODE_OAUTH_TOKEN
+    )
+      return {
+        readiness: "unverified",
+        detail: "Claude environment credential configured",
+        interactiveAuth: false,
+      };
+    if (!(this.options.nativeCredentials ?? true))
+      return {
+        readiness: "login_required",
+        detail: "isolated Claude mode requires an environment or Phi key",
+        interactiveAuth: false,
+      };
+    return {
+      readiness: "unverified",
+      detail: "Claude Code native login is checked when a job launches",
+      interactiveAuth: false,
+    };
+  }
+
+  async modelCatalog(): Promise<WorkerModelCatalog> {
+    const effortLevels: WorkerEffort[] = [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ];
+    const documented = [
+      ["haiku", "Claude Haiku", "fast"],
+      ["sonnet", "Claude Sonnet", "balanced"],
+      ["opus", "Claude Opus", "deep"],
+      ["fable", "Claude Fable", "deep"],
+    ] as const;
+    const models = new Map<string, WorkerModelDescriptor>();
+    for (const [id, label, tier] of documented)
+      models.set(id, {
+        id,
+        label,
+        description:
+          "Official Claude Code model-family alias; account availability is checked at launch",
+        source: "sdk_documented",
+        tier,
+        effortLevels,
+      });
+    for (const id of new Set([
+      ...(this.options.models ?? []),
+      ...(this.options.model ? [this.options.model] : []),
+    ]))
+      models.set(id, {
+        id,
+        label: models.get(id)?.label ?? id,
+        ...(models.get(id)?.description
+          ? { description: models.get(id)!.description }
+          : {}),
+        source: "configured",
+        tier: models.get(id)?.tier ?? "unknown",
+        effortLevels,
+      });
+    return {
+      defaultModel: this.options.model ?? null,
+      models: [...models.values()],
+      defaultEffortLevels: effortLevels,
+      discovery: "best_effort",
+      note: "The root model is selectable; Claude-managed nested agents may use other models.",
+    };
+  }
+
   async launch(input: {
     prompt: string;
     cwd: string;
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<{ externalRunId: string; continuationHandle: string }> {
     const nativeCredentials = this.options.nativeCredentials ?? true;
     if (
@@ -94,24 +180,22 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       },
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...(this.options.model ? { model: this.options.model } : {}),
+      ...((input.model ?? this.options.model)
+        ? { model: input.model ?? this.options.model }
+        : {}),
+      ...(input.effort ? { effort: input.effort as EffortLevel } : {}),
     };
-    const sdkQuery = query({ prompt: input.prompt, options });
     const record: ClaudeRun = {
-      query: sdkQuery,
+      ...createLiveRun(),
+      query: query({ prompt: input.prompt, options }),
       controller,
-      queue: new AsyncQueue(),
     };
     const started = Promise.withResolvers<string>();
     void this.pump(record, started);
-    const sessionId = await Promise.race([
+    const sessionId = await awaitStartId(
       started.promise,
-      Bun.sleep(30_000).then(() => {
-        throw new Error(
-          "Claude SDK did not emit a session id within 30 seconds",
-        );
-      }),
-    ]);
+      "Claude SDK did not emit a session id",
+    );
     record.sessionId = sessionId;
     this.runs.set(sessionId, record);
     return { externalRunId: sessionId, continuationHandle: sessionId };
@@ -206,6 +290,7 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
     record: ClaudeRun,
     started: PromiseWithResolvers<string>,
   ): Promise<void> {
+    let error: unknown;
     try {
       for await (const message of record.query) {
         if (
@@ -216,44 +301,27 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
           record.sessionId = message.session_id;
           started.resolve(message.session_id);
         }
-        for (const event of this.map(message)) {
-          record.queue.push(event);
-          if (
-            event.type === "completed" ||
-            event.type === "failed" ||
-            event.type === "cancelled"
-          )
-            record.terminal = event;
-        }
+        for (const event of this.map(message)) this.runs.emit(record, event);
       }
-      if (!record.terminal) {
-        const terminal: WorkerEvent = record.controller.signal.aborted
-          ? { type: "cancelled", summary: "Claude query aborted" }
-          : { type: "failed", error: "Claude stream ended without a result" };
-        record.terminal = terminal;
-        record.queue.push(terminal);
-      }
-    } catch (error) {
-      if (!record.sessionId) started.reject(error);
-      const terminal: WorkerEvent = record.controller.signal.aborted
-        ? { type: "cancelled", summary: "Claude query aborted" }
-        : {
-            type: "failed",
-            error: error instanceof Error ? error.message : String(error),
-          };
-      record.terminal = terminal;
-      record.queue.push(terminal);
+    } catch (caught) {
+      if (!record.sessionId) started.reject(caught);
+      error = caught;
     } finally {
-      record.queue.close();
+      this.runs.finishStream(
+        record,
+        record.controller.signal.aborted,
+        {
+          cancelled: "Claude query aborted",
+          failed: "Claude stream ended without a result",
+        },
+        error,
+      );
       record.query.close();
     }
   }
 
   watch(externalRunId: string): AsyncIterable<WorkerEvent> {
-    const record = this.runs.get(externalRunId);
-    if (!record)
-      throw new Error(`Claude run is not attached: ${externalRunId}`);
-    return record.queue;
+    return this.runs.watch(externalRunId);
   }
   async followUp(): Promise<void> {
     throw new UnsupportedCapabilityError(

@@ -1,3 +1,4 @@
+import { DrainLoop } from "../drain-loop.ts";
 import type { PhiStore } from "../db/store.ts";
 import type { JobRecord } from "../domain.ts";
 import type { GitService } from "../workspace/git.ts";
@@ -7,10 +8,8 @@ import type { CompletionService } from "./completion.ts";
 
 export class JobScheduler {
   private active = 0;
-  private stopped = false;
-  private draining = false;
-  private wakePending = false;
   private readonly watched = new Set<string>();
+  private readonly loop: DrainLoop;
 
   constructor(
     private readonly options: {
@@ -21,48 +20,35 @@ export class JobScheduler {
       workspace: string;
       concurrency: number;
     },
-  ) {}
+  ) {
+    this.loop = new DrainLoop(() => this.drainOnce());
+  }
 
   start(): void {
-    this.stopped = false;
-    this.wake();
+    this.loop.start();
   }
   stop(): void {
-    this.stopped = true;
+    this.loop.stop();
   }
   isIdle(): boolean {
-    return !this.draining && !this.wakePending;
+    return this.loop.isIdle();
   }
   wake(): void {
-    if (this.stopped) return;
-    if (this.draining) {
-      this.wakePending = true;
-      return;
-    }
-    void this.drain();
+    this.loop.wake();
   }
 
-  private async drain(): Promise<void> {
-    this.draining = true;
-    try {
-      while (!this.stopped && this.active < this.options.concurrency) {
-        const revision = await this.options.git.currentRevision();
-        if (this.stopped) break;
-        const job = this.options.store.claimNextJob(revision);
-        if (!job) break;
-        this.active += 1;
-        void this.launch(job).finally(() => {
-          this.active -= 1;
-          this.wake();
-        });
-      }
-    } finally {
-      this.draining = false;
-      if (this.wakePending) {
-        this.wakePending = false;
-        this.wake();
-      }
-    }
+  private async drainOnce(): Promise<boolean> {
+    if (this.active >= this.options.concurrency) return false;
+    const revision = await this.options.git.currentRevision();
+    if (this.loop.isStopped()) return false;
+    const job = this.options.store.claimNextJob(revision);
+    if (!job) return false;
+    this.active += 1;
+    void this.launch(job).finally(() => {
+      this.active -= 1;
+      this.wake();
+    });
+    return true;
   }
 
   private async launch(job: JobRecord): Promise<void> {
@@ -80,6 +66,8 @@ export class JobScheduler {
         }),
         cwd: this.options.workspace,
         mode: job.mode,
+        ...(job.model ? { model: job.model } : {}),
+        ...(job.effort ? { effort: job.effort } : {}),
       });
       const running = this.options.store.recordRunning(
         job.id,
