@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { schemaVersion } from "../src/db/database.ts";
 import { StateTransitionError } from "../src/errors.ts";
 import {
   acceptJob,
@@ -105,6 +106,8 @@ describe("durable repository invariants", () => {
       key: "same-dispatch",
       prompt: "one",
       mode: "mutating",
+      model: "fake-deterministic",
+      effort: "low",
     });
     const second = item.store.acceptJob({
       workspaceId: item.workspaceId,
@@ -117,6 +120,8 @@ describe("durable repository invariants", () => {
     expect(first.created).toBeTrue();
     expect(second.created).toBeFalse();
     expect(second.job.id).toBe(first.job.id);
+    expect(second.job.model).toBe("fake-deterministic");
+    expect(second.job.effort).toBe("low");
     const running = item.store.recordRunning(
       item.store.claimNextJob(null)!.id,
       "fake-dedupe",
@@ -134,11 +139,29 @@ describe("durable repository invariants", () => {
       payload: { message: "replay" },
     });
     expect(two.id).toBe(one.id);
+    expect(item.store.listJobEvents(running.id)).toEqual([
+      expect.objectContaining({ id: one.id, kind: "worker_status" }),
+    ]);
     expect(
       item.store.raw
         .query("SELECT sql FROM sqlite_master WHERE name='events_dedupe'")
         .get(),
     ).not.toBeNull();
+  });
+
+  test("schema migration persists root model and effort selection", () => {
+    const item = fixture();
+    const job = acceptJob(item, {
+      model: "test-model",
+      effort: "high",
+    });
+    expect(job.model).toBe("test-model");
+    expect(job.effort).toBe("high");
+    expect(
+      item.store.raw
+        .query("SELECT max(version) AS version FROM schema_migrations")
+        .get(),
+    ).toEqual({ version: schemaVersion });
   });
 
   test("mutating and read-only jobs are claimed without leases", () => {
@@ -158,7 +181,7 @@ describe("durable repository invariants", () => {
     expect(modes.filter((mode) => mode === "read_only")).toHaveLength(1);
   });
 
-  test("crash recovery resets event/outbox claims and makes follow-up ambiguity explicit", () => {
+  test("crash recovery resets event claims and makes follow-up ambiguity explicit", () => {
     const item = fixture();
     const source = sourceEvent(item);
     item.store.putOutbox({
@@ -168,7 +191,6 @@ describe("durable repository invariants", () => {
       idempotencyKey: "recovery-outbox",
     });
     expect(item.store.claimNextEvent()?.id).toBe(source.id);
-    expect(item.store.claimOutbox()?.status).toBe("delivering");
     const job = item.store.acceptJob({
       workspaceId: item.workspaceId,
       sourceEventId: source.id,
@@ -197,7 +219,6 @@ describe("durable repository invariants", () => {
     expect(item.store.claimFollowUp()?.id).toBe(follow.id);
     item.store.recoverClaims();
     expect(item.store.getEvent(source.id).processingStartedAt).toBeNull();
-    expect(item.store.listOutbox()[0]!.status).toBe("pending");
     expect(item.store.getFollowUp(follow.id).status).toBe("unknown");
   });
 });

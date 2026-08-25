@@ -42,17 +42,8 @@ function textOf(value: unknown): string {
 export class ClaudeWorkerAdapter implements WorkerAdapter {
   readonly id = "claude";
   readonly capabilities = {
-    watch: "live",
     continuation: "sequential",
     cancellation: "abort",
-    reconciliation: "none",
-    reasoning: "none",
-    toolEvents: true,
-    needsInput: false,
-    isolation: "none",
-    modelSelection: "per_job",
-    modelScope: "root",
-    webSearch: "sdk_managed",
   } as const;
   private readonly runs = new LiveRunTable<ClaudeRun>("Claude run");
 
@@ -102,20 +93,16 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       "max",
     ];
     const documented = [
-      ["haiku", "Claude Haiku", "fast"],
-      ["sonnet", "Claude Sonnet", "balanced"],
-      ["opus", "Claude Opus", "deep"],
-      ["fable", "Claude Fable", "deep"],
+      ["haiku", "Claude Haiku"],
+      ["sonnet", "Claude Sonnet"],
+      ["opus", "Claude Opus"],
+      ["fable", "Claude Fable"],
     ] as const;
     const models = new Map<string, WorkerModelDescriptor>();
-    for (const [id, label, tier] of documented)
+    for (const [id, label] of documented)
       models.set(id, {
         id,
         label,
-        description:
-          "Official Claude Code model-family alias; account availability is checked at launch",
-        source: "sdk_documented",
-        tier,
         effortLevels,
       });
     for (const id of new Set([
@@ -125,19 +112,13 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       models.set(id, {
         id,
         label: models.get(id)?.label ?? id,
-        ...(models.get(id)?.description
-          ? { description: models.get(id)!.description }
-          : {}),
-        source: "configured",
-        tier: models.get(id)?.tier ?? "unknown",
         effortLevels,
       });
     return {
       defaultModel: this.options.model ?? null,
       models: [...models.values()],
       defaultEffortLevels: effortLevels,
-      discovery: "best_effort",
-      note: "The root model is selectable; Claude-managed nested agents may use other models.",
+      note: "The root model is selectable; Claude-managed nested agents may use other models. Official aliases: haiku, sonnet, opus, fable.",
     };
   }
 

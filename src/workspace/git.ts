@@ -103,21 +103,6 @@ export class GitService {
     ).stdout;
   }
 
-  async findCheckpoint(checkpointId: string): Promise<string | null> {
-    const result = await runGit(
-      this.workspace,
-      ["log", "--all", "--format=%H%x00%B%x00", "-n", "200"],
-      true,
-    );
-    if (result.code !== 0) return null;
-    const entries = result.stdout.split("\0");
-    for (let index = 0; index + 1 < entries.length; index += 2) {
-      if (entries[index + 1]?.includes(`Phi-Checkpoint: ${checkpointId}`))
-        return entries[index] || null;
-    }
-    return null;
-  }
-
   checkpoint(input: {
     triggerJobId?: string;
     status: string;
@@ -125,11 +110,13 @@ export class GitService {
   }): Promise<CheckpointResult> {
     const operation = async (): Promise<CheckpointResult> => {
       const checkpointId = input.checkpointId ?? newId();
-      const existing = await this.findCheckpoint(checkpointId);
-      if (existing) return { checkpointId, commit: existing, created: false };
       const before = await this.currentRevision();
       if (!(await this.status()))
-        return { checkpointId: null, commit: before, created: false };
+        return {
+          checkpointId: input.checkpointId ?? null,
+          commit: before,
+          created: false,
+        };
       await runGit(this.workspace, ["add", "-A"]);
       const message = [
         `phi checkpoint: ${input.status}`,

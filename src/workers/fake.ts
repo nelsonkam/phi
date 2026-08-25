@@ -1,10 +1,13 @@
 import { UnsupportedCapabilityError } from "../errors.ts";
 import { newId } from "../ids.ts";
+import type { WorkerEffort } from "../domain.ts";
 import {
   AsyncQueue,
   type WorkerAdapter,
   type WorkerEvent,
+  type WorkerModelCatalog,
   type WorkerReconciliation,
+  type WorkerStatus,
 } from "./adapter.ts";
 
 interface FakeRun {
@@ -14,25 +17,45 @@ interface FakeRun {
   cancelled: boolean;
   terminal?: WorkerEvent;
   pendingQuestion?: { resolve: (text: string) => void };
+  model?: string;
+  effort?: WorkerEffort;
 }
 
 export class FakeWorkerAdapter implements WorkerAdapter {
   readonly id = "fake";
   readonly capabilities = {
-    watch: "live",
     continuation: "in_run",
     cancellation: "abort",
-    reconciliation: "dispatch_key",
-    reasoning: "summary",
-    toolEvents: true,
-    needsInput: true,
-    isolation: "none",
   } as const;
   private readonly runs = new Map<string, FakeRun>();
+
+  async status(): Promise<WorkerStatus> {
+    return {
+      readiness: "ready",
+      detail: "deterministic local development adapter",
+      interactiveAuth: false,
+    };
+  }
+
+  async modelCatalog(): Promise<WorkerModelCatalog> {
+    return {
+      defaultModel: "fake-deterministic",
+      models: [
+        {
+          id: "fake-deterministic",
+          label: "Deterministic fake",
+          effortLevels: [],
+        },
+      ],
+      defaultEffortLevels: [],
+    };
+  }
 
   async launch(input: {
     dispatchKey: string;
     prompt: string;
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<{ externalRunId: string; continuationHandle: string }> {
     const existing = [...this.runs.values()].find(
       (run) => run.dispatchKey === input.dispatchKey,
@@ -45,6 +68,8 @@ export class FakeWorkerAdapter implements WorkerAdapter {
       dispatchKey: input.dispatchKey,
       queue: new AsyncQueue(),
       cancelled: false,
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.effort ? { effort: input.effort } : {}),
     };
     this.runs.set(id, run);
     void this.execute(run, input.prompt);
@@ -89,7 +114,7 @@ export class FakeWorkerAdapter implements WorkerAdapter {
           type: "completed",
           nativeId: "terminal",
           summary: "deterministic fake completion",
-          data: { prompt },
+          data: { prompt, model: run.model, effort: run.effort },
         };
     run.terminal = terminal;
     run.queue.push(terminal);

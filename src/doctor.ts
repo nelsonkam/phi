@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { PhiConfig } from "./config.ts";
-import { PhiDatabase } from "./db/database.ts";
+import { PhiDatabase, schemaVersion } from "./db/database.ts";
 import { ensureRuntimeDirectories } from "./paths.ts";
 import { GitService } from "./workspace/git.ts";
 import { buildAdapterRegistry } from "./workers/registry.ts";
@@ -51,7 +51,7 @@ export async function doctor(config: PhiConfig): Promise<DoctorCheck[]> {
       .get() as { version: number };
     checks.push({
       name: "sqlite",
-      ok: version.version === 2,
+      ok: version.version === schemaVersion,
       detail: `${config.paths.database}; schema ${version.version}`,
     });
   } finally {

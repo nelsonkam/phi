@@ -13,13 +13,11 @@ function configInput(args: string[]): Parameters<typeof loadConfig>[0] {
   const result: Parameters<typeof loadConfig>[0] = {};
   const workspace = value(args, "--workspace");
   const runtimeDir = value(args, "--runtime");
-  const adapter = value(args, "--adapter");
   const credentialMode = value(args, "--credential-mode");
   const concurrencyText = value(args, "--concurrency");
   const coordinatorModel = value(args, "--coordinator-model");
   if (workspace) result.workspace = workspace;
   if (runtimeDir) result.runtimeDir = runtimeDir;
-  if (adapter) result.adapter = adapter;
   if (credentialMode === "native" || credentialMode === "isolated")
     result.credentialMode = credentialMode;
   else if (credentialMode)
@@ -33,7 +31,6 @@ function positionals(args: string[]): string[] {
   const flagsWithValues = new Set([
     "--workspace",
     "--runtime",
-    "--adapter",
     "--credential-mode",
     "--concurrency",
     "--coordinator-model",
@@ -66,7 +63,18 @@ async function main(): Promise<void> {
     return;
   }
   const direct = args.includes("--direct");
-  const app = await PhiApp.create(config, { directCoordinator: direct });
+  const app = await PhiApp.create(config, {
+    directCoordinator: direct,
+    ...(command === "once"
+      ? {
+          onMessage: (message) => {
+            process.stdout.write(
+              `\n[phi:${message.kind}] ${message.content}\n`,
+            );
+          },
+        }
+      : {}),
+  });
   app.start();
   const close = async () => {
     await app.close();

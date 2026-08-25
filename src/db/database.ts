@@ -3,6 +3,14 @@ import { chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { now } from "../ids.ts";
 
+const migrations = [
+  "001_initial.sql",
+  "002_job_models.sql",
+  "003_drop_outbox_delivery.sql",
+] as const;
+
+export const schemaVersion = migrations.length;
+
 export class PhiDatabase {
   readonly raw: Database;
 
@@ -23,18 +31,20 @@ export class PhiDatabase {
       .query("SELECT version FROM schema_migrations")
       .all() as { version: number }[];
     const versions = new Set(applied.map((row) => row.version));
-    if (!versions.has(1)) {
+    for (const [index, file] of migrations.entries()) {
+      const version = index + 1;
+      if (versions.has(version)) continue;
       const sql = readFileSync(
-        join(import.meta.dir, "migrations", "001_initial.sql"),
+        join(import.meta.dir, "migrations", file),
         "utf8",
       );
       this.immediate(() => {
         this.raw.exec(sql);
         this.raw
           .query(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES(1, ?)",
+            "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
           )
-          .run(now());
+          .run(version, now());
       });
     }
   }

@@ -60,7 +60,6 @@ test("Git checkpoints capture global workspace state and replay idempotently", a
   expect(first.created).toBeTrue();
   expect(first.commit).not.toBe(before);
   expect(await git.status()).toBe("");
-  expect(await git.findCheckpoint("checkpoint-one")).toBe(first.commit);
   const replay = await git.checkpoint({
     triggerJobId: "job-one",
     status: "completed",

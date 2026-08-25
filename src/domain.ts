@@ -1,4 +1,14 @@
 export type JobMode = "read_only" | "mutating";
+export const workerEfforts = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+export type WorkerEffort = (typeof workerEfforts)[number];
 export type JobStatus =
   | "queued"
   | "launching"
@@ -38,6 +48,8 @@ export interface JobRecord {
   externalRunId: string | null;
   continuationHandle: string | null;
   mode: JobMode;
+  model: string | null;
+  effort: WorkerEffort | null;
   status: JobStatus;
   prompt: string;
   observedStartCommit: string | null;
@@ -46,7 +58,6 @@ export interface JobRecord {
   cancelKey: string | null;
   cancelRequestedByEventId: string | null;
   cancelRequestedAt: string | null;
-  launchAttempts: number;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -59,12 +70,8 @@ export interface OutboxRecord {
   kind: MessageKind;
   content: string;
   metadata: Record<string, unknown>;
-  status: "pending" | "delivering" | "delivered" | "failed";
   idempotencyKey: string;
   createdAt: string;
-  deliveryStartedAt: string | null;
-  deliveredAt: string | null;
-  error: string | null;
 }
 
 export interface FollowUpRecord {
@@ -95,4 +102,12 @@ export const terminalJobStatuses = new Set<JobStatus>([
   "completed",
   "failed",
   "cancelled",
+]);
+
+export const activeJobStatuses = new Set<JobStatus>([
+  "queued",
+  "launching",
+  "running",
+  "cancelling",
+  "completing",
 ]);

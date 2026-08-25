@@ -1,6 +1,6 @@
 import { DrainLoop } from "../drain-loop.ts";
 import type { PhiStore } from "../db/store.ts";
-import type { JobRecord } from "../domain.ts";
+import { terminalJobStatuses, type JobRecord } from "../domain.ts";
 import type { GitService } from "../workspace/git.ts";
 import { buildWorkerBrief } from "../workspace/instructions.ts";
 import type { WorkerAdapterRegistry } from "../workers/adapter.ts";
@@ -83,7 +83,7 @@ export class JobScheduler {
           nativeId: "launch",
           error: error instanceof Error ? error.message : String(error),
         });
-      } else if (!["completed", "failed", "cancelled"].includes(current.status))
+      } else if (!terminalJobStatuses.has(current.status))
         this.options.store.markUnknown(
           job.id,
           error instanceof Error ? error.message : String(error),
@@ -106,9 +106,8 @@ export class JobScheduler {
     } catch (error) {
       const current = this.options.store.getJob(job.id);
       if (
-        !["completed", "failed", "cancelled", "unknown"].includes(
-          current.status,
-        )
+        !terminalJobStatuses.has(current.status) &&
+        current.status !== "unknown"
       )
         this.options.store.markUnknown(
           job.id,

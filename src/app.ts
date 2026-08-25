@@ -15,11 +15,7 @@ import { CompletionService } from "./jobs/completion.ts";
 import { FollowUpDispatcher } from "./jobs/followups.ts";
 import { RecoveryService } from "./jobs/recovery.ts";
 import { JobScheduler } from "./jobs/scheduler.ts";
-import { OutboxDispatcher } from "./messaging/dispatcher.ts";
-import {
-  ConsoleTransport,
-  type MessageTransport,
-} from "./messaging/transport.ts";
+import { activeJobStatuses, type OutboxRecord } from "./domain.ts";
 import { ensureRuntimeDirectories } from "./paths.ts";
 import { GitService } from "./workspace/git.ts";
 import type { WorkerAdapterRegistry } from "./workers/adapter.ts";
@@ -36,7 +32,6 @@ export class PhiApp {
     readonly git: GitService,
     readonly scheduler: JobScheduler,
     readonly coordinatorLoop: CoordinatorLoop,
-    readonly outbox: OutboxDispatcher,
     readonly followUps: FollowUpDispatcher,
     private readonly coordinator: CoordinatorRuntime,
   ) {
@@ -45,7 +40,10 @@ export class PhiApp {
 
   static async create(
     config: PhiConfig,
-    options: { directCoordinator?: boolean; transport?: MessageTransport } = {},
+    options: {
+      directCoordinator?: boolean;
+      onMessage?: (message: OutboxRecord) => void;
+    } = {},
   ): Promise<PhiApp> {
     ensureRuntimeDirectories(config.paths);
     const database = new PhiDatabase(config.paths.database);
@@ -60,10 +58,6 @@ export class PhiApp {
     }
     const workspace = store.registerWorkspace(config.paths.workspace);
     const adapters = buildAdapterRegistry(config);
-    const outbox = new OutboxDispatcher(
-      store,
-      options.transport ?? new ConsoleTransport(),
-    );
     const followUps = new FollowUpDispatcher(store, adapters);
     const cancellation = new CancellationService(store, adapters);
     let coordinatorLoop: CoordinatorLoop | null = null;
@@ -87,8 +81,8 @@ export class PhiApp {
       scheduler,
       followUps,
       cancellation,
-      outbox,
       adapters,
+      ...(options.onMessage ? { onMessage: options.onMessage } : {}),
     });
     const coordinator = options.directCoordinator
       ? new DirectCoordinatorRuntime(tools)
@@ -118,14 +112,12 @@ export class PhiApp {
       git,
       scheduler,
       coordinatorLoop,
-      outbox,
       followUps,
       coordinator,
     );
   }
 
   start(): void {
-    this.outbox.start();
     this.followUps.start();
     this.coordinatorLoop.start();
     this.scheduler.start();
@@ -145,28 +137,15 @@ export class PhiApp {
     while (Date.now() < deadline) {
       const jobs = this.store
         .listJobs()
-        .some(
-          (job) =>
-            ![
-              "completed",
-              "failed",
-              "cancelled",
-              "unknown",
-              "needs_input",
-            ].includes(job.status),
-        );
+        .some((job) => activeJobStatuses.has(job.status));
       const events = this.store
         .listEvents()
         .some((event) => event.visibleAt && !event.processedAt);
-      const outbox = this.store
-        .listOutbox()
-        .some((message) => message.status !== "delivered");
       const servicesIdle =
         this.scheduler.isIdle() &&
         this.coordinatorLoop.isIdle() &&
-        this.outbox.isIdle() &&
         this.followUps.isIdle();
-      if (!jobs && !events && !outbox && servicesIdle) return;
+      if (!jobs && !events && servicesIdle) return;
       await Bun.sleep(10);
     }
     throw new Error(`Phi did not become idle within ${timeoutMs}ms`);
@@ -174,7 +153,6 @@ export class PhiApp {
   async close(): Promise<void> {
     this.scheduler.stop();
     this.followUps.stop();
-    this.outbox.stop();
     this.coordinatorLoop.stop();
     await this.coordinator.close();
     this.database.close();

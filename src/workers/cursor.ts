@@ -28,17 +28,8 @@ interface CursorRun extends LiveRun {
 export class CursorWorkerAdapter implements WorkerAdapter {
   readonly id = "cursor";
   readonly capabilities = {
-    watch: "live",
     continuation: "sequential",
     cancellation: "remote",
-    reconciliation: "external_run_id",
-    reasoning: "summary",
-    toolEvents: true,
-    needsInput: false,
-    isolation: "none",
-    modelSelection: "per_job",
-    modelScope: "root",
-    webSearch: "unknown",
   } as const;
   private readonly runs = new LiveRunTable<CursorRun>("Cursor run");
   private readonly agents = new Map<string, SDKAgent>();
@@ -98,7 +89,6 @@ export class CursorWorkerAdapter implements WorkerAdapter {
       this.options.model,
       ...(this.options.models ?? []),
     ]).values()) {
-      if (!/grok|composer/i.test(id)) continue;
       models.set(id, {
         id,
         label:
@@ -108,8 +98,6 @@ export class CursorWorkerAdapter implements WorkerAdapter {
             "composer-2.5": "Composer 2.5",
             "composer-2": "Composer 2",
           }[id] ?? id,
-        source: "configured",
-        tier: "unknown",
         effortLevels: [],
       });
     }
@@ -117,7 +105,6 @@ export class CursorWorkerAdapter implements WorkerAdapter {
       defaultModel: this.options.model,
       models: [...models.values()],
       defaultEffortLevels: [],
-      discovery: "configured",
       note: "Phi intentionally restricts Cursor to the SDK-validated Grok and Composer model families.",
     };
   }

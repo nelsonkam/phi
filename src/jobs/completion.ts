@@ -1,5 +1,5 @@
 import type { PhiStore } from "../db/store.ts";
-import type { JobRecord } from "../domain.ts";
+import { terminalJobStatuses, type JobRecord } from "../domain.ts";
 import { workerDedupeKey } from "../ids.ts";
 import type { GitService } from "../workspace/git.ts";
 import type { WorkerEvent } from "../workers/adapter.ts";
@@ -63,9 +63,7 @@ export class CompletionService {
     });
     if (
       !begun.created &&
-      ["completed", "failed", "cancelled"].includes(
-        this.store.getJob(job.id).status,
-      )
+      terminalJobStatuses.has(this.store.getJob(job.id).status)
     )
       return true;
     const status =

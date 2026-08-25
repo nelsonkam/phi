@@ -7,7 +7,7 @@ import {
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { WorkerEffort } from "../domain.ts";
+import { workerEfforts, type WorkerEffort } from "../domain.ts";
 import { UnsupportedCapabilityError } from "../errors.ts";
 import type {
   WorkerAdapter,
@@ -44,17 +44,8 @@ export function codexCompletionEvent(
 export class CodexWorkerAdapter implements WorkerAdapter {
   readonly id = "codex";
   readonly capabilities = {
-    watch: "live",
     continuation: "sequential",
     cancellation: "abort",
-    reconciliation: "none",
-    reasoning: "summary",
-    toolEvents: true,
-    needsInput: false,
-    isolation: "optional_sdk_sandbox",
-    modelSelection: "per_job",
-    modelScope: "root",
-    webSearch: "sdk_managed",
   } as const;
   private readonly runs = new LiveRunTable<CodexRun>("Codex thread");
   private readonly codex: Codex;
@@ -104,15 +95,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async modelCatalog(): Promise<WorkerModelCatalog> {
-    const effortLevels: WorkerEffort[] = [
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ];
     const ids = new Set([
       ...(this.options.models ?? []),
       ...(this.options.model ? [this.options.model] : []),
@@ -122,14 +104,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       models: [...ids].map((id) => ({
         id,
         label: id,
-        description:
-          "Host-configured Codex model; the SDK does not expose model discovery",
-        source: "configured" as const,
-        tier: "unknown" as const,
-        effortLevels,
+        effortLevels: [...workerEfforts],
       })),
-      defaultEffortLevels: effortLevels,
-      discovery: "configured",
+      defaultEffortLevels: [...workerEfforts],
       note: ids.size
         ? "Selectable models come from PHI_CODEX_MODELS."
         : "The Codex SDK exposes model selection but not catalog discovery; set PHI_CODEX_MODELS to enable explicit choices.",

@@ -1,14 +1,35 @@
-import type { JobMode } from "../domain.ts";
+import type { JobMode, WorkerEffort } from "../domain.ts";
 
 export interface AdapterCapabilities {
-  watch: "live" | "terminal_only";
   continuation: "none" | "sequential" | "in_run";
   cancellation: "none" | "abort" | "remote";
-  reconciliation: "none" | "external_run_id" | "dispatch_key";
-  reasoning: "none" | "summary";
-  toolEvents: boolean;
-  needsInput: boolean;
-  isolation: "none" | "optional_sdk_sandbox" | "remote_sandbox";
+}
+
+export interface WorkerModelDescriptor {
+  id: string;
+  label: string;
+  effortLevels: WorkerEffort[];
+}
+
+export interface WorkerModelCatalog {
+  defaultModel: string | null;
+  models: WorkerModelDescriptor[];
+  defaultEffortLevels: WorkerEffort[];
+  note?: string;
+}
+
+export type WorkerReadiness = "ready" | "login_required" | "unverified";
+
+export interface WorkerStatus {
+  readiness: WorkerReadiness;
+  detail: string;
+  interactiveAuth: boolean;
+}
+
+export interface WorkerDescriptor extends WorkerStatus {
+  id: string;
+  capabilities: AdapterCapabilities;
+  modelCatalog: WorkerModelCatalog;
 }
 
 export type WorkerEvent =
@@ -60,6 +81,8 @@ export interface WorkerAdapter {
     prompt: string;
     cwd: string;
     mode: JobMode;
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<{ externalRunId: string; continuationHandle?: string }>;
   watch(externalRunId: string): AsyncIterable<WorkerEvent>;
   followUp(continuationHandle: string, text: string): Promise<void>;
@@ -67,7 +90,15 @@ export interface WorkerAdapter {
   reconcile(input: {
     dispatchKey: string;
     externalRunId?: string;
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<WorkerReconciliation>;
+  modelCatalog(): Promise<WorkerModelCatalog>;
+  status?(): Promise<WorkerStatus>;
+  authenticate?(options?: {
+    onLoginUrl?: (url: string) => void;
+    signal?: AbortSignal;
+  }): Promise<WorkerStatus>;
 }
 
 export class AsyncQueue<T> implements AsyncIterable<T> {
@@ -114,5 +145,82 @@ export class WorkerAdapterRegistry {
   }
   list(): WorkerAdapter[] {
     return [...this.adapters.values()];
+  }
+  async describeAll(): Promise<WorkerDescriptor[]> {
+    return Promise.all(
+      this.list().map(async (adapter) => {
+        let status: WorkerStatus;
+        try {
+          status = adapter.status
+            ? await adapter.status()
+            : {
+                readiness: "unverified",
+                detail: "authentication is checked when a job launches",
+                interactiveAuth: false,
+              };
+        } catch (error) {
+          status = {
+            readiness: "unverified",
+            detail: `status check failed: ${error instanceof Error ? error.message : String(error)}`,
+            interactiveAuth: Boolean(adapter.authenticate),
+          };
+        }
+        let modelCatalog: WorkerModelCatalog;
+        try {
+          modelCatalog = await adapter.modelCatalog();
+        } catch (error) {
+          modelCatalog = {
+            defaultModel: null,
+            models: [],
+            defaultEffortLevels: [],
+            note: `model discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+        return {
+          id: adapter.id,
+          capabilities: adapter.capabilities,
+          modelCatalog,
+          ...status,
+        };
+      }),
+    );
+  }
+
+  async resolveSelection(
+    id: string,
+    input: { model?: string; effort?: WorkerEffort },
+  ): Promise<{ model?: string; effort?: WorkerEffort }> {
+    const adapter = this.get(id);
+    const catalog = await adapter.modelCatalog();
+    const model = input.model ?? catalog.defaultModel ?? undefined;
+    const descriptor = model
+      ? catalog.models.find((candidate) => candidate.id === model)
+      : undefined;
+    if (model && !descriptor)
+      throw new Error(
+        `${id} model is not selectable: ${model}; call list_workers for the current catalog`,
+      );
+    const effortLevels =
+      descriptor?.effortLevels ?? catalog.defaultEffortLevels;
+    if (input.effort && !effortLevels.includes(input.effort))
+      throw new Error(
+        `${id} effort ${input.effort} is not supported${model ? ` by ${model}` : " by its default model"}`,
+      );
+    return {
+      ...(model ? { model } : {}),
+      ...(input.effort ? { effort: input.effort } : {}),
+    };
+  }
+  async authenticate(
+    id: string,
+    options?: {
+      onLoginUrl?: (url: string) => void;
+      signal?: AbortSignal;
+    },
+  ): Promise<WorkerStatus> {
+    const adapter = this.get(id);
+    if (!adapter.authenticate)
+      throw new Error(`${id} does not expose interactive SDK authentication`);
+    return adapter.authenticate(options);
   }
 }

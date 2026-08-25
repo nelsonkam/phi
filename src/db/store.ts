@@ -8,6 +8,7 @@ import type {
   JobStatus,
   MessageKind,
   OutboxRecord,
+  WorkerEffort,
 } from "../domain.ts";
 import { terminalJobStatuses } from "../domain.ts";
 import { NotFoundError, StateTransitionError } from "../errors.ts";
@@ -51,6 +52,8 @@ function jobFrom(row: Row): JobRecord {
     externalRunId: nullable(row.external_run_id),
     continuationHandle: nullable(row.continuation_handle),
     mode: s(row.mode) as JobMode,
+    model: nullable(row.model),
+    effort: nullable(row.effort) as WorkerEffort | null,
     status: s(row.status) as JobStatus,
     prompt: s(row.prompt),
     observedStartCommit: nullable(row.observed_start_commit),
@@ -59,7 +62,6 @@ function jobFrom(row: Row): JobRecord {
     cancelKey: nullable(row.cancel_key),
     cancelRequestedByEventId: nullable(row.cancel_requested_by_event_id),
     cancelRequestedAt: nullable(row.cancel_requested_at),
-    launchAttempts: Number(row.launch_attempts),
     createdAt: s(row.created_at),
     startedAt: nullable(row.started_at),
     finishedAt: nullable(row.finished_at),
@@ -74,12 +76,8 @@ function outboxFrom(row: Row): OutboxRecord {
     kind: s(row.kind) as MessageKind,
     content: s(row.content),
     metadata: parse(row.metadata_json),
-    status: s(row.status) as OutboxRecord["status"],
     idempotencyKey: s(row.idempotency_key),
     createdAt: s(row.created_at),
-    deliveryStartedAt: nullable(row.delivery_started_at),
-    deliveredAt: nullable(row.delivered_at),
-    error: nullable(row.error),
   };
 }
 
@@ -154,6 +152,14 @@ export class PhiStore {
     ).map(eventFrom);
   }
 
+  listJobEvents(jobId: string): EventRecord[] {
+    return (
+      this.raw
+        .query("SELECT * FROM events WHERE job_id=? ORDER BY created_at,id")
+        .all(jobId) as Row[]
+    ).map(eventFrom);
+  }
+
   claimNextEvent(): EventRecord | null {
     return this.database.immediate(() => {
       const row = this.raw
@@ -211,6 +217,8 @@ export class PhiStore {
     key: string;
     prompt: string;
     mode: JobMode;
+    model?: string;
+    effort?: WorkerEffort;
   }): { job: JobRecord; created: boolean } {
     return this.database.immediate(() => {
       const existing = this.raw
@@ -222,7 +230,7 @@ export class PhiStore {
       const timestamp = now();
       this.raw
         .query(
-          `INSERT INTO jobs(id,workspace_id,source_event_id,adapter,dispatch_key,mode,status,prompt,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?,?)`,
+          `INSERT INTO jobs(id,workspace_id,source_event_id,adapter,dispatch_key,mode,model,effort,status,prompt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?,?,?)`,
         )
         .run(
           id,
@@ -231,6 +239,8 @@ export class PhiStore {
           input.adapter,
           input.key,
           input.mode,
+          input.model ?? null,
+          input.effort ?? null,
           input.prompt,
           timestamp,
           timestamp,
@@ -275,7 +285,7 @@ export class PhiStore {
       const timestamp = now();
       const result = this.raw
         .query(
-          `UPDATE jobs SET status='launching',launch_attempts=launch_attempts+1,observed_start_commit=?,started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status='queued'`,
+          `UPDATE jobs SET status='launching',observed_start_commit=?,started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status='queued'`,
         )
         .run(observedStartCommit, timestamp, timestamp, row.id);
       return result.changes === 1 ? this.getJob(row.id) : null;
@@ -460,7 +470,7 @@ export class PhiStore {
       const id = newId();
       this.raw
         .query(
-          `INSERT INTO outbox(id,event_id,kind,content,metadata_json,status,idempotency_key,created_at) VALUES(?,?,?,?,?,'pending',?,?)`,
+          `INSERT INTO outbox(id,event_id,kind,content,metadata_json,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -489,38 +499,6 @@ export class PhiStore {
         .query("SELECT * FROM outbox ORDER BY created_at,id")
         .all() as Row[]
     ).map(outboxFrom);
-  }
-
-  claimOutbox(): OutboxRecord | null {
-    return this.database.immediate(() => {
-      const row = this.raw
-        .query(
-          "SELECT id FROM outbox WHERE status IN ('pending','failed') ORDER BY created_at,id LIMIT 1",
-        )
-        .get() as { id: string } | null;
-      if (!row) return null;
-      const result = this.raw
-        .query(
-          "UPDATE outbox SET status='delivering',delivery_started_at=?,error=NULL WHERE id=? AND status IN ('pending','failed')",
-        )
-        .run(now(), row.id);
-      return result.changes === 1 ? this.getOutbox(row.id) : null;
-    });
-  }
-
-  settleOutbox(id: string, error?: string): void {
-    if (error)
-      this.raw
-        .query(
-          "UPDATE outbox SET status='failed',error=? WHERE id=? AND status='delivering'",
-        )
-        .run(error, id);
-    else
-      this.raw
-        .query(
-          "UPDATE outbox SET status='delivered',delivered_at=?,error=NULL WHERE id=? AND status='delivering'",
-        )
-        .run(now(), id);
   }
 
   enqueueFollowUp(input: {
@@ -692,9 +670,6 @@ export class PhiStore {
     this.database.immediate(() => {
       this.raw.exec(
         "UPDATE events SET processing_started_at=NULL WHERE processed_at IS NULL",
-      );
-      this.raw.exec(
-        "UPDATE outbox SET status='pending',delivery_started_at=NULL WHERE status='delivering'",
       );
       this.raw.exec(
         "UPDATE job_followups SET status='unknown',error=COALESCE(error,'process stopped during follow-up delivery') WHERE status='sending'",

@@ -10,8 +10,6 @@ export interface PhiPaths {
   sessionsDir: string;
   coordinatorSessionsDir: string;
   workerSessionsDir: string;
-  logsDir: string;
-  tmpDir: string;
 }
 
 export function resolvePaths(
@@ -39,8 +37,6 @@ export function resolvePaths(
     sessionsDir: join(runtimeDir, "sessions"),
     coordinatorSessionsDir: join(runtimeDir, "sessions", "coordinator"),
     workerSessionsDir: join(runtimeDir, "sessions", "workers"),
-    logsDir: join(runtimeDir, "logs"),
-    tmpDir: join(runtimeDir, "tmp"),
   };
 }
 
@@ -51,8 +47,6 @@ export function ensureRuntimeDirectories(paths: PhiPaths): void {
     paths.sessionsDir,
     paths.coordinatorSessionsDir,
     paths.workerSessionsDir,
-    paths.logsDir,
-    paths.tmpDir,
   ]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
     chmodSync(path, 0o700);
