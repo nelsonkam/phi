@@ -1,18 +1,13 @@
 import { useEffect, useState } from "react";
+import { NavLink, Outlet } from "react-router";
 import { Bot, Inbox } from "lucide-react";
 import type { Channel } from "@/shared/types";
 import { fetchChannels } from "@/web/lib/api";
 import { connectDeltaSocket, type ConnectionStatus } from "@/web/lib/ws";
 import { cn } from "@/web/lib/utils";
 
-type ActiveView =
-  | { kind: "inbox" }
-  | { kind: "agents" }
-  | { kind: "channel"; channelId: string };
-
 export function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [view, setView] = useState<ActiveView>({ kind: "inbox" });
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
 
   useEffect(() => {
@@ -22,20 +17,6 @@ export function App() {
       onStatus: setStatus,
     });
   }, []);
-
-  const activeChannel =
-    view.kind === "channel"
-      ? channels.find((c) => c.id === view.channelId)
-      : undefined;
-
-  const title =
-    view.kind === "inbox"
-      ? "Inbox"
-      : view.kind === "agents"
-        ? "Agents"
-        : activeChannel
-          ? `# ${activeChannel.name}`
-          : "No channel";
 
   return (
     <div className="flex h-screen">
@@ -53,81 +34,78 @@ export function App() {
           />
         </header>
         <nav className="flex-1 overflow-y-auto p-2">
-          <SidebarItem
-            active={view.kind === "inbox"}
-            onClick={() => setView({ kind: "inbox" })}
-          >
+          <SidebarLink to="/" end>
             <Inbox className="size-4" />
             Inbox
-          </SidebarItem>
-          <SidebarItem
-            active={view.kind === "agents"}
-            onClick={() => setView({ kind: "agents" })}
-          >
+          </SidebarLink>
+          <SidebarLink to="/agents">
             <Bot className="size-4" />
             Agents
-          </SidebarItem>
+          </SidebarLink>
 
           <p className="mt-4 px-2 py-1.5 text-xs font-medium text-muted-foreground">
             Channels
           </p>
           {channels.map((channel) => (
-            <SidebarItem
-              key={channel.id}
-              active={view.kind === "channel" && view.channelId === channel.id}
-              onClick={() => setView({ kind: "channel", channelId: channel.id })}
-            >
+            <SidebarLink key={channel.id} to={`/c/${channel.id}`}>
               <span className="w-4 text-center text-muted-foreground">#</span>
               {channel.name}
-            </SidebarItem>
+            </SidebarLink>
           ))}
         </nav>
       </aside>
 
-      <main className="flex flex-1 flex-col">
-        <header className="flex h-12 items-center border-b px-4">
-          <h1 className="text-sm font-medium">{title}</h1>
-        </header>
-        <section className="flex flex-1 items-center justify-center">
-          <EmptyState view={view} />
-        </section>
-      </main>
+      <Outlet />
     </div>
   );
 }
 
-function SidebarItem({
-  active,
-  onClick,
+function SidebarLink({
+  to,
+  end,
   children,
 }: {
-  active: boolean;
-  onClick: () => void;
+  to: string;
+  end?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-        active && "bg-accent text-accent-foreground",
-      )}
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) =>
+        cn(
+          "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+          isActive && "bg-accent text-accent-foreground",
+        )
+      }
     >
       {children}
-    </button>
+    </NavLink>
   );
 }
 
-function EmptyState({ view }: { view: ActiveView }) {
-  const copy =
-    view.kind === "inbox"
-      ? "Nothing needs your attention."
-      : view.kind === "agents"
-        ? "No agents configured yet."
-        : "No threads yet.";
+export function Page({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="text-center">
-      <p className="text-sm text-muted-foreground">{copy}</p>
+    <main className="flex flex-1 flex-col">
+      <header className="flex h-12 items-center border-b px-4">
+        <h1 className="text-sm font-medium">{title}</h1>
+      </header>
+      <section className="flex flex-1 flex-col">{children}</section>
+    </main>
+  );
+}
+
+export function EmptyState({ message }: { message: string }) {
+  return (
+    <div className="flex flex-1 items-center justify-center">
+      <p className="text-sm text-muted-foreground">{message}</p>
     </div>
   );
 }

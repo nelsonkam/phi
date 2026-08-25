@@ -16,7 +16,7 @@ export function startServer(): void {
       console: true,
     },
     routes: {
-      "/": index,
+      "/*": index,
       "/api/v1/health": () =>
         Response.json({ ok: true, workspaceId: workspace.id }),
       "/api/v1/channels": () =>
