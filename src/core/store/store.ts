@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { migrate } from "../../db/migrate";
-import type { Channel, Workspace } from "../../shared/types";
+import { migrate } from "@/db/migrate";
+import type { Channel, Workspace } from "@/shared/types";
 
 const DEFAULT_WORKSPACE_ID = "ws_default";
 const DEFAULT_CHANNEL_ID = "ch_general";

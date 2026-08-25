@@ -1,4 +1,4 @@
-import type { Channel } from "../../shared/types";
+import type { Channel } from "@/shared/types";
 
 // The only file (with ws.ts) that knows the transport. Everything else
 // consumes typed results, so a future mobile client mirrors just these two.

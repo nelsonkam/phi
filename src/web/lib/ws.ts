@@ -1,4 +1,4 @@
-import type { ServerFrame } from "../../shared/types";
+import type { ServerFrame } from "@/shared/types";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 

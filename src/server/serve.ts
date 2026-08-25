@@ -1,6 +1,6 @@
-import index from "../web/index.html";
-import { PhiStore } from "../core/store/store";
-import type { ServerFrame } from "../shared/types";
+import index from "@/web/index.html";
+import { PhiStore } from "@/core/store/store";
+import type { ServerFrame } from "@/shared/types";
 
 const DEFAULT_PORT = 3141;
 
