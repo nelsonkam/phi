@@ -1,5 +1,9 @@
 import type { PhiStore } from "../db/store.ts";
-import { terminalJobStatuses, type JobRecord } from "../domain.ts";
+import {
+  terminalJobStatuses,
+  type EventRecord,
+  type JobRecord,
+} from "../domain.ts";
 import { workerDedupeKey } from "../ids.ts";
 import type { GitService } from "../workspace/git.ts";
 import type { WorkerEvent } from "../workers/adapter.ts";
@@ -8,9 +12,42 @@ export class CompletionService {
   constructor(
     private readonly store: PhiStore,
     private readonly git: GitService,
-    private readonly workspaceId: string,
     private readonly wakeCoordinator: () => void,
   ) {}
+
+  /**
+   * Durably closes a job around a terminal worker event: checkpoint the
+   * workspace, then reveal the terminal event. Shared by live observation
+   * and startup recovery.
+   */
+  async finalize(job: JobRecord, event: EventRecord): Promise<void> {
+    const status =
+      event.kind === "worker_completed"
+        ? "completed"
+        : event.kind === "worker_cancelled"
+          ? "cancelled"
+          : "failed";
+    const checkpoint = await this.git.checkpoint({
+      triggerJobId: job.id,
+      status,
+      checkpointId: event.id,
+    });
+    if (checkpoint.commit && checkpoint.checkpointId)
+      this.store.recordCheckpoint({
+        id: checkpoint.checkpointId,
+        commitSha: checkpoint.commit,
+        status,
+      });
+    this.store.finalizeCompletion({
+      jobId: job.id,
+      eventId: event.id,
+      status,
+      observedTerminalCommit: checkpoint.commit,
+      ...(status === "failed"
+        ? { error: String(event.payload.error ?? "worker failed") }
+        : {}),
+    });
+  }
 
   async observe(job: JobRecord, event: WorkerEvent): Promise<boolean> {
     const externalRunId = job.externalRunId ?? job.dispatchKey;
@@ -66,32 +103,7 @@ export class CompletionService {
       terminalJobStatuses.has(this.store.getJob(job.id).status)
     )
       return true;
-    const status =
-      event.type === "completed"
-        ? "completed"
-        : event.type === "failed"
-          ? "failed"
-          : "cancelled";
-    const checkpoint = await this.git.checkpoint({
-      triggerJobId: job.id,
-      status,
-      checkpointId: begun.event.id,
-    });
-    if (checkpoint.commit && checkpoint.checkpointId)
-      this.store.recordCheckpoint({
-        id: checkpoint.checkpointId,
-        workspaceId: this.workspaceId,
-        commitSha: checkpoint.commit,
-        triggerJobId: job.id,
-        status,
-      });
-    this.store.finalizeCompletion({
-      jobId: job.id,
-      eventId: begun.event.id,
-      status,
-      observedTerminalCommit: checkpoint.commit,
-      ...(event.type === "failed" ? { error: event.error } : {}),
-    });
+    await this.finalize(this.store.getJob(job.id), begun.event);
     this.wakeCoordinator();
     return true;
   }

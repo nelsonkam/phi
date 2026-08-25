@@ -2,16 +2,14 @@ import type { SQLQueryBindings } from "bun:sqlite";
 import type {
   EventRecord,
   FollowUpRecord,
-  GitCheckpointRecord,
   JobMode,
   JobRecord,
   JobStatus,
   MessageKind,
-  OutboxRecord,
+  MessageRecord,
   WorkerEffort,
 } from "../domain.ts";
 import { terminalJobStatuses } from "../domain.ts";
-import { NotFoundError, StateTransitionError } from "../errors.ts";
 import { newId, now } from "../ids.ts";
 import type { PhiDatabase } from "./database.ts";
 
@@ -22,6 +20,8 @@ const nullable = (value: unknown): string | null =>
   value === null || value === undefined ? null : String(value);
 const parse = (value: unknown): Record<string, unknown> =>
   JSON.parse(String(value)) as Record<string, unknown>;
+const missing = (what: string, id: string): Error =>
+  new Error(`${what} not found: ${id}`);
 
 function eventFrom(row: Row): EventRecord {
   return {
@@ -45,8 +45,6 @@ function eventFrom(row: Row): EventRecord {
 function jobFrom(row: Row): JobRecord {
   return {
     id: s(row.id),
-    workspaceId: s(row.workspace_id),
-    sourceEventId: s(row.source_event_id),
     adapter: s(row.adapter),
     dispatchKey: s(row.dispatch_key),
     externalRunId: nullable(row.external_run_id),
@@ -56,12 +54,9 @@ function jobFrom(row: Row): JobRecord {
     effort: nullable(row.effort) as WorkerEffort | null,
     status: s(row.status) as JobStatus,
     prompt: s(row.prompt),
-    observedStartCommit: nullable(row.observed_start_commit),
     observedTerminalCommit: nullable(row.observed_terminal_commit),
     error: nullable(row.error),
     cancelKey: nullable(row.cancel_key),
-    cancelRequestedByEventId: nullable(row.cancel_requested_by_event_id),
-    cancelRequestedAt: nullable(row.cancel_requested_at),
     createdAt: s(row.created_at),
     startedAt: nullable(row.started_at),
     finishedAt: nullable(row.finished_at),
@@ -69,7 +64,7 @@ function jobFrom(row: Row): JobRecord {
   };
 }
 
-function outboxFrom(row: Row): OutboxRecord {
+function messageFrom(row: Row): MessageRecord {
   return {
     id: s(row.id),
     eventId: nullable(row.event_id),
@@ -85,7 +80,6 @@ function followUpFrom(row: Row): FollowUpRecord {
   return {
     id: s(row.id),
     jobId: s(row.job_id),
-    sourceEventId: s(row.source_event_id),
     idempotencyKey: s(row.idempotency_key),
     externalRunId: s(row.external_run_id),
     continuationHandle: s(row.continuation_handle),
@@ -105,42 +99,31 @@ export class PhiStore {
     return this.database.raw;
   }
 
-  registerWorkspace(path: string): { id: string; path: string } {
-    return this.database.immediate(() => {
-      const existing = this.raw
-        .query("SELECT * FROM workspaces WHERE path = ?")
-        .get(path) as Row | null;
-      if (existing) return { id: s(existing.id), path: s(existing.path) };
-      const id = newId();
-      const timestamp = now();
-      this.raw
-        .query(
-          "INSERT INTO workspaces(id,path,created_at,updated_at) VALUES(?,?,?,?)",
-        )
-        .run(id, path, timestamp, timestamp);
-      return { id, path };
-    });
-  }
-
   acceptUserMessage(
     content: string,
     metadata: Record<string, unknown> = {},
   ): EventRecord {
     const id = newId();
     const timestamp = now();
-    this.raw
-      .query(
-        `INSERT INTO events(id,source,kind,payload_json,obligation_policy,created_at,visible_at) VALUES(?,'user','user_message',?,'outbox',?,?)`,
-      )
-      .run(id, JSON.stringify({ content, ...metadata }), timestamp, timestamp);
-    return this.getEvent(id);
+    return eventFrom(
+      this.raw
+        .query(
+          `INSERT INTO events(id,source,kind,payload_json,obligation_policy,created_at,visible_at) VALUES(?,'user','user_message',?,'outbox',?,?) RETURNING *`,
+        )
+        .get(
+          id,
+          JSON.stringify({ content, ...metadata }),
+          timestamp,
+          timestamp,
+        ) as Row,
+    );
   }
 
   getEvent(id: string): EventRecord {
     const row = this.raw
       .query("SELECT * FROM events WHERE id = ?")
       .get(id) as Row | null;
-    if (!row) throw new NotFoundError(`event not found: ${id}`);
+    if (!row) throw missing("event", id);
     return eventFrom(row);
   }
 
@@ -195,12 +178,10 @@ export class PhiStore {
       if (event.processedAt) return;
       if (event.obligationPolicy === "outbox") {
         const row = this.raw
-          .query("SELECT count(*) AS count FROM outbox WHERE event_id=?")
+          .query("SELECT count(*) AS count FROM messages WHERE event_id=?")
           .get(id) as { count: number };
         if (row.count < 1)
-          throw new StateTransitionError(
-            `event ${id} requires an outbox message`,
-          );
+          throw new Error(`event ${id} requires an outbox message`);
       }
       this.raw
         .query(
@@ -211,8 +192,6 @@ export class PhiStore {
   }
 
   acceptJob(input: {
-    workspaceId: string;
-    sourceEventId: string;
     adapter: string;
     key: string;
     prompt: string;
@@ -225,17 +204,14 @@ export class PhiStore {
         .query("SELECT * FROM jobs WHERE dispatch_key=?")
         .get(input.key) as Row | null;
       if (existing) return { job: jobFrom(existing), created: false };
-      this.getEvent(input.sourceEventId);
       const id = newId();
       const timestamp = now();
-      this.raw
+      const row = this.raw
         .query(
-          `INSERT INTO jobs(id,workspace_id,source_event_id,adapter,dispatch_key,mode,model,effort,status,prompt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?,?,?)`,
+          `INSERT INTO jobs(id,adapter,dispatch_key,mode,model,effort,status,prompt,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?,?) RETURNING *`,
         )
-        .run(
+        .get(
           id,
-          input.workspaceId,
-          input.sourceEventId,
           input.adapter,
           input.key,
           input.mode,
@@ -244,8 +220,8 @@ export class PhiStore {
           input.prompt,
           timestamp,
           timestamp,
-        );
-      return { job: this.getJob(id), created: true };
+        ) as Row;
+      return { job: jobFrom(row), created: true };
     });
   }
 
@@ -253,7 +229,7 @@ export class PhiStore {
     const row = this.raw
       .query("SELECT * FROM jobs WHERE id=?")
       .get(id) as Row | null;
-    if (!row) throw new NotFoundError(`job not found: ${id}`);
+    if (!row) throw missing("job", id);
     return jobFrom(row);
   }
 
@@ -274,7 +250,7 @@ export class PhiStore {
     ).map(jobFrom);
   }
 
-  claimNextJob(observedStartCommit: string | null): JobRecord | null {
+  claimNextJob(): JobRecord | null {
     return this.database.immediate(() => {
       const row = this.raw
         .query(
@@ -285,9 +261,9 @@ export class PhiStore {
       const timestamp = now();
       const result = this.raw
         .query(
-          `UPDATE jobs SET status='launching',observed_start_commit=?,started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status='queued'`,
+          `UPDATE jobs SET status='launching',started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status='queued'`,
         )
-        .run(observedStartCommit, timestamp, timestamp, row.id);
+        .run(timestamp, timestamp, row.id);
       return result.changes === 1 ? this.getJob(row.id) : null;
     });
   }
@@ -302,8 +278,7 @@ export class PhiStore {
         `UPDATE jobs SET status='running',external_run_id=?,continuation_handle=?,updated_at=? WHERE id=? AND status='launching'`,
       )
       .run(externalRunId, continuationHandle ?? null, now(), id);
-    if (result.changes !== 1)
-      throw new StateTransitionError(`job ${id} is not launching`);
+    if (result.changes !== 1) throw new Error(`job ${id} is not launching`);
     return this.getJob(id);
   }
 
@@ -329,21 +304,22 @@ export class PhiStore {
     if (existing) return eventFrom(existing);
     const id = newId();
     const timestamp = now();
-    this.raw
-      .query(
-        `INSERT INTO events(id,job_id,source,kind,dedupe_key,payload_json,obligation_policy,created_at,visible_at,processed_at) VALUES(?,?,'worker',?,?,?,'none',?,?,?)`,
-      )
-      .run(
-        id,
-        input.jobId,
-        input.kind,
-        input.dedupeKey,
-        JSON.stringify(input.payload),
-        timestamp,
-        input.visible ? timestamp : null,
-        input.visible ? null : timestamp,
-      );
-    return this.getEvent(id);
+    return eventFrom(
+      this.raw
+        .query(
+          `INSERT INTO events(id,job_id,source,kind,dedupe_key,payload_json,obligation_policy,created_at,visible_at,processed_at) VALUES(?,?,'worker',?,?,?,'none',?,?,?) RETURNING *`,
+        )
+        .get(
+          id,
+          input.jobId,
+          input.kind,
+          input.dedupeKey,
+          JSON.stringify(input.payload),
+          timestamp,
+          input.visible ? timestamp : null,
+          input.visible ? null : timestamp,
+        ) as Row,
+    );
   }
 
   recordNeedsInput(input: {
@@ -359,27 +335,29 @@ export class PhiStore {
       if (existing) return eventFrom(existing);
       const job = this.getJob(input.jobId);
       if (terminalJobStatuses.has(job.status))
-        throw new StateTransitionError(`job ${job.id} is terminal`);
+        throw new Error(`job ${job.id} is terminal`);
       const id = newId();
       const timestamp = now();
-      this.raw
-        .query(
-          `INSERT INTO events(id,job_id,source,kind,dedupe_key,payload_json,obligation_policy,created_at,visible_at) VALUES(?,?,'worker','worker_needs_input',?,?,'outbox',?,?)`,
-        )
-        .run(
-          id,
-          job.id,
-          input.dedupeKey,
-          JSON.stringify(input.payload),
-          timestamp,
-          timestamp,
-        );
+      const event = eventFrom(
+        this.raw
+          .query(
+            `INSERT INTO events(id,job_id,source,kind,dedupe_key,payload_json,obligation_policy,created_at,visible_at) VALUES(?,?,'worker','worker_needs_input',?,?,'outbox',?,?) RETURNING *`,
+          )
+          .get(
+            id,
+            job.id,
+            input.dedupeKey,
+            JSON.stringify(input.payload),
+            timestamp,
+            timestamp,
+          ) as Row,
+      );
       this.raw
         .query(
           "UPDATE jobs SET status='needs_input',continuation_handle=?,updated_at=? WHERE id=? AND status='running'",
         )
         .run(input.continuationHandle, timestamp, job.id);
-      return this.getEvent(id);
+      return event;
     });
   }
 
@@ -397,24 +375,24 @@ export class PhiStore {
       const job = this.getJob(input.jobId);
       const id = newId();
       const timestamp = now();
-      this.raw
+      const row = this.raw
         .query(
-          `INSERT INTO events(id,job_id,source,kind,dedupe_key,payload_json,obligation_policy,created_at) VALUES(?,?,'worker',?,?,?,'outbox',?)`,
+          `INSERT INTO events(id,job_id,source,kind,dedupe_key,payload_json,obligation_policy,created_at) VALUES(?,?,'worker',?,?,?,'outbox',?) RETURNING *`,
         )
-        .run(
+        .get(
           id,
           job.id,
           input.kind,
           input.dedupeKey,
           JSON.stringify(input.payload),
           timestamp,
-        );
+        ) as Row;
       if (!terminalJobStatuses.has(job.status)) {
         this.raw
           .query("UPDATE jobs SET status='completing',updated_at=? WHERE id=?")
           .run(timestamp, job.id);
       }
-      return { event: this.getEvent(id), created: true };
+      return { event: eventFrom(row), created: true };
     });
   }
 
@@ -429,9 +407,7 @@ export class PhiStore {
       const job = this.getJob(input.jobId);
       if (terminalJobStatuses.has(job.status)) return job;
       if (job.status !== "completing")
-        throw new StateTransitionError(
-          `job ${job.id} is ${job.status}, not completing`,
-        );
+        throw new Error(`job ${job.id} is ${job.status}, not completing`);
       const timestamp = now();
       this.raw
         .query(
@@ -454,59 +430,48 @@ export class PhiStore {
     });
   }
 
-  putOutbox(input: {
+  putMessage(input: {
     eventId: string;
     kind: MessageKind;
     content: string;
     metadata?: Record<string, unknown>;
     idempotencyKey: string;
-  }): { message: OutboxRecord; created: boolean } {
+  }): { message: MessageRecord; created: boolean } {
     return this.database.immediate(() => {
       const existing = this.raw
-        .query("SELECT * FROM outbox WHERE idempotency_key=?")
+        .query("SELECT * FROM messages WHERE idempotency_key=?")
         .get(input.idempotencyKey) as Row | null;
-      if (existing) return { message: outboxFrom(existing), created: false };
+      if (existing) return { message: messageFrom(existing), created: false };
       this.getEvent(input.eventId);
-      const id = newId();
-      this.raw
+      const row = this.raw
         .query(
-          `INSERT INTO outbox(id,event_id,kind,content,metadata_json,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?)`,
+          `INSERT INTO messages(id,event_id,kind,content,metadata_json,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?) RETURNING *`,
         )
-        .run(
-          id,
+        .get(
+          newId(),
           input.eventId,
           input.kind,
           input.content,
           JSON.stringify(input.metadata ?? {}),
           input.idempotencyKey,
           now(),
-        );
-      return { message: this.getOutbox(id), created: true };
+        ) as Row;
+      return { message: messageFrom(row), created: true };
     });
   }
 
-  getOutbox(id: string): OutboxRecord {
-    const row = this.raw
-      .query("SELECT * FROM outbox WHERE id=?")
-      .get(id) as Row | null;
-    if (!row) throw new NotFoundError(`outbox row not found: ${id}`);
-    return outboxFrom(row);
-  }
-
-  listOutbox(): OutboxRecord[] {
+  listMessages(): MessageRecord[] {
     return (
       this.raw
-        .query("SELECT * FROM outbox ORDER BY created_at,id")
+        .query("SELECT * FROM messages ORDER BY created_at,id")
         .all() as Row[]
-    ).map(outboxFrom);
+    ).map(messageFrom);
   }
 
-  enqueueFollowUp(input: {
-    jobId: string;
-    sourceEventId: string;
-    key: string;
-    content: string;
-  }): { followUp: FollowUpRecord; created: boolean } {
+  enqueueFollowUp(input: { jobId: string; key: string; content: string }): {
+    followUp: FollowUpRecord;
+    created: boolean;
+  } {
     return this.database.immediate(() => {
       const existing = this.raw
         .query("SELECT * FROM job_followups WHERE idempotency_key=?")
@@ -518,23 +483,21 @@ export class PhiStore {
         !job.externalRunId ||
         !job.continuationHandle
       )
-        throw new StateTransitionError(`job ${job.id} cannot accept follow-up`);
-      const id = newId();
-      this.raw
+        throw new Error(`job ${job.id} cannot accept follow-up`);
+      const row = this.raw
         .query(
-          `INSERT INTO job_followups(id,job_id,source_event_id,idempotency_key,external_run_id,continuation_handle,content,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?)`,
+          `INSERT INTO job_followups(id,job_id,idempotency_key,external_run_id,continuation_handle,content,status,created_at) VALUES(?,?,?,?,?,?,'pending',?) RETURNING *`,
         )
-        .run(
-          id,
+        .get(
+          newId(),
           job.id,
-          input.sourceEventId,
           input.key,
           job.externalRunId,
           job.continuationHandle,
           input.content,
           now(),
-        );
-      return { followUp: this.getFollowUp(id), created: true };
+        ) as Row;
+      return { followUp: followUpFrom(row), created: true };
     });
   }
 
@@ -542,7 +505,7 @@ export class PhiStore {
     const row = this.raw
       .query("SELECT * FROM job_followups WHERE id=?")
       .get(id) as Row | null;
-    if (!row) throw new NotFoundError(`follow-up not found: ${id}`);
+    if (!row) throw missing("follow-up", id);
     return followUpFrom(row);
   }
 
@@ -596,11 +559,7 @@ export class PhiStore {
     });
   }
 
-  requestCancellation(input: {
-    jobId: string;
-    sourceEventId: string;
-    key: string;
-  }): JobRecord {
+  requestCancellation(input: { jobId: string; key: string }): JobRecord {
     return this.database.immediate(() => {
       const job = this.getJob(input.jobId);
       if (
@@ -613,22 +572,15 @@ export class PhiStore {
       if (job.status === "queued") {
         this.raw
           .query(
-            "UPDATE jobs SET status='cancelled',cancel_key=?,cancel_requested_by_event_id=?,cancel_requested_at=?,finished_at=?,updated_at=? WHERE id=?",
+            "UPDATE jobs SET status='cancelled',cancel_key=?,updated_at=?,finished_at=? WHERE id=?",
           )
-          .run(
-            input.key,
-            input.sourceEventId,
-            timestamp,
-            timestamp,
-            timestamp,
-            job.id,
-          );
+          .run(input.key, timestamp, timestamp, job.id);
       } else {
         this.raw
           .query(
-            "UPDATE jobs SET status='cancelling',cancel_key=?,cancel_requested_by_event_id=?,cancel_requested_at=?,updated_at=? WHERE id=?",
+            "UPDATE jobs SET status='cancelling',cancel_key=?,updated_at=? WHERE id=?",
           )
-          .run(input.key, input.sourceEventId, timestamp, timestamp, job.id);
+          .run(input.key, timestamp, job.id);
       }
       return this.getJob(job.id);
     });
@@ -636,34 +588,23 @@ export class PhiStore {
 
   recordCheckpoint(input: {
     id: string;
-    workspaceId: string;
     commitSha: string;
-    triggerJobId?: string;
     status: string;
-  }): GitCheckpointRecord {
+  }): void {
     this.raw
       .query(
-        "INSERT OR IGNORE INTO git_checkpoints(id,workspace_id,commit_sha,trigger_job_id,status,created_at) VALUES(?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO git_checkpoints(id,commit_sha,status,created_at) VALUES(?,?,?,?)",
       )
-      .run(
-        input.id,
-        input.workspaceId,
-        input.commitSha,
-        input.triggerJobId ?? null,
-        input.status,
-        now(),
-      );
+      .run(input.id, input.commitSha, input.status, now());
+  }
+
+  pendingTerminalEvent(jobId: string): EventRecord | null {
     const row = this.raw
-      .query("SELECT * FROM git_checkpoints WHERE commit_sha=?")
-      .get(input.commitSha) as Row;
-    return {
-      id: s(row.id),
-      workspaceId: s(row.workspace_id),
-      commitSha: s(row.commit_sha),
-      triggerJobId: nullable(row.trigger_job_id),
-      status: s(row.status),
-      createdAt: s(row.created_at),
-    };
+      .query(
+        "SELECT * FROM events WHERE job_id=? AND visible_at IS NULL AND kind IN ('worker_completed','worker_failed','worker_cancelled') ORDER BY created_at,id LIMIT 1",
+      )
+      .get(jobId) as Row | null;
+    return row ? eventFrom(row) : null;
   }
 
   recoverClaims(): void {

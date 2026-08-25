@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkerEvent } from "../src/workers/adapter.ts";
+import {
+  WorkerAdapterRegistry,
+  type WorkerEvent,
+} from "../src/workers/adapter.ts";
 import { FakeWorkerAdapter } from "../src/workers/fake.ts";
 
 async function collect(stream: AsyncIterable<WorkerEvent>) {
@@ -17,6 +20,7 @@ describe("fake WorkerAdapter conformance", () => {
       prompt: "hello [fake:duplicate]",
       cwd: process.cwd(),
       mode: "mutating" as const,
+      model: "fake-deterministic",
     };
     const first = await adapter.launch(input);
     const second = await adapter.launch(input);
@@ -25,8 +29,25 @@ describe("fake WorkerAdapter conformance", () => {
     expect(events.some((event) => event.type === "activity")).toBeTrue();
     expect(events.filter((event) => event.type === "completed").length).toBe(2);
     expect(
+      events.find((event) => event.type === "completed")?.data?.model,
+    ).toBe("fake-deterministic");
+    expect(
       await adapter.reconcile({ dispatchKey: input.dispatchKey }),
     ).toMatchObject({ state: "terminal" });
+  });
+
+  test("registry validates per-job model and effort selections", async () => {
+    const registry = new WorkerAdapterRegistry();
+    registry.register(new FakeWorkerAdapter());
+    expect(await registry.resolveSelection("fake", {})).toEqual({
+      model: "fake-deterministic",
+    });
+    await expect(
+      registry.resolveSelection("fake", { model: "invented" }),
+    ).rejects.toThrow("not selectable");
+    await expect(
+      registry.resolveSelection("fake", { effort: "high" }),
+    ).rejects.toThrow("not supported");
   });
 
   test("needs_input accepts in-run follow-up", async () => {

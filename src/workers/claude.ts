@@ -6,14 +6,12 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { mkdirSync } from "node:fs";
 import type { WorkerEffort } from "../domain.ts";
-import { UnsupportedCapabilityError } from "../errors.ts";
-import type {
-  WorkerAdapter,
-  WorkerEvent,
-  WorkerModelCatalog,
-  WorkerModelDescriptor,
-  WorkerReconciliation,
-  WorkerStatus,
+import {
+  buildModelCatalog,
+  type WorkerAdapter,
+  type WorkerEvent,
+  type WorkerModelCatalog,
+  type WorkerStatus,
 } from "./adapter.ts";
 import {
   awaitStartId,
@@ -42,8 +40,8 @@ function textOf(value: unknown): string {
 export class ClaudeWorkerAdapter implements WorkerAdapter {
   readonly id = "claude";
   readonly capabilities = {
-    continuation: "sequential",
-    cancellation: "abort",
+    followUp: false,
+    cancel: true,
   } as const;
   private readonly runs = new LiveRunTable<ClaudeRun>("Claude run");
 
@@ -92,34 +90,23 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       "xhigh",
       "max",
     ];
-    const documented = [
+    const documented = new Map<string, string>([
       ["haiku", "Claude Haiku"],
       ["sonnet", "Claude Sonnet"],
       ["opus", "Claude Opus"],
       ["fable", "Claude Fable"],
-    ] as const;
-    const models = new Map<string, WorkerModelDescriptor>();
-    for (const [id, label] of documented)
-      models.set(id, {
-        id,
-        label,
-        effortLevels,
-      });
-    for (const id of new Set([
-      ...(this.options.models ?? []),
-      ...(this.options.model ? [this.options.model] : []),
-    ]))
-      models.set(id, {
-        id,
-        label: models.get(id)?.label ?? id,
-        effortLevels,
-      });
-    return {
+    ]);
+    return buildModelCatalog({
       defaultModel: this.options.model ?? null,
-      models: [...models.values()],
-      defaultEffortLevels: effortLevels,
+      ids: [
+        ...documented.keys(),
+        ...(this.options.models ?? []),
+        ...(this.options.model ? [this.options.model] : []),
+      ],
+      effortLevels,
+      label: (id) => documented.get(id) ?? id,
       note: "The root model is selectable; Claude-managed nested agents may use other models. Official aliases: haiku, sonnet, opus, fable.",
-    };
+    });
   }
 
   async launch(input: {
@@ -304,25 +291,11 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
   watch(externalRunId: string): AsyncIterable<WorkerEvent> {
     return this.runs.watch(externalRunId);
   }
-  async followUp(): Promise<void> {
-    throw new UnsupportedCapabilityError(
-      "Claude supports resumed sequential sessions, but the Phi in-run follow-up contract is not exposed by this adapter",
-    );
-  }
   async cancel(externalRunId: string): Promise<void> {
     const record = this.runs.get(externalRunId);
     if (!record)
-      throw new UnsupportedCapabilityError(
-        "Claude cancellation requires the live SDK Query object",
-      );
+      throw new Error("Claude cancellation requires the live SDK Query object");
     record.controller.abort();
     record.query.close();
-  }
-  async reconcile(): Promise<WorkerReconciliation> {
-    return {
-      state: "unavailable",
-      reason:
-        "Claude Agent SDK does not expose authoritative lookup of a local query by Phi dispatch key",
-    };
   }
 }

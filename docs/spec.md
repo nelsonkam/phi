@@ -113,6 +113,7 @@ The coordinator should have a deliberately small tool surface:
 
 ```text
 send_message
+list_workers
 dispatch_job
 follow_up_job
 cancel_job
@@ -137,6 +138,9 @@ interface WorkerAdapter {
     dispatchKey: string;
     prompt: string;
     cwd: string;
+    mode: "read_only" | "mutating";
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<{
     externalRunId: string;
     continuationHandle?: string;
@@ -151,6 +155,8 @@ interface WorkerAdapter {
   reconcile?(input: {
     dispatchKey: string;
     externalRunId?: string;
+    model?: string;
+    effort?: WorkerEffort;
   }): Promise<
     | { state: "running"; externalRunId: string; continuationHandle?: string }
     | { state: "terminal"; event: WorkerEvent }
@@ -159,7 +165,7 @@ interface WorkerAdapter {
 }
 ```
 
-Initial routing may be hard-coded. A generalized capability registry is deferred until more adapters require it.
+Every adapter exposes a model catalog with its default, selectable root models, supported effort values, discovery source, and whether the choice controls only the root or the entire run. `list_workers` combines that catalog with readiness and observable capabilities. The host rejects a model or effort not present in the adapter catalog; the coordinator never passes arbitrary sampled IDs through to an SDK.
 
 `dispatchKey` is stable across process restarts. Adapters should pass it through to an external idempotency key, session name, or run metadata when the worker harness supports one. `reconcile` is used after a crash whose launch outcome is unknown; absence of this method means Phi must surface the uncertainty rather than launch a duplicate blindly.
 
@@ -171,13 +177,13 @@ User messages have priority over worker completions and background events. In th
 
 ### 5.4 Coordinator implementation
 
-Use the released `@earendil-works/pi-coding-agent` SDK for the coordinator and its `InteractiveMode` for the first test TUI. Configure the coordinator with no built-in coding tools and only Phi-owned tools. Use Pi's released session APIs for model context, compaction, event streaming, and session navigation.
+Use the released `@earendil-works/pi-coding-agent` SDK as a headless coordinator/session engine. Configure it with no built-in coding tools and only Phi-owned tools. Its prompt includes the registered adapter catalog, `list_workers` returns capability and readiness data, and `dispatch_job` rejects adapter IDs that are not registered. Use Pi's released session APIs for model context, compaction, and event streaming, but do not expose Pi's `InteractiveMode` as Phi's user interface.
 
 Run the Phi host on Bun and use `bun:sqlite` for its control database. The initial compatibility baseline is Bun 1.3.12 with Pi 0.84.2; the checked-in runtime spike must pass whenever either version changes. This is an empirically validated combination, not a claim that every Node-targeted Pi or worker-harness path works under Bun.
 
-Phi remains the authority for jobs, worker launch reconciliation, Git ownership, and user-message delivery. The experimental durable harness and client/server TUI on Pi's `dev` branch are design references, not initial runtime dependencies. This keeps Phi off an unstable API while avoiding a second terminal UI and session implementation.
+Phi remains the authority for jobs, worker launch reconciliation, Git ownership, and user-message delivery. The conversation-first terminal UI is Phi-owned and implemented with pinned OpenTUI/Solid packages. Durable conversation rows come from SQLite events and outbox delivery. A toggleable, visually muted coordinator trace may project Pi's public tool execution events, non-redacted reasoning content, and final assistant text inline; it is diagnostic presentation, not user delivery or durable Phi state. Jobs and worker streams remain in optional operator views. The experimental durable harness and client/server TUI on Pi's `dev` branch remain design references, not runtime dependencies.
 
-AI SDK is not an initial dependency. It is a good provider-neutral model and tool-loop layer, but adopting it would require Phi to build the TUI, session tree, compaction, instruction loading, and most agent lifecycle behavior itself. Reconsider it only if Pi's session/runtime opinions become a constraint or Phi later needs a web-first UI.
+AI SDK is not an initial dependency. Pi still supplies model/tool-loop and session behavior while Phi owns terminal presentation. Reconsider the coordinator engine independently of the TUI if Pi's session/runtime opinions become a constraint or Phi later needs a web-first UI.
 
 ## 6. SQLite
 
@@ -229,6 +235,12 @@ CREATE TABLE jobs (
     external_run_id TEXT,
     continuation_handle TEXT,
     mode TEXT NOT NULL CHECK (mode IN ('read_only', 'mutating')),
+    model TEXT,
+    effort TEXT CHECK (
+        effort IS NULL OR effort IN (
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
+        )
+    ),
     status TEXT NOT NULL CHECK (
         status IN (
             'queued',

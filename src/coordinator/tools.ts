@@ -5,11 +5,10 @@ import {
   workerEfforts,
   type JobMode,
   type MessageKind,
-  type OutboxRecord,
+  type MessageRecord,
   type WorkerEffort,
 } from "../domain.ts";
 import { dispatchKey, messageKey } from "../ids.ts";
-import type { CancellationService } from "../jobs/cancellation.ts";
 import type { FollowUpDispatcher } from "../jobs/followups.ts";
 import type { JobScheduler } from "../jobs/scheduler.ts";
 import { confinedWorkspacePath } from "../paths.ts";
@@ -30,14 +29,12 @@ export class CoordinatorTools {
   constructor(
     private readonly options: {
       store: PhiStore;
-      workspaceId: string;
       workspace: string;
       turn: TurnContext;
       scheduler: JobScheduler;
       followUps: FollowUpDispatcher;
-      cancellation: CancellationService;
       adapters: WorkerAdapterRegistry;
-      onMessage?: (message: OutboxRecord) => void;
+      onMessage?: (message: MessageRecord) => void;
     },
   ) {}
 
@@ -56,12 +53,12 @@ export class CoordinatorTools {
       kind !== "result"
     )
       throw new Error("worker terminal events require a result message");
-    const result = this.options.store.putOutbox({
+    const result = this.options.store.putMessage({
       eventId: event.id,
       kind,
       content,
       metadata,
-      idempotencyKey: messageKey(event, kind),
+      idempotencyKey: messageKey(event),
     });
     if (result.created) this.options.onMessage?.(result.message);
     return result;
@@ -80,8 +77,6 @@ export class CoordinatorTools {
       selection,
     );
     const result = this.options.store.acceptJob({
-      workspaceId: this.options.workspaceId,
-      sourceEventId: event.id,
       adapter,
       key: dispatchKey(event.id, key),
       prompt,
@@ -126,13 +121,11 @@ export class CoordinatorTools {
       staleForMs: Math.max(0, Date.now() - Date.parse(lastActivityAt)),
       recentObservations,
       availableActions: {
-        followUp:
-          job.status === "needs_input" &&
-          adapter.capabilities.continuation !== "none",
+        followUp: job.status === "needs_input" && adapter.capabilities.followUp,
         cancel:
           ["launching", "running", "needs_input", "cancelling"].includes(
             job.status,
-          ) && adapter.capabilities.cancellation !== "none",
+          ) && adapter.capabilities.cancel,
       },
     };
   }
@@ -157,7 +150,6 @@ export class CoordinatorTools {
     const event = this.options.turn.require();
     const result = this.options.store.enqueueFollowUp({
       jobId,
-      sourceEventId: event.id,
       key: `followup:${event.id}:${jobId}`,
       content,
     });
@@ -167,11 +159,20 @@ export class CoordinatorTools {
 
   async cancel(jobId: string) {
     const event = this.options.turn.require();
-    return this.options.cancellation.request({
+    const job = this.options.store.requestCancellation({
       jobId,
-      sourceEventId: event.id,
       key: `cancel:${event.id}:${jobId}`,
     });
+    if (job.status !== "cancelling" || !job.externalRunId) return job;
+    try {
+      await this.options.adapters.get(job.adapter).cancel(job.externalRunId);
+    } catch (error) {
+      return this.options.store.markUnknown(
+        job.id,
+        `cancellation outcome unknown: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return this.options.store.getJob(job.id);
   }
 
   definitions() {
@@ -187,7 +188,6 @@ export class CoordinatorTools {
         parameters: Type.Object({
           kind: Type.Union([
             Type.Literal("ack"),
-            Type.Literal("progress"),
             Type.Literal("result"),
             Type.Literal("question"),
           ]),

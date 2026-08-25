@@ -23,10 +23,15 @@ export class RecoveryService {
       "cancelling",
     ])) {
       const adapter = this.options.adapters.get(job.adapter);
-      const result = await adapter.reconcile({
+      const result = (await adapter.reconcile?.({
         dispatchKey: job.dispatchKey,
         ...(job.externalRunId ? { externalRunId: job.externalRunId } : {}),
-      });
+        ...(job.model ? { model: job.model } : {}),
+        ...(job.effort ? { effort: job.effort } : {}),
+      })) ?? {
+        state: "unavailable" as const,
+        reason: `${job.adapter} does not expose reconciliation`,
+      };
       if (result.state === "terminal")
         await this.options.completion.observe(job, result.event);
       else if (result.state === "running") {
@@ -48,14 +53,7 @@ export class RecoveryService {
         );
     }
     for (const job of this.options.store.listJobs(["completing"])) {
-      const event = this.options.store
-        .listEvents()
-        .find(
-          (candidate) =>
-            candidate.jobId === job.id &&
-            candidate.visibleAt === null &&
-            candidate.kind.startsWith("worker_"),
-        );
+      const event = this.options.store.pendingTerminalEvent(job.id);
       if (!event) {
         this.options.store.markUnknown(
           job.id,
@@ -63,34 +61,7 @@ export class RecoveryService {
         );
         continue;
       }
-      const status =
-        event.kind === "worker_completed"
-          ? "completed"
-          : event.kind === "worker_cancelled"
-            ? "cancelled"
-            : "failed";
-      const checkpoint = await this.options.git.checkpoint({
-        triggerJobId: job.id,
-        status,
-        checkpointId: event.id,
-      });
-      if (checkpoint.commit && checkpoint.checkpointId)
-        this.options.store.recordCheckpoint({
-          id: checkpoint.checkpointId,
-          workspaceId: job.workspaceId,
-          commitSha: checkpoint.commit,
-          triggerJobId: job.id,
-          status,
-        });
-      this.options.store.finalizeCompletion({
-        jobId: job.id,
-        eventId: event.id,
-        status,
-        observedTerminalCommit: checkpoint.commit,
-        ...(status === "failed"
-          ? { error: String(event.payload.error ?? "worker failed") }
-          : {}),
-      });
+      await this.options.completion.finalize(job, event);
     }
   }
 }

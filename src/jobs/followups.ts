@@ -30,10 +30,17 @@ export class FollowUpDispatcher {
       this.store.settleFollowUp(followUp.id, "stale");
       return true;
     }
+    const adapter = this.adapters.get(job.adapter);
+    if (!adapter.followUp) {
+      this.store.settleFollowUp(
+        followUp.id,
+        "unknown",
+        `${job.adapter} does not expose follow-up`,
+      );
+      return true;
+    }
     try {
-      await this.adapters
-        .get(job.adapter)
-        .followUp(followUp.continuationHandle, followUp.content);
+      await adapter.followUp(followUp.continuationHandle, followUp.content);
       this.store.settleFollowUp(followUp.id, "sent");
     } catch (error) {
       this.store.settleFollowUp(

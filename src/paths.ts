@@ -7,7 +7,6 @@ export interface PhiPaths {
   runtimeDir: string;
   database: string;
   credentialsDir: string;
-  sessionsDir: string;
   coordinatorSessionsDir: string;
   workerSessionsDir: string;
 }
@@ -34,7 +33,6 @@ export function resolvePaths(
     runtimeDir,
     database: join(runtimeDir, "runtime.db"),
     credentialsDir: join(runtimeDir, "credentials"),
-    sessionsDir: join(runtimeDir, "sessions"),
     coordinatorSessionsDir: join(runtimeDir, "sessions", "coordinator"),
     workerSessionsDir: join(runtimeDir, "sessions", "workers"),
   };
@@ -44,7 +42,6 @@ export function ensureRuntimeDirectories(paths: PhiPaths): void {
   for (const path of [
     paths.runtimeDir,
     paths.credentialsDir,
-    paths.sessionsDir,
     paths.coordinatorSessionsDir,
     paths.workerSessionsDir,
   ]) {

@@ -1,8 +1,8 @@
 import type { JobMode, WorkerEffort } from "../domain.ts";
 
 export interface AdapterCapabilities {
-  continuation: "none" | "sequential" | "in_run";
-  cancellation: "none" | "abort" | "remote";
+  followUp: boolean;
+  cancel: boolean;
 }
 
 export interface WorkerModelDescriptor {
@@ -19,6 +19,25 @@ export interface WorkerModelCatalog {
 }
 
 export type WorkerReadiness = "ready" | "login_required" | "unverified";
+
+export function buildModelCatalog(input: {
+  defaultModel: string | null;
+  ids: string[];
+  effortLevels: WorkerEffort[];
+  label?: (id: string) => string;
+  note?: string;
+}): WorkerModelCatalog {
+  return {
+    defaultModel: input.defaultModel,
+    models: [...new Set(input.ids)].map((id) => ({
+      id,
+      label: input.label?.(id) ?? id,
+      effortLevels: input.effortLevels,
+    })),
+    defaultEffortLevels: input.effortLevels,
+    ...(input.note ? { note: input.note } : {}),
+  };
+}
 
 export interface WorkerStatus {
   readiness: WorkerReadiness;
@@ -85,9 +104,9 @@ export interface WorkerAdapter {
     effort?: WorkerEffort;
   }): Promise<{ externalRunId: string; continuationHandle?: string }>;
   watch(externalRunId: string): AsyncIterable<WorkerEvent>;
-  followUp(continuationHandle: string, text: string): Promise<void>;
+  followUp?(continuationHandle: string, text: string): Promise<void>;
   cancel(externalRunId: string): Promise<void>;
-  reconcile(input: {
+  reconcile?(input: {
     dispatchKey: string;
     externalRunId?: string;
     model?: string;

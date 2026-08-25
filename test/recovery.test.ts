@@ -17,11 +17,10 @@ afterEach(() => {
 
 test("recovery completes the checkpoint-before-visibility crash boundary", async () => {
   fixture = testFixture();
-  const claimed = fixture.store.claimNextJob(null);
-  expect(claimed).toBeNull();
+  expect(fixture.store.claimNextJob()).toBeNull();
   const accepted = acceptJob(fixture, { key: "crash-boundary" });
   const running = fixture.store.recordRunning(
-    fixture.store.claimNextJob(null)!.id,
+    fixture.store.claimNextJob()!.id,
     "fake-crash-boundary",
   );
   const begun = fixture.store.beginCompletion({
@@ -37,17 +36,11 @@ test("recovery completes the checkpoint-before-visibility crash boundary", async
   const git = new GitService(fixture.workspace);
   const adapters = new WorkerAdapterRegistry();
   adapters.register(new FakeWorkerAdapter());
-  const completion = new CompletionService(
-    fixture.store,
-    git,
-    fixture.workspaceId,
-    () => undefined,
-  );
+  const completion = new CompletionService(fixture.store, git, () => undefined);
   const scheduler = new JobScheduler({
     store: fixture.store,
     adapters,
     completion,
-    git,
     workspace: fixture.workspace,
     concurrency: 2,
   });

@@ -8,6 +8,7 @@ import {
   CodexWorkerAdapter,
 } from "../src/workers/codex.ts";
 import { CursorWorkerAdapter } from "../src/workers/cursor.ts";
+import type { WorkerAdapter } from "../src/workers/adapter.ts";
 
 const roots: string[] = [];
 function root(): string {
@@ -49,8 +50,8 @@ describe("official SDK adapter capability contracts", () => {
       models: ["composer-2.5", "grok-4.6"],
     });
     expect(adapter.capabilities).toEqual({
-      continuation: "sequential",
-      cancellation: "remote",
+      followUp: true,
+      cancel: true,
     });
     expect(
       (await adapter.modelCatalog()).models.map((model) => model.id),
@@ -73,13 +74,13 @@ describe("official SDK adapter capability contracts", () => {
     );
   });
 
-  test("Claude reports unsupported interrupted-run reconciliation honestly", async () => {
-    const adapter = new ClaudeWorkerAdapter({ configDir: root() });
-    expect(adapter.capabilities.continuation).toBe("sequential");
-    expect(adapter.capabilities.cancellation).toBe("abort");
-    expect(await adapter.reconcile()).toMatchObject({
-      state: "unavailable",
+  test("Claude reports unsupported follow-up honestly", async () => {
+    const adapter: WorkerAdapter = new ClaudeWorkerAdapter({
+      configDir: root(),
     });
+    expect(adapter.capabilities.followUp).toBeFalse();
+    expect(adapter.capabilities.cancel).toBeTrue();
+    expect(adapter.reconcile).toBeUndefined();
     const catalog = await adapter.modelCatalog();
     expect(catalog.models.map((model) => model.id)).toContain("haiku");
     expect(
@@ -88,16 +89,17 @@ describe("official SDK adapter capability contracts", () => {
   });
 
   test("Codex exposes official reasoning summaries but no interrupted-turn lookup", async () => {
-    const adapter = new CodexWorkerAdapter({
+    const adapter: WorkerAdapter = new CodexWorkerAdapter({
       codexHome: root(),
       model: "gpt-test-balanced",
       models: ["gpt-test-balanced", "gpt-test-deep"],
     });
-    expect(adapter.capabilities.continuation).toBe("sequential");
-    expect(adapter.capabilities.cancellation).toBe("abort");
-    expect(await adapter.reconcile()).toMatchObject({
-      state: "unavailable",
-    });
+    expect(adapter.capabilities.followUp).toBeFalse();
+    expect(adapter.capabilities.cancel).toBeTrue();
+    expect(adapter.reconcile).toBeUndefined();
+    expect(adapter.capabilities.followUp).toBeFalse();
+    expect(adapter.capabilities.cancel).toBeTrue();
+    expect(adapter.reconcile).toBeUndefined();
     expect((await adapter.modelCatalog()).models).toHaveLength(2);
     expect(
       codexCompletionEvent("Useful final answer", {

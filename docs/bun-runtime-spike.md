@@ -51,7 +51,7 @@ bun run spike
 
 ## Boundaries not proven
 
-- The interactive TUI was imported but not driven in a real terminal. That needs a separate PTY smoke test when Phi wraps `InteractiveMode`.
+- Pi's interactive TUI was imported as a compatibility probe but is not used by Phi. Phi now owns its OpenTUI/Solid terminal interface and keeps Pi headless.
 - No live model provider, OAuth flow, MCP server, shell tool, image path, or compaction flow was exercised.
 - The MVP subsequently import- and type-validated the official Cursor SDK 1.0.28, Claude Agent SDK 0.3.241, and Codex SDK 0.149.0 directly under Bun 1.3.12. Phi therefore uses SDK integration rather than CLI-output scraping. Authenticated network behavior is deliberately outside this credential-free spike and remains an opt-in smoke test.
 - Pi 0.84.2 declares `engines.node >= 22.19.0`; it does not advertise Bun as a supported runtime. Compatibility is therefore measured, not guaranteed upstream.
@@ -67,4 +67,4 @@ The spike passed without trusting either script. Keep installs locked and non-in
 
 ## Upgrade gate
 
-Run this spike in CI on the target macOS and Linux environments whenever Bun or Pi changes. Expand it as Phi adopts more Pi surfaces, beginning with a PTY test of the developer TUI and a persistent-session resume test.
+Run this spike in CI on the target macOS and Linux environments whenever Bun or Pi changes. Keep the Phi-owned TUI interaction test and a persistent-session resume test as separate upgrade gates.

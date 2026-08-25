@@ -48,12 +48,12 @@ test("direct coordinator runs fake job end-to-end with deduped terminal delivery
   expect(app.store.listJobs()).toHaveLength(1);
   expect(app.store.listJobs()[0]!.status).toBe("completed");
   expect(app.store.listJobs()[0]!.model).toBe("fake-deterministic");
-  expect(app.store.listOutbox().map((message) => message.kind)).toEqual([
+  expect(app.store.listMessages().map((message) => message.kind)).toEqual([
     "ack",
     "result",
   ]);
   expect(
-    new Set(app.store.listOutbox().map((message) => message.idempotencyKey))
+    new Set(app.store.listMessages().map((message) => message.idempotencyKey))
       .size,
   ).toBe(2);
   expect(
@@ -76,12 +76,12 @@ test("needs_input, durable follow-up, and completion are wired end-to-end", asyn
   const job = app.store.listJobs()[0]!;
   expect(job.status).toBe("needs_input");
   expect(
-    app.store.listOutbox().some((message) => message.kind === "question"),
+    app.store.listMessages().some((message) => message.kind === "question"),
   ).toBeTrue();
   await app.submitUserMessage(`/follow ${job.id} accepted`);
   await app.waitUntilIdle();
   expect(app.store.getJob(job.id).status).toBe("completed");
-  expect(app.store.listOutbox().at(-1)?.kind).toBe("result");
+  expect(app.store.listMessages().at(-1)?.kind).toBe("result");
 });
 
 test("cancellation intent is persisted before the live adapter is aborted", async () => {
@@ -104,6 +104,5 @@ test("cancellation intent is persisted before the live adapter is aborted", asyn
   const cancelled = app.store.getJob(job.id);
   expect(cancelled.status).toBe("cancelled");
   expect(cancelled.cancelKey).toContain(job.id);
-  expect(cancelled.cancelRequestedAt).not.toBeNull();
-  expect(app.store.listOutbox().at(-1)?.kind).toBe("result");
+  expect(app.store.listMessages().at(-1)?.kind).toBe("result");
 });

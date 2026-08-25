@@ -8,13 +8,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { workerEfforts, type WorkerEffort } from "../domain.ts";
-import { UnsupportedCapabilityError } from "../errors.ts";
-import type {
-  WorkerAdapter,
-  WorkerEvent,
-  WorkerModelCatalog,
-  WorkerReconciliation,
-  WorkerStatus,
+import {
+  buildModelCatalog,
+  type WorkerAdapter,
+  type WorkerEvent,
+  type WorkerModelCatalog,
+  type WorkerStatus,
 } from "./adapter.ts";
 import {
   awaitStartId,
@@ -44,8 +43,8 @@ export function codexCompletionEvent(
 export class CodexWorkerAdapter implements WorkerAdapter {
   readonly id = "codex";
   readonly capabilities = {
-    continuation: "sequential",
-    cancellation: "abort",
+    followUp: false,
+    cancel: true,
   } as const;
   private readonly runs = new LiveRunTable<CodexRun>("Codex thread");
   private readonly codex: Codex;
@@ -95,22 +94,18 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async modelCatalog(): Promise<WorkerModelCatalog> {
-    const ids = new Set([
+    const ids = [
       ...(this.options.models ?? []),
       ...(this.options.model ? [this.options.model] : []),
-    ]);
-    return {
+    ];
+    return buildModelCatalog({
       defaultModel: this.options.model ?? null,
-      models: [...ids].map((id) => ({
-        id,
-        label: id,
-        effortLevels: [...workerEfforts],
-      })),
-      defaultEffortLevels: [...workerEfforts],
-      note: ids.size
+      ids,
+      effortLevels: [...workerEfforts],
+      note: ids.length
         ? "Selectable models come from PHI_CODEX_MODELS."
         : "The Codex SDK exposes model selection but not catalog discovery; set PHI_CODEX_MODELS to enable explicit choices.",
-    };
+    });
   }
 
   async launch(input: {
@@ -272,29 +267,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   watch(externalRunId: string): AsyncIterable<WorkerEvent> {
     return this.runs.watch(externalRunId);
   }
-  async followUp(): Promise<void> {
-    throw new UnsupportedCapabilityError(
-      "Codex supports sequential thread continuation, but Phi follow-up is reserved for an active needs-input turn",
-    );
-  }
   async cancel(externalRunId: string): Promise<void> {
     const record = this.runs.get(externalRunId);
     if (!record)
-      throw new UnsupportedCapabilityError(
+      throw new Error(
         "Codex cancellation requires the live SDK turn AbortSignal",
       );
     record.controller.abort();
-  }
-  async reconcile(_input?: {
-    dispatchKey: string;
-    externalRunId?: string;
-    model?: string;
-    effort?: WorkerEffort;
-  }): Promise<WorkerReconciliation> {
-    return {
-      state: "unavailable",
-      reason:
-        "Codex SDK can resume a thread for a new turn but cannot authoritatively inspect an interrupted turn by dispatch key",
-    };
   }
 }

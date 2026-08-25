@@ -40,7 +40,9 @@ export function buildWorkerBrief(input: {
     "Work only on the delegated task. Treat existing files and changes as user-owned. Do not commit, reset, clean, rebase, or discard changes.",
     "Other workers may read or write the same files. Re-read before important writes; overlapping writes and last-write-wins behavior are accepted by the host.",
     "The cwd and these instructions are not a security sandbox. Never inspect or modify ~/.phi. Do not communicate directly with the user.",
-    "Report the outcome, changed files, limitations, and any needed input succinctly. Do not expose private chain-of-thought; provide only concise reasoning summaries when useful.",
+    "Treat the task as an outcome to achieve, not a claim that any suggested diagnosis is correct. Investigate independently and treat hypotheses as non-binding.",
+    "Verify the result in proportion to the task. Report the outcome, verification performed, changed files, limitations, confidence or source caveats, and any needed input succinctly.",
+    "Do not expose private chain-of-thought; provide only concise reasoning summaries when useful.",
     instructions
       ? `Workspace protocol instructions:\n\n${instructions}`
       : "No .agents protocol instructions are present.",

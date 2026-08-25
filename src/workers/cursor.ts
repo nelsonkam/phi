@@ -8,14 +8,13 @@ import {
 } from "@cursor/sdk/bundled";
 import { mkdirSync } from "node:fs";
 import type { WorkerEffort } from "../domain.ts";
-import { UnsupportedCapabilityError } from "../errors.ts";
-import type {
-  WorkerAdapter,
-  WorkerEvent,
-  WorkerModelCatalog,
-  WorkerModelDescriptor,
-  WorkerReconciliation,
-  WorkerStatus,
+import {
+  buildModelCatalog,
+  type WorkerAdapter,
+  type WorkerEvent,
+  type WorkerModelCatalog,
+  type WorkerReconciliation,
+  type WorkerStatus,
 } from "./adapter.ts";
 import { createLiveRun, LiveRunTable, type LiveRun } from "./live-run.ts";
 
@@ -28,8 +27,8 @@ interface CursorRun extends LiveRun {
 export class CursorWorkerAdapter implements WorkerAdapter {
   readonly id = "cursor";
   readonly capabilities = {
-    continuation: "sequential",
-    cancellation: "remote",
+    followUp: true,
+    cancel: true,
   } as const;
   private readonly runs = new LiveRunTable<CursorRun>("Cursor run");
   private readonly agents = new Map<string, SDKAgent>();
@@ -84,29 +83,19 @@ export class CursorWorkerAdapter implements WorkerAdapter {
   }
 
   async modelCatalog(): Promise<WorkerModelCatalog> {
-    const models = new Map<string, WorkerModelDescriptor>();
-    for (const id of new Set([
-      this.options.model,
-      ...(this.options.models ?? []),
-    ]).values()) {
-      models.set(id, {
-        id,
-        label:
-          {
-            "grok-4.6": "Cursor Grok 4.6",
-            "grok-4.5": "Cursor Grok 4.5",
-            "composer-2.5": "Composer 2.5",
-            "composer-2": "Composer 2",
-          }[id] ?? id,
-        effortLevels: [],
-      });
-    }
-    return {
-      defaultModel: this.options.model,
-      models: [...models.values()],
-      defaultEffortLevels: [],
-      note: "Phi intentionally restricts Cursor to the SDK-validated Grok and Composer model families.",
+    const labels: Record<string, string> = {
+      "grok-4.6": "Cursor Grok 4.6",
+      "grok-4.5": "Cursor Grok 4.5",
+      "composer-2.5": "Composer 2.5",
+      "composer-2": "Composer 2",
     };
+    return buildModelCatalog({
+      defaultModel: this.options.model,
+      ids: [this.options.model, ...(this.options.models ?? [])],
+      effortLevels: [],
+      label: (id) => labels[id] ?? id,
+      note: "Phi intentionally restricts Cursor to the SDK-validated Grok and Composer model families.",
+    });
   }
 
   async authenticate(options?: {
@@ -263,7 +252,7 @@ export class CursorWorkerAdapter implements WorkerAdapter {
   async followUp(handle: string, text: string): Promise<void> {
     const agent = this.agents.get(handle);
     if (!agent)
-      throw new UnsupportedCapabilityError(
+      throw new Error(
         "Cursor follow-up requires an attached agent; resume through a new dispatch after restart",
       );
     const run = await agent.send(text);

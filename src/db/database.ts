@@ -7,6 +7,7 @@ const migrations = [
   "001_initial.sql",
   "002_job_models.sql",
   "003_drop_outbox_delivery.sql",
+  "004_simplify_schema.sql",
 ] as const;
 
 export const schemaVersion = migrations.length;
@@ -31,21 +32,28 @@ export class PhiDatabase {
       .query("SELECT version FROM schema_migrations")
       .all() as { version: number }[];
     const versions = new Set(applied.map((row) => row.version));
-    for (const [index, file] of migrations.entries()) {
-      const version = index + 1;
-      if (versions.has(version)) continue;
-      const sql = readFileSync(
-        join(import.meta.dir, "migrations", file),
-        "utf8",
-      );
-      this.immediate(() => {
-        this.raw.exec(sql);
-        this.raw
-          .query(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
-          )
-          .run(version, now());
-      });
+    // Rebuilding tables in later migrations requires dropping parents that
+    // other tables reference, so enforcement is off for the duration.
+    this.raw.exec("PRAGMA foreign_keys = OFF");
+    try {
+      for (const [index, file] of migrations.entries()) {
+        const version = index + 1;
+        if (versions.has(version)) continue;
+        const sql = readFileSync(
+          join(import.meta.dir, "migrations", file),
+          "utf8",
+        );
+        this.immediate(() => {
+          this.raw.exec(sql);
+          this.raw
+            .query(
+              "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
+            )
+            .run(version, now());
+        });
+      }
+    } finally {
+      this.raw.exec("PRAGMA foreign_keys = ON");
     }
   }
 

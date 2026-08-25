@@ -23,10 +23,11 @@ export function dispatchKey(eventId: string, key: string): string {
   return `dispatch:${eventId}:${semanticPart(key)}`;
 }
 
-export function messageKey(
-  event: { id: string; kind: string; jobId: string | null },
-  kind: string,
-): string {
+export function messageKey(event: {
+  id: string;
+  kind: string;
+  jobId: string | null;
+}): string {
   if (
     event.kind === "worker_completed" ||
     event.kind === "worker_failed" ||
@@ -37,7 +38,6 @@ export function messageKey(
   }
   if (event.kind === "worker_needs_input")
     return `message:event:${event.id}:question`;
-  if (kind === "progress") return `message:event:${event.id}:progress`;
   return `message:event:${event.id}:primary`;
 }
 

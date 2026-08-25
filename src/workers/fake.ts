@@ -1,4 +1,3 @@
-import { UnsupportedCapabilityError } from "../errors.ts";
 import { newId } from "../ids.ts";
 import type { WorkerEffort } from "../domain.ts";
 import {
@@ -24,8 +23,8 @@ interface FakeRun {
 export class FakeWorkerAdapter implements WorkerAdapter {
   readonly id = "fake";
   readonly capabilities = {
-    continuation: "in_run",
-    cancellation: "abort",
+    followUp: true,
+    cancel: true,
   } as const;
   private readonly runs = new Map<string, FakeRun>();
 
@@ -131,9 +130,7 @@ export class FakeWorkerAdapter implements WorkerAdapter {
   async followUp(handle: string, text: string): Promise<void> {
     const run = this.runs.get(handle);
     if (!run?.pendingQuestion)
-      throw new UnsupportedCapabilityError(
-        `fake run ${handle} is not awaiting input`,
-      );
+      throw new Error(`fake run ${handle} is not awaiting input`);
     const pending = run.pendingQuestion;
     delete run.pendingQuestion;
     pending.resolve(text);

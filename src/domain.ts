@@ -22,7 +22,7 @@ export type JobStatus =
   | "cancelled";
 export type EventSource = "user" | "worker" | "system";
 export type ObligationPolicy = "none" | "outbox";
-export type MessageKind = "ack" | "progress" | "result" | "question";
+export type MessageKind = "ack" | "result" | "question";
 
 export interface EventRecord {
   id: string;
@@ -41,8 +41,6 @@ export interface EventRecord {
 
 export interface JobRecord {
   id: string;
-  workspaceId: string;
-  sourceEventId: string;
   adapter: string;
   dispatchKey: string;
   externalRunId: string | null;
@@ -52,19 +50,16 @@ export interface JobRecord {
   effort: WorkerEffort | null;
   status: JobStatus;
   prompt: string;
-  observedStartCommit: string | null;
   observedTerminalCommit: string | null;
   error: string | null;
   cancelKey: string | null;
-  cancelRequestedByEventId: string | null;
-  cancelRequestedAt: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
   updatedAt: string;
 }
 
-export interface OutboxRecord {
+export interface MessageRecord {
   id: string;
   eventId: string | null;
   kind: MessageKind;
@@ -77,7 +72,6 @@ export interface OutboxRecord {
 export interface FollowUpRecord {
   id: string;
   jobId: string;
-  sourceEventId: string;
   idempotencyKey: string;
   externalRunId: string;
   continuationHandle: string;
@@ -87,15 +81,6 @@ export interface FollowUpRecord {
   sendingStartedAt: string | null;
   sentAt: string | null;
   error: string | null;
-}
-
-export interface GitCheckpointRecord {
-  id: string;
-  workspaceId: string;
-  commitSha: string;
-  triggerJobId: string | null;
-  status: string;
-  createdAt: string;
 }
 
 export const terminalJobStatuses = new Set<JobStatus>([

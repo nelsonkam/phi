@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { schemaVersion } from "../src/db/database.ts";
-import { StateTransitionError } from "../src/errors.ts";
 import {
   acceptJob,
   sourceEvent,
@@ -25,9 +24,9 @@ describe("durable repository invariants", () => {
     const event = store.acceptUserMessage("hello");
     expect(store.claimNextEvent()?.id).toBe(event.id);
     expect(() => store.markEventProcessed(event.id)).toThrow(
-      StateTransitionError,
+      "requires an outbox message",
     );
-    store.putOutbox({
+    store.putMessage({
       eventId: event.id,
       kind: "ack",
       content: "accepted",
@@ -41,14 +40,12 @@ describe("durable repository invariants", () => {
     const item = fixture();
     const source = sourceEvent(item, "source");
     const job = item.store.acceptJob({
-      workspaceId: item.workspaceId,
-      sourceEventId: source.id,
       adapter: "fake",
       key: "priority-job",
       prompt: "test",
       mode: "read_only",
     }).job;
-    const claimed = item.store.claimNextJob(null)!;
+    const claimed = item.store.claimNextJob()!;
     item.store.recordRunning(claimed.id, "fake-priority", "fake-priority");
     item.store.recordNeedsInput({
       jobId: job.id,
@@ -59,7 +56,7 @@ describe("durable repository invariants", () => {
     const newerUser = sourceEvent(item, "new user input");
     const firstUser = item.store.claimNextEvent()!;
     expect([source.id, newerUser.id]).toContain(firstUser.id);
-    item.store.putOutbox({
+    item.store.putMessage({
       eventId: firstUser.id,
       kind: "ack",
       content: "source",
@@ -75,7 +72,7 @@ describe("durable repository invariants", () => {
     const item = fixture();
     const job = acceptJob(item);
     const running = item.store.recordRunning(
-      item.store.claimNextJob("start")!.id,
+      item.store.claimNextJob()!.id,
       "fake-terminal",
     );
     const begun = item.store.beginCompletion({
@@ -98,10 +95,7 @@ describe("durable repository invariants", () => {
 
   test("schema-backed dedupe and dispatch idempotency return one row", () => {
     const item = fixture();
-    const source = sourceEvent(item);
     const first = item.store.acceptJob({
-      workspaceId: item.workspaceId,
-      sourceEventId: source.id,
       adapter: "fake",
       key: "same-dispatch",
       prompt: "one",
@@ -110,8 +104,6 @@ describe("durable repository invariants", () => {
       effort: "low",
     });
     const second = item.store.acceptJob({
-      workspaceId: item.workspaceId,
-      sourceEventId: source.id,
       adapter: "fake",
       key: "same-dispatch",
       prompt: "two",
@@ -123,7 +115,7 @@ describe("durable repository invariants", () => {
     expect(second.job.model).toBe("fake-deterministic");
     expect(second.job.effort).toBe("low");
     const running = item.store.recordRunning(
-      item.store.claimNextJob(null)!.id,
+      item.store.claimNextJob()!.id,
       "fake-dedupe",
     );
     const one = item.store.recordProgress({
@@ -170,12 +162,12 @@ describe("durable repository invariants", () => {
     acceptJob(item, { key: "writer-2", mode: "mutating" });
     acceptJob(item, { key: "reader", mode: "read_only" });
     const claimed = [
-      item.store.claimNextJob("a"),
-      item.store.claimNextJob("a"),
-      item.store.claimNextJob("a"),
+      item.store.claimNextJob(),
+      item.store.claimNextJob(),
+      item.store.claimNextJob(),
     ];
     expect(claimed.every(Boolean)).toBeTrue();
-    expect(item.store.claimNextJob("a")).toBeNull();
+    expect(item.store.claimNextJob()).toBeNull();
     const modes = item.store.listJobs(["launching"]).map((job) => job.mode);
     expect(modes.filter((mode) => mode === "mutating")).toHaveLength(2);
     expect(modes.filter((mode) => mode === "read_only")).toHaveLength(1);
@@ -184,7 +176,7 @@ describe("durable repository invariants", () => {
   test("crash recovery resets event claims and makes follow-up ambiguity explicit", () => {
     const item = fixture();
     const source = sourceEvent(item);
-    item.store.putOutbox({
+    item.store.putMessage({
       eventId: source.id,
       kind: "ack",
       content: "ack",
@@ -192,15 +184,13 @@ describe("durable repository invariants", () => {
     });
     expect(item.store.claimNextEvent()?.id).toBe(source.id);
     const job = item.store.acceptJob({
-      workspaceId: item.workspaceId,
-      sourceEventId: source.id,
       adapter: "fake",
       key: "recovery-job",
       prompt: "test",
       mode: "read_only",
     }).job;
     item.store.recordRunning(
-      item.store.claimNextJob(null)!.id,
+      item.store.claimNextJob()!.id,
       "fake-recovery",
       "fake-recovery",
     );
@@ -212,7 +202,6 @@ describe("durable repository invariants", () => {
     });
     const follow = item.store.enqueueFollowUp({
       jobId: job.id,
-      sourceEventId: source.id,
       key: "recovery-follow",
       content: "answer",
     }).followUp;

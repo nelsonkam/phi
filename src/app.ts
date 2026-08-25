@@ -10,12 +10,11 @@ import type { CoordinatorTraceStore } from "./coordinator/trace.ts";
 import { TurnContext } from "./coordinator/turn-context.ts";
 import { PhiDatabase } from "./db/database.ts";
 import { PhiStore } from "./db/store.ts";
-import { CancellationService } from "./jobs/cancellation.ts";
 import { CompletionService } from "./jobs/completion.ts";
 import { FollowUpDispatcher } from "./jobs/followups.ts";
 import { RecoveryService } from "./jobs/recovery.ts";
 import { JobScheduler } from "./jobs/scheduler.ts";
-import { activeJobStatuses, type OutboxRecord } from "./domain.ts";
+import { activeJobStatuses, type MessageRecord } from "./domain.ts";
 import { ensureRuntimeDirectories } from "./paths.ts";
 import { GitService } from "./workspace/git.ts";
 import type { WorkerAdapterRegistry } from "./workers/adapter.ts";
@@ -42,7 +41,7 @@ export class PhiApp {
     config: PhiConfig,
     options: {
       directCoordinator?: boolean;
-      onMessage?: (message: OutboxRecord) => void;
+      onMessage?: (message: MessageRecord) => void;
     } = {},
   ): Promise<PhiApp> {
     ensureRuntimeDirectories(config.paths);
@@ -56,31 +55,26 @@ export class PhiApp {
       database.close();
       throw error;
     }
-    const workspace = store.registerWorkspace(config.paths.workspace);
     const adapters = buildAdapterRegistry(config);
     const followUps = new FollowUpDispatcher(store, adapters);
-    const cancellation = new CancellationService(store, adapters);
     let coordinatorLoop: CoordinatorLoop | null = null;
-    const completion = new CompletionService(store, git, workspace.id, () =>
+    const completion = new CompletionService(store, git, () =>
       coordinatorLoop?.wake(),
     );
     const scheduler = new JobScheduler({
       store,
       adapters,
       completion,
-      git,
       workspace: config.paths.workspace,
       concurrency: config.concurrency,
     });
     const turn = new TurnContext();
     const tools = new CoordinatorTools({
       store,
-      workspaceId: workspace.id,
       workspace: config.paths.workspace,
       turn,
       scheduler,
       followUps,
-      cancellation,
       adapters,
       ...(options.onMessage ? { onMessage: options.onMessage } : {}),
     });

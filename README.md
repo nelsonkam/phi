@@ -1,6 +1,6 @@
 # Phi harness MVP
 
-Phi is a durable, local coordination harness for concurrent coding agents sharing one Git workspace. It runs on Bun, journals coordination state in `~/.phi/runtime.db`, uses a restricted persistent Pi session as its coordinator and developer TUI, and integrates the official Cursor, Claude Agent, and OpenAI Codex SDKs behind one adapter contract.
+Phi is a durable, local coordination harness for concurrent coding agents sharing one Git workspace. It runs on Bun, journals coordination state in `~/.phi/runtime.db`, uses a restricted persistent Pi session as its headless coordinator, presents a Phi-owned OpenTUI interface, and integrates the official Cursor, Claude Agent, and OpenAI Codex SDKs behind one adapter contract.
 
 The MVP intentionally does **not** serialize mutating workers. Reads can become stale, writes can overlap, and the last filesystem write wins. Git commits are recoverable global workspace checkpoints; they are not authoritative per-job diffs.
 
@@ -8,7 +8,7 @@ The MVP intentionally does **not** serialize mutating workers. Reads can become 
 
 - Bun 1.3.12 (the validated runtime baseline)
 - Git installed; Phi initializes the managed workspace automatically when needed
-- A supported Pi model credential for the default coordinator TUI
+- A supported Pi model credential for the default coordinator engine
 - Optional worker credentials for Cursor, Claude, or Codex
 
 ```sh
@@ -23,7 +23,7 @@ On the first `doctor` or start, Phi runs `git init` if the workspace is not alre
 
 ## Authentication
 
-Phi defaults to `PHI_CREDENTIAL_MODE=native`. It does not copy credentials; each harness uses the authentication already available in its normal user-home location:
+Phi defaults to `PHI_CREDENTIAL_MODE=native`. It does not copy credentials; each harness asks its official SDK to use the authentication available in its normal user-home location:
 
 | Harness | Native authentication lookup                                                                                              |
 | ------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -32,7 +32,9 @@ Phi defaults to `PHI_CREDENTIAL_MODE=native`. It does not copy credentials; each
 | Codex   | `OPENAI_API_KEY`, then the Codex CLI/IDE login (`~/.codex/auth.json` or the OS credential store)                          |
 | Pi      | Pi's normal user auth and model stores (normally `~/.pi/agent/auth.json` and `models.json`)                               |
 
-This means a harness you have already logged into can normally run through Phi without another key file. Native mode may also read that harness's user-level configuration: notably `~/.codex` for Codex and Claude Code's global configuration. Phi still keeps its SQLite journal, coordinator transcript, worker observations, and logs under `~/.phi`.
+Claude, Codex, and Pi can normally reuse their existing CLI/SDK user-home login. Cursor is different: the Cursor Agent SDK does **not** reuse the Cursor desktop application's login. If `doctor` reports that Cursor login is required, start Phi, press `Ctrl+P`, and choose **Log in to Cursor**. The SDK opens a browser flow and stores its own credential under `~/.cursor/sdk/auth.json`. A configured `CURSOR_API_KEY` takes precedence over that store; remove or correct a stale environment value if Cursor reports an invalid key.
+
+Native mode may also read a harness's user-level configuration: notably `~/.codex` for Codex and Claude Code's global configuration. Phi still keeps its SQLite journal, coordinator transcript, worker observations, and logs under `~/.phi`.
 
 For an isolated Phi-specific login, set `PHI_CREDENTIAL_MODE=isolated` or pass `--credential-mode isolated`. Isolated mode uses provider environment variables or these owner-readable files:
 
@@ -45,15 +47,24 @@ For an isolated Phi-specific login, set `PHI_CREDENTIAL_MODE=isolated` or pass `
 
 Set isolated key files to mode `0600`. Phi reads the file before its environment-variable fallback and never writes credentials into the managed workspace or Git. Set `PHI_COORDINATOR_MODEL=provider/model-id` (or `--coordinator-model`) to choose an exact registered Pi model.
 
+Interactive Cursor browser login is disabled in isolated mode; provision the isolated key file or environment variable explicitly.
+
 ## Run
 
-Start the persistent Pi developer TUI:
+Start the conversation-first Phi TUI:
 
 ```sh
 bun run start -- tui --workspace /path/to/managed-workspace
 ```
 
-Direct mode is not needed for normal use. The Pi TUI accepts ordinary requests and dispatches jobs itself. `--direct` is a credential-free deterministic development/recovery interface:
+Type ordinary requests into the composer and press Enter. Phi's Pi coordinator knows the registered `fake`, `cursor`, `claude`, and `codex` harnesses through its restricted `list_workers` tool and validates every adapter, root-model, and reasoning-effort selection against the current catalog. Explicit user choices win when selectable; otherwise the coordinator chooses a ready harness and an adequate advertised model tier. The conversation follows new content automatically and can include a muted coordinator trace showing Pi tool calls, officially exposed non-redacted reasoning, and the coordinator's final assistant output. This trace is a live projection of Pi's session events, not a second delivery channel or a durable job record. Jobs and worker streams stay out of the main conversation:
+
+- `Ctrl+P` opens commands, harness status, and Cursor SDK login.
+- `Ctrl+T` hides or shows coordinator details.
+- `Ctrl+A` toggles internal activity details.
+- `Esc` closes an overlay; `Ctrl+C` quits without discarding durable state.
+
+Direct mode is not needed for normal use. It remains a credential-free deterministic development/recovery interface:
 
 ```sh
 bun run start -- tui --direct --workspace /path/to/managed-workspace
@@ -66,7 +77,7 @@ Direct-mode commands are:
 - `/follow <job-id> <text>` for a durable job in `needs_input`
 - `/cancel <job-id>` to persist cancellation intent before contacting the adapter
 
-Configuration variables include `PHI_WORKSPACE`, `PHI_HOME`, `PHI_CREDENTIAL_MODE` (`native` by default), `PHI_CONCURRENCY` (default `4`), `PHI_CURSOR_MODEL`, `PHI_CLAUDE_MODEL`, `PHI_CODEX_MODEL`, and `PHI_COORDINATOR_MODEL`.
+Configuration variables include `PHI_WORKSPACE`, `PHI_HOME`, `PHI_CREDENTIAL_MODE` (`native` by default), `PHI_CONCURRENCY` (default `4`), `PHI_CURSOR_MODEL`, `PHI_CLAUDE_MODEL`, `PHI_CODEX_MODEL`, and `PHI_COORDINATOR_MODEL`. Comma-separated `PHI_CURSOR_MODELS`, `PHI_CLAUDE_MODELS`, and `PHI_CODEX_MODELS` define host-approved per-job choices. Cursor is deliberately restricted to Grok and Composer; its built-in catalog is `grok-4.6`, `grok-4.5`, `composer-2.5`, and `composer-2`, with `composer-2.5` as the default.
 
 ## Verification
 
@@ -78,6 +89,10 @@ bun run spike
 ```
 
 Tests create separate temporary workspaces and runtime directories. The suite does not make authenticated network calls or consume model quota. See [docs/adapters.md](docs/adapters.md) for exact SDK versions and capability boundaries, and [docs/spec.md](docs/spec.md) for durable state and recovery semantics.
+
+## Direction: channels, threads, and the server
+
+Phi is evolving from a TUI into a durable server powering Slack-like GUI clients (channels → threads → messages). Design decisions, rationale, and the migration sequence are recorded in [docs/channels-and-server.md](docs/channels-and-server.md).
 
 ## Security boundary
 

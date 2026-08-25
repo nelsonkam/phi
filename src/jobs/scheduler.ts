@@ -1,7 +1,6 @@
 import { DrainLoop } from "../drain-loop.ts";
 import type { PhiStore } from "../db/store.ts";
 import { terminalJobStatuses, type JobRecord } from "../domain.ts";
-import type { GitService } from "../workspace/git.ts";
 import { buildWorkerBrief } from "../workspace/instructions.ts";
 import type { WorkerAdapterRegistry } from "../workers/adapter.ts";
 import type { CompletionService } from "./completion.ts";
@@ -16,7 +15,6 @@ export class JobScheduler {
       store: PhiStore;
       adapters: WorkerAdapterRegistry;
       completion: CompletionService;
-      git: GitService;
       workspace: string;
       concurrency: number;
     },
@@ -39,9 +37,7 @@ export class JobScheduler {
 
   private async drainOnce(): Promise<boolean> {
     if (this.active >= this.options.concurrency) return false;
-    const revision = await this.options.git.currentRevision();
-    if (this.loop.isStopped()) return false;
-    const job = this.options.store.claimNextJob(revision);
+    const job = this.options.store.claimNextJob();
     if (!job) return false;
     this.active += 1;
     void this.launch(job).finally(() => {

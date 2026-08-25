@@ -21,7 +21,6 @@ export interface TestFixture {
   runtime: string;
   database: PhiDatabase;
   store: PhiStore;
-  workspaceId: string;
 }
 
 export function testFixture(): TestFixture {
@@ -46,15 +45,7 @@ export function testFixture(): TestFixture {
   const database = new PhiDatabase(join(runtime, "runtime.db"));
   database.migrate();
   const store = new PhiStore(database);
-  const registered = store.registerWorkspace(workspace);
-  return {
-    root,
-    workspace,
-    runtime,
-    database,
-    store,
-    workspaceId: registered.id,
-  };
+  return { root, workspace, runtime, database, store };
 }
 
 export function sourceEvent(fixture: TestFixture, content = "test") {
@@ -68,16 +59,18 @@ export function acceptJob(
     key?: string;
     prompt?: string;
     mode?: "read_only" | "mutating";
+    model?: string;
+    effort?: "low" | "medium" | "high";
   } = {},
 ) {
-  const event = sourceEvent(fixture);
+  sourceEvent(fixture);
   return fixture.store.acceptJob({
-    workspaceId: fixture.workspaceId,
-    sourceEventId: event.id,
     adapter: input.adapter ?? "fake",
     key: input.key ?? crypto.randomUUID(),
     prompt: input.prompt ?? "fixture job",
     mode: input.mode ?? "mutating",
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.effort ? { effort: input.effort } : {}),
   }).job;
 }
 

@@ -31,4 +31,17 @@ describe("credential mode configuration", () => {
       else process.env.PHI_CREDENTIAL_MODE = previous;
     }
   });
+
+  test("Cursor choices are restricted to Grok and Composer", () => {
+    const previous = process.env.PHI_CURSOR_MODELS;
+    process.env.PHI_CURSOR_MODELS = "composer-2.5,grok-4.6,other-model";
+    try {
+      expect(() => loadConfig()).toThrow(
+        "Cursor models must be Grok or Composer models",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.PHI_CURSOR_MODELS;
+      else process.env.PHI_CURSOR_MODELS = previous;
+    }
+  });
 });
