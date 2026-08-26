@@ -1,0 +1,2 @@
+ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE threads ADD COLUMN turn_agent TEXT;

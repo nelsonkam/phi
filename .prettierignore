@@ -1,4 +1,0 @@
-node_modules
-bun.lock
-spikes/bun-runtime/bun.lock
-*.db
