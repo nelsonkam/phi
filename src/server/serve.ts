@@ -2,6 +2,7 @@ import index from "@/web/index.html";
 import { PhiStore } from "@/core/store/store";
 import { detectHarnesses } from "@/core/agents/harnesses";
 import { listHarnessConfig } from "@/core/agents/config";
+import { AgentRuntime } from "@/core/agents/runtime";
 import type { HarnessConfig } from "@/shared/types";
 import { ensureWorkspace } from "@/core/workspace";
 import type { ServerFrame } from "@/shared/types";
@@ -43,6 +44,7 @@ export function startServer(): void {
   const store = new PhiStore();
   const workspace = store.defaultWorkspace();
   ensureWorkspace(workspace.rootPath);
+  const runtime = new AgentRuntime(store, workspace.rootPath);
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
 
   const server = Bun.serve({
@@ -80,6 +82,7 @@ export function startServer(): void {
             kind: "message",
             content,
           });
+          runtime.handleUserMessage(result.message);
           return Response.json(result, { status: 201 });
         },
       },
@@ -106,6 +109,7 @@ export function startServer(): void {
             kind: "message",
             content,
           });
+          runtime.handleUserMessage(message);
           return Response.json({ message }, { status: 201 });
         },
       },
@@ -185,6 +189,14 @@ export function startServer(): void {
     const frame: ServerFrame = { v: 1, ...change };
     server.publish("deltas", JSON.stringify(frame));
   };
+
+  // Harness subprocesses do not die with the server; kill them explicitly.
+  const shutdown = () => {
+    runtime.close();
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 
   console.log(`phi serving on http://localhost:${server.port}`);
 }
