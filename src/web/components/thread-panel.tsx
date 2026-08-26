@@ -3,7 +3,6 @@ import { RotateCcw, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
-import { UntaggedAgentTag } from "@/web/components/untagged-agent-tag";
 import {
   useAgents,
   useMessages,
@@ -55,7 +54,15 @@ export function ThreadPanel({
             # {channelName}
           </span>
         )}
-        {untaggedAgent && <UntaggedAgentTag name={untaggedAgent} />}
+        {untaggedAgent && (
+          <Link
+            to={`/agents/${untaggedAgent}`}
+            title="Answers messages that do not start with @name"
+            className="mention shrink-0 text-[11px] leading-5"
+          >
+            @{untaggedAgent}
+          </Link>
+        )}
         <Link
           to={`/c/${channelId}`}
           aria-label="Close thread"
