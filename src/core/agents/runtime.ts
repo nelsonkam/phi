@@ -11,7 +11,11 @@ import type { AcpProcess } from "./acp-process";
 import { harnessEntry } from "./harnesses";
 import { DEFAULT_AGENT_NAME, loadAgent } from "./registry";
 import type { AgentDefinition } from "./registry";
-import { routeAgentContent, routeUserContent } from "./routing";
+import {
+  routeAgentContent,
+  routeUserContent,
+  stripLeadingMention,
+} from "./routing";
 import type { MessageRouting } from "./routing";
 import type { PhiStore } from "@/core/store/store";
 import type { ThreadSessionBinding } from "@/core/store/store";
@@ -25,7 +29,7 @@ const AUTH_REQUIRED_CODE = -32000;
 // the phi MCP server repeats the same guidance in send_message's tool
 // description and server instructions, so the model sees it every turn
 // regardless.
-export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content — never prefix your own messages with a handle; your name is attached automatically. Lead with @name only to hand the turn to that agent. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
+export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
 
 const RECOVERY_CONTEXT_MAX_CHARS = 16_000;
 
@@ -123,7 +127,7 @@ export class AgentRuntime {
     this.workspaceRoot = workspaceRoot;
     this.mcpPort = options.mcpPort;
     this.mcpTokens = options.mcpTokens;
-    this.hopBudget = options.hopBudget ?? 4;
+    this.hopBudget = options.hopBudget ?? 8;
     this.sessionIdleMs = options.sessionIdleMs ?? 10 * 60_000;
     this.hostIdleMs = options.hostIdleMs ?? 30_000;
     this.resolveCommand =
@@ -194,17 +198,22 @@ export class AgentRuntime {
       message.metadata = metadata;
       this.store.updateMessageMetadata(message.id, metadata);
 
-      for (const agentName of routing.routedTo) {
+      for (const [index, agentName] of routing.routedTo.entries()) {
         if (message.author === "agent") {
           const nextHop = (this.agentHops.get(threadId) ?? 0) + 1;
           if (nextHop > this.hopBudget) {
+            // The budget drops every remaining recipient, not just this one;
+            // the pause message must name them all or the tail is lost
+            // silently.
+            const waiting = routing.routedTo.slice(index);
+            const handles = waiting.map((name) => `@${name}`).join(", ");
             this.store.appendMessage(threadId, {
               author: "system",
               kind: "message",
-              content: `Agent exchange paused after ${this.hopBudget} hops; @${agentName} was next. Send a user message to continue.`,
+              content: `Agent exchange paused after ${this.hopBudget} hops; ${handles} ${waiting.length === 1 ? "was" : "were"} next. Send a user message to continue.`,
               metadata: {
                 reason: "agent-hop-budget",
-                routedTo: [agentName],
+                routedTo: waiting,
               },
             });
             break;
@@ -877,31 +886,24 @@ function messageLabel(message: Message): string {
   return `[${message.author}]`;
 }
 
-// The leading mention that routed a message to `recipient` is addressing, not
-// content; strip it so the model never sees scaffolding to imitate. The
-// durable log keeps the original text.
-function stripRoutedMention(content: string, recipient: string): string {
-  const match = content.match(/^\s*@([a-z0-9][a-z0-9-]*)\s*/i);
-  if (!match || match[1]!.toLowerCase() !== recipient.toLowerCase()) {
-    return content;
-  }
-  const rest = content.slice(match[0].length);
-  return rest.length > 0 ? rest : content;
-}
-
 // An ACP prompt is definitionally the user's channel, so a plain user message
 // needs no label. Framing appears only where the channel would otherwise lie:
 // a peer agent's message, or a live message that must be set apart from the
 // catch-up block preceding it.
+//
+// Only user messages get their leading mention stripped: that text performed
+// the routing, so it is addressing scaffold, not content (the durable log
+// keeps the original). Agent messages route only through `to`, so every
+// @mention in them is the sender's own words and is delivered verbatim.
 function routedPrompt(
   message: Message,
   recipient: string,
   hasCatchUp: boolean,
 ): string {
-  const content = stripRoutedMention(message.content, recipient);
   if (message.author !== "user") {
-    return `Message from @${String(message.metadata.agent)}:\n${content}`;
+    return `Message from @${String(message.metadata.agent)}:\n${message.content}`;
   }
+  const content = stripLeadingMention(message.content, recipient);
   return hasCatchUp ? `New message from the user:\n${content}` : content;
 }
 

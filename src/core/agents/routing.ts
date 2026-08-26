@@ -5,10 +5,58 @@ export interface MessageRouting {
   routedTo: string[];
 }
 
-const LEADING_MENTION = /^\s*@([a-z0-9][a-z0-9-]*)\b/;
+// Address-shaped only: the handle must be followed by whitespace, `,`, `:`,
+// or the end of the message, so a possessive like "@reviewer's notes" reads
+// as prose rather than routing.
+const LEADING_MENTION = /^\s*@([a-z0-9][a-z0-9-]*)(?=[\s,:]|$)/;
 
 export function leadingMention(content: string): string | null {
   return content.match(LEADING_MENTION)?.[1] ?? null;
+}
+
+// Address-shaped mentions anywhere in the body: preceded by the start,
+// whitespace, or an opening bracket, and followed by whitespace, sentence
+// punctuation, a closing bracket, or the end — so possessives
+// ("@reviewer's") and emails ("a@b.com") stay prose.
+const BODY_MENTION = /(?:^|[\s([{])@([a-z0-9][a-z0-9-]*)(?=$|[\s,.:;!?)\]}])/g;
+
+// Known peer handles mentioned anywhere in `content`, excluding the author.
+// send_message uses this on messages that routed to nobody: a handoff written
+// as prose ("done — @reviewer should look") never wakes anyone, so the send
+// result warns the author while there is still a turn left to correct it in.
+export async function unroutedPeerMentions(
+  workspaceRoot: string,
+  content: string,
+  authorAgent: string,
+): Promise<string[]> {
+  const known = await knownAgentNames(workspaceRoot);
+  const handles = [...content.matchAll(BODY_MENTION)].map((match) => match[1]!);
+  return [...new Set(handles)].filter(
+    (handle) => handle !== authorAgent && known.has(handle),
+  );
+}
+
+// Removes the address-shaped leading mention — plus a trailing `,`/`:` and
+// whitespace — when it names `handle`; anything else (possessives, other
+// handles) is content and comes back unchanged.
+export function stripLeadingMention(content: string, handle: string): string {
+  const match = content.match(LEADING_MENTION);
+  if (!match || match[1] !== handle) {
+    return content;
+  }
+  const rest = content.slice(match[0].length).replace(/^[,:]?\s*/, "");
+  return rest.length > 0 ? rest : content;
+}
+
+export class ExplicitRecipientRequiredError extends Error {
+  readonly code = "EXPLICIT_RECIPIENT_REQUIRED";
+
+  constructor(handle: string) {
+    super(
+      `EXPLICIT_RECIPIENT_REQUIRED: the message leads with @${handle} but no \`to\` was given. Message text never routes — pass to: ["${handle}"] to hand off, or reword if this is not a handoff.`,
+    );
+    this.name = "ExplicitRecipientRequiredError";
+  }
 }
 
 // `fallbackAgent` is the thread's own default — the agent its root message
@@ -31,11 +79,19 @@ export async function routeUserContent(
   return { mentions: [], routedTo: [fallback] };
 }
 
+// Agent messages route only from the structured `to` list; content never
+// affects execution, and `mentions` is display metadata. On the send_message
+// path, `requireExplicitHandoff` rejects a leading known-agent handle when
+// `to` is missing, so a habitual "@reviewer please…" fails loudly instead of
+// silently reaching no one. Internal re-derivations (turn-text fallback,
+// replays) leave it off: the turn is already over, so there is no sender left
+// to correct.
 export async function routeAgentContent(
   workspaceRoot: string,
   content: string,
   authorAgent: string,
   explicitRecipients?: string[],
+  options: { requireExplicitHandoff?: boolean } = {},
 ): Promise<MessageRouting> {
   const known = await knownAgentNames(workspaceRoot);
   const mentioned = leadingMention(content);
@@ -59,10 +115,11 @@ export async function routeAgentContent(
     };
   }
 
-  return {
-    mentions,
-    routedTo: mentions.filter((name) => name !== authorAgent),
-  };
+  const handle = mentions[0];
+  if (options.requireExplicitHandoff && handle && handle !== authorAgent) {
+    throw new ExplicitRecipientRequiredError(handle);
+  }
+  return { mentions, routedTo: [] };
 }
 
 async function knownAgentNames(workspaceRoot: string): Promise<Set<string>> {

@@ -121,6 +121,7 @@ export function ThreadPanel({
       )}
       <Composer
         placeholder="Reply…"
+        draftKey={`thread:${threadId}`}
         onSend={(content) => send.mutate(content)}
         className="px-4 pb-4"
       />

@@ -27,6 +27,7 @@ async function fixture(options?: {
   harness?: "claude-code" | "codex" | "cursor" | "gemini";
   sessionIdleMs?: number;
   hostIdleMs?: number;
+  hopBudget?: number;
 }): Promise<Fixture> {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
@@ -49,6 +50,7 @@ async function fixture(options?: {
     mcpTokens,
     sessionIdleMs: options?.sessionIdleMs,
     hostIdleMs: options?.hostIdleMs,
+    hopBudget: options?.hopBudget,
     resolveCommand: (harnessId, additionalDirectories) => {
       launches.push({ harnessId, additionalDirectories });
       return [
@@ -651,8 +653,41 @@ test("unmentioned replies stay with the agent that started the thread", async ()
   done();
 });
 
-test("the hop budget pauses further agent-triggered turns until a user message", async () => {
+test("agent messages reach peers verbatim", async () => {
   const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    model: "smart",
+    instructions: "Review the request.",
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "start",
+  });
+  runtime.handleUserMessage(root.message);
+  await runtime.settled(root.thread.id);
+
+  // Only `to` routed this; the possessive is the sender's own words.
+  const handoff = store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "@reviewer’s pass is clean",
+    metadata: { agent: "default" },
+  });
+  runtime.handleAgentMessage(handoff, ["reviewer"]);
+  await runtime.settled(root.thread.id);
+
+  const reply = store.listMessages(root.thread.id).at(-1)!;
+  expect(reply.metadata.agent).toBe("reviewer");
+  expect(reply.content).toBe(
+    "[model=smart] [intro] [catchup] echo#1: @reviewer’s pass is clean",
+  );
+  done();
+});
+
+test("the hop budget pauses further agent-triggered turns until a user message", async () => {
+  const { store, runtime, channel, done } = await fixture({ hopBudget: 4 });
   await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
     harness: "codex",
     instructions: "Review the request.",
@@ -703,6 +738,41 @@ test("the hop budget pauses further agent-triggered turns until a user message",
         message.author === "agent" && message.metadata.agent === "reviewer",
     ),
   ).toHaveLength(5);
+  done();
+});
+
+test("a budget-tripped multi-recipient handoff names every dropped recipient", async () => {
+  const { store, runtime, channel, done } = await fixture({ hopBudget: 0 });
+  for (const name of ["reviewer", "implementer"]) {
+    await writeAgent(store.defaultWorkspace().rootPath, name, {
+      harness: "codex",
+      instructions: `Act as the ${name}.`,
+    });
+  }
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "start",
+  });
+  const handoff = store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "over to you both",
+    metadata: { agent: "default" },
+  });
+
+  runtime.handleAgentMessage(handoff, ["reviewer", "implementer"]);
+  await runtime.settled(root.thread.id);
+
+  const pause = store.listMessages(root.thread.id).at(-1)!;
+  expect(pause).toMatchObject({
+    author: "system",
+    metadata: {
+      reason: "agent-hop-budget",
+      routedTo: ["reviewer", "implementer"],
+    },
+  });
+  expect(pause.content).toContain("@reviewer, @implementer were next");
   done();
 });
 

@@ -89,6 +89,7 @@ export function ChannelPage() {
           <Composer
             placeholder={`Message #${channel?.name ?? ""}`}
             disabled={create.isPending}
+            draftKey={`channel:${channelId}`}
             onSend={(content) => void startThread(content)}
           />
         </div>

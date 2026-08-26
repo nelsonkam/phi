@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AssistantRuntimeProvider,
   ComposerPrimitive,
@@ -9,6 +9,7 @@ import {
 import { ArrowUp } from "lucide-react";
 import type { Agent } from "@/shared/types";
 import { AgentAvatar } from "@/web/components/agent-avatar";
+import { readDraft, saveDraft } from "@/web/lib/drafts";
 import { useAgents } from "@/web/lib/queries";
 import { cn } from "@/web/lib/utils";
 
@@ -22,11 +23,14 @@ const LEADING_MENTION_PREFIX = /^\s*@([a-z0-9-]*)$/i;
 export function Composer({
   placeholder,
   disabled,
+  draftKey,
   onSend,
   className,
 }: {
   placeholder: string;
   disabled?: boolean;
+  /** When set, unsent text is persisted under this key and restored on mount. */
+  draftKey?: string;
   onSend: (content: string) => void | Promise<void>;
   className?: string;
 }) {
@@ -118,6 +122,23 @@ export function Composer({
     messages: EMPTY_MESSAGES,
     onNew: handleNew,
   });
+
+  // Restores the draft for the current key (replacing any text left over from
+  // a previous key) and persists every subsequent edit. Sending resets the
+  // composer text to "", which flows through the same subscription and removes
+  // the stored draft.
+  useEffect(() => {
+    if (!draftKey) return;
+    const composer = runtime.thread.composer;
+    composer.setText(readDraft(draftKey) ?? "");
+    let lastText = composer.getState().text;
+    return composer.subscribe(() => {
+      const text = composer.getState().text;
+      if (text === lastText) return;
+      lastText = text;
+      saveDraft(draftKey, text);
+    });
+  }, [draftKey, runtime]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

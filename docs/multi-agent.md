@@ -87,25 +87,33 @@ A thread still has a *default* agent: the agent its root message routed to
 derived from the root message's durable routing metadata, not stored
 separately; unmentioned replies route to it, and if that agent has since been
 deleted the fallback degrades to the workspace default. Additional agents
-join a thread lazily, the first time they are a routing target (leading
-`@name` or `to`); joining is nothing more than creating their session
-binding. Mid-body name drops do not join anyone.
+join a thread lazily, the first time they are a routing target (a user's
+leading `@name`, or an agent's `to`); joining is nothing more than creating
+their session binding. Mid-body name drops do not join anyone.
 
-## 4. Routing: mentions decide who turns next
+## 4. Routing: user mentions and agent `to` decide who turns next
 
 A message triggers a turn for the agents it addresses:
 
 - **User messages**: only a leading `@name` (after optional whitespace) is
-  an address. If it matches the registry, that agent gets the turn; anything
+  an address, and only when it is address-shaped — followed by whitespace,
+  `,`, `:`, or the end of the message — so "@reviewer's notes" is prose, not
+  routing. If it matches the registry, that agent gets the turn; anything
   else `@mentioned` later in the body is ordinary text. No leading mention
   routes to the thread's default agent — the current behavior is the
   fallback, so single-agent threads work exactly as today.
-- **Agent messages**: `send_message` gains an optional `to` parameter
-  (a list of agent names) for deliberate handoff. If `to` is omitted, the
-  same leading-`@name` heuristic applies. Mid-body mentions never route, so
-  an agent quoting "@architect suggested X" does not summon the architect.
-  No `to` and no leading mention means no turn — the message is a statement
-  in the log, not a ping.
+- **Agent messages**: routing comes only from `send_message`'s optional
+  `to` list (agent names, one turn each in list order). Message text never
+  routes an agent message: mentions anywhere in the body are display-only,
+  and a message that *leads* with a known peer's handle while omitting `to`
+  is rejected (`EXPLICIT_RECIPIENT_REQUIRED`) so a habitual "@reviewer
+  please…" fails loudly at send time instead of silently reaching no one.
+  A known peer's handle *mid-body* with no `to` is legal prose and still
+  sends, but the `send_message` result carries a note naming the unrouted
+  handles — a handoff written as prose ("done — @reviewer should look")
+  wakes nobody, and the note arrives while the sender still has a turn to
+  follow up with a routed message. No `to` means no turn — the message is
+  a statement in the log, not a ping.
 - `to` with multiple names enqueues one turn per recipient, in list order,
   on the same thread chain (§5). A user message still routes to at most one
   agent (the leading mention, or the default).
@@ -116,9 +124,11 @@ agents from one user message is out of scope until we need it.
 
 Parsing is server-side and validates against the registry: an unknown
 `@name` is inert text, never an error — including a leading `@name` that
-matches nobody, which then falls through to the default agent. Routing
-metadata (`mentions`, `routedTo`) is recorded on the message row for
-display and debugging.
+matches nobody, which for a user message falls through to the default agent
+(the `EXPLICIT_RECIPIENT_REQUIRED` rejection fires only for a known peer's
+handle). Routing metadata (`mentions`, `routedTo`) is recorded on the
+message row for display and debugging; because agent routing is explicit, a
+non-empty `routedTo` on an agent message always means a deliberate `to`.
 
 The host, not a model, performs routing. This keeps routing deterministic,
 free, and user-legible: the user can always tell why an agent responded by
@@ -183,18 +193,18 @@ log.
 
 ## 7. Loop prevention: the hop budget
 
-Handoff between agents — `to` on `send_message`, or a leading `@name` on an
-agent message — can ping-pong indefinitely: A thanks B, B acknowledges A,
-forever, at full token cost. Mid-body name drops do not cause this; the
-handoff paths do. The one genuinely new safety rule this design introduces:
+Handoff between agents — `to` on `send_message` — can ping-pong
+indefinitely: A thanks B, B acknowledges A, forever, at full token cost.
+Message text never causes this; only the structured handoff path does. The
+one genuinely new safety rule this design introduces:
 
 - A **hop** is a turn triggered by an agent message. The per-thread hop
   counter increments on each hop and resets to zero on any user message.
 - When a routed turn would exceed the budget (default **4**), it is not
   enqueued. Phi posts a system message instead: the exchange is paused and
   names who was next, so the user can continue it with one message.
-- An agent cannot enqueue its own next turn. `to` or a leading `@` that
-  names the author is ignored.
+- An agent cannot enqueue its own next turn. A `to` that names the author
+  is ignored.
 - The budget is a host-enforced invariant, not a prompt instruction.
 
 Four hops covers the useful shapes (hand-off, question, answer, confirmation)
@@ -274,7 +284,8 @@ reuse their routing, catch-up, and budget machinery.
 3. Catch-up context: per-agent cursor, delta rendering, recovery unified onto
    it.
 4. Leading-`@name` routing for user messages; agents join threads on first
-   routing target (leading mention or `to`), not on mid-body name drops.
+   routing target (a user's leading mention or an agent's `to`), not on
+   mid-body name drops.
 5. `send_message` `to` parameter, agent-triggered turns, and the hop budget —
    this step turns on agent-to-agent interaction.
 6. UI: mention autocomplete in the composer, per-agent avatars/handles,

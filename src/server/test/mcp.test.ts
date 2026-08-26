@@ -452,3 +452,72 @@ test("send_message validates and routes explicit agent handoffs", async () => {
   expect(store.listMessages(thread.id)).toHaveLength(before);
   store.close();
 });
+
+test("send_message warns when a mid-body peer mention routes nowhere", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, thread, token, handler, workspace } = fixture(
+    (message, routedTo) => routed.push({ message, routedTo }),
+  );
+  ensureWorkspace(workspace.rootPath);
+  await writeAgent(workspace.rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the work.",
+  });
+
+  // The message sends — prose mentions are legal — but the result flags the
+  // unrouted handle so an intended handoff is not lost silently.
+  const response = await toolCall(
+    handler,
+    token,
+    51,
+    "Draft is done — @reviewer should take a look",
+  );
+  const body = (await response.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBeUndefined();
+  const text = body.result.content[0]!.text;
+  expect(text).toContain("Message sent");
+  expect(text).toContain("mentions @reviewer");
+  expect(text).toContain('to: ["reviewer"]');
+  expect(store.listMessages(thread.id).at(-1)!.content).toContain(
+    "Draft is done",
+  );
+  expect(routed).toEqual([]);
+
+  // A routed handoff gets no warning.
+  const clean = await toolCall(handler, token, 52, "Now really over to you", [
+    "reviewer",
+  ]);
+  const cleanBody = (await clean.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(cleanBody.result.content[0]!.text).not.toContain("Note:");
+  store.close();
+});
+
+test("send_message rejects a leading peer handle without to", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, thread, token, handler, workspace } = fixture(
+    (message, routedTo) => routed.push({ message, routedTo }),
+  );
+  ensureWorkspace(workspace.rootPath);
+  await writeAgent(workspace.rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the work.",
+  });
+
+  const before = store.listMessages(thread.id).length;
+  const rejected = await toolCall(handler, token, 41, "@reviewer please look");
+  const body = (await rejected.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBe(true);
+  expect(body.result.content[0]!.text).toContain(
+    "EXPLICIT_RECIPIENT_REQUIRED",
+  );
+  expect(body.result.content[0]!.text).toContain('to: ["reviewer"]');
+  expect(store.listMessages(thread.id)).toHaveLength(before);
+  expect(routed).toEqual([]);
+  store.close();
+});

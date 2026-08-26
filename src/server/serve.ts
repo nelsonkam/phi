@@ -28,9 +28,13 @@ export function startServer(): void {
   const harnessCapabilities = new HarnessCapabilityService(workspace.rootPath);
   const messageSearch = createMessageSearch(store, store.rootPath);
   messageSearch.start();
+  // PHI_HOP_BUDGET caps consecutive agent-triggered turns per thread; unset
+  // or invalid values fall back to the runtime default.
+  const hopBudget = Number(process.env.PHI_HOP_BUDGET);
   const runtime = new AgentRuntime(store, workspace.rootPath, {
     mcpPort: port,
     mcpTokens,
+    ...(Number.isInteger(hopBudget) && hopBudget >= 0 ? { hopBudget } : {}),
   });
   const fileHandler = createFileHandler(workspace.rootPath, store);
   const mcpHandler = createMcpHandler(
