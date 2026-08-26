@@ -131,14 +131,18 @@ export function useCreateDefaultAgent() {
 // Inserts a message into its thread's cached list, deduplicating by id (the
 // sender's own POST response and the WebSocket delta both land here).
 export function appendMessageToCache(message: Message): void {
-  queryClient.setQueryData<{ messages: Message[] }>(
-    queryKeys.threadMessages(message.threadId),
-    (cached) => {
-      if (!cached) return cached;
-      if (cached.messages.some((m) => m.id === message.id)) return cached;
-      return { messages: [...cached.messages, message] };
-    },
-  );
+  const queryKey = queryKeys.threadMessages(message.threadId);
+  const cached = queryClient.getQueryData<{ messages: Message[] }>(queryKey);
+  if (!cached) {
+    // The frame can race the thread's first GET; refetch instead of dropping
+    // the message on the floor.
+    void queryClient.invalidateQueries({ queryKey });
+    return;
+  }
+  if (cached.messages.some((m) => m.id === message.id)) return;
+  queryClient.setQueryData(queryKey, {
+    messages: [...cached.messages, message],
+  });
 }
 
 // Applies a server delta frame to the query caches.

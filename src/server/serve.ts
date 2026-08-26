@@ -45,6 +45,7 @@ export function startServer(): void {
   const workspace = store.defaultWorkspace();
   ensureWorkspace(workspace.rootPath);
   const runtime = new AgentRuntime(store, workspace.rootPath);
+  runtime.recoverInterruptedTurns();
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
 
   const server = Bun.serve({

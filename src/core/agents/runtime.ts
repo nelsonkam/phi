@@ -24,9 +24,10 @@ interface ThreadSession {
   acp: AcpProcess;
   sessionId: string;
   agentName: string;
-  // Text chunks streamed during the in-flight turn. One prompt runs per
-  // session at a time, so a single buffer is enough.
-  turnText: string[];
+  // ACP may emit multiple logical agent messages during one turn (for example,
+  // commentary followed by a final answer). Chunks within a message are deltas
+  // and concatenate exactly; distinct messages retain a paragraph boundary.
+  turnText: Array<{ messageId: string | undefined; chunks: string[] }>;
 }
 
 export interface AgentRuntimeOptions {
@@ -74,6 +75,27 @@ export class AgentRuntime {
     return this.turns.get(threadId) ?? Promise.resolve();
   }
 
+  // Sessions are in-memory, so a restart silently drops any turn that was in
+  // flight — leaving the thread ending on a user message with no reply ever
+  // coming. Called once at server startup: report the interruption so clients
+  // don't render a permanent "agent is working" state.
+  recoverInterruptedTurns(): void {
+    const workspace = this.store.defaultWorkspace();
+    for (const channel of this.store.listChannels(workspace.id)) {
+      for (const thread of this.store.listThreads(channel.id)) {
+        if (thread.status === "archived") continue;
+        const last = this.store.listMessages(thread.id).at(-1);
+        if (last?.author !== "user") continue;
+        this.store.appendMessage(thread.id, {
+          author: "system",
+          kind: "error",
+          content:
+            "The server restarted before the agent replied. Send another message to retry.",
+        });
+      }
+    }
+  }
+
   close(): void {
     for (const threadId of [...this.sessions.keys()]) {
       this.dropSession(threadId);
@@ -93,7 +115,11 @@ export class AgentRuntime {
         },
       )) as PromptResponse;
 
-      const text = session.turnText.join("").trim();
+      const text = session.turnText
+        .map(({ chunks }) => chunks.join("").trim())
+        .filter((message) => message.length > 0)
+        .join("\n\n")
+        .trim();
       if (text.length > 0) {
         this.store.appendMessage(threadId, {
           author: "coordinator",
@@ -153,7 +179,16 @@ export class AgentRuntime {
           update.sessionUpdate === "agent_message_chunk" &&
           update.content.type === "text"
         ) {
-          session.turnText.push(update.content.text);
+          const messageId = update.messageId ?? undefined;
+          const current = session.turnText.at(-1);
+          if (
+            !current ||
+            (messageId !== undefined && current.messageId !== messageId)
+          ) {
+            session.turnText.push({ messageId, chunks: [update.content.text] });
+          } else {
+            current.chunks.push(update.content.text);
+          }
         }
       },
       onRequestPermission: approvePermission,
