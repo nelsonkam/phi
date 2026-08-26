@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath, phiRoot, workspaceRoot } from "@/core/paths";
 import { migrate } from "@/db/migrate";
 import type {
+  ActivityItem,
   Channel,
   Message,
   MessageAuthor,
@@ -205,6 +206,70 @@ export class PhiStore {
       )
       .all(threadId)
       .map(messageFromRow);
+  }
+
+  listActivity(
+    workspaceId: string,
+    options: { before?: number; limit?: number } = {},
+  ): ActivityItem[] {
+    const before = options.before ?? Number.MAX_SAFE_INTEGER;
+    const limit = options.limit ?? 50;
+    const rows = this.db
+      .query<ActivityRow, [string, number, number]>(
+        `SELECT
+           t.*,
+           c.name AS channel_name,
+           m.id AS message_id,
+           m.author AS message_author,
+           m.kind AS message_kind,
+           m.content AS message_content,
+           m.metadata_json AS message_metadata_json,
+           m.created_at AS message_created_at,
+           (
+             SELECT COUNT(*)
+             FROM messages unread
+             WHERE unread.thread_id = t.id
+               AND unread.seq > COALESCE(r.last_read_seq, 0)
+           ) AS unread_count
+         FROM threads t
+         JOIN channels c ON c.id = t.channel_id
+         JOIN messages m ON m.thread_id = t.id AND m.seq = t.last_seq
+         LEFT JOIN thread_reads r ON r.thread_id = t.id
+         WHERE t.workspace_id = ? AND m.seq < ?
+         ORDER BY m.seq DESC
+         LIMIT ?`,
+      )
+      .all(workspaceId, before, limit);
+
+    return rows.map((row) => ({
+      thread: threadFromRow(row),
+      channelName: row.channel_name,
+      latestMessage: messageFromRow({
+        id: row.message_id,
+        workspace_id: row.workspace_id,
+        channel_id: row.channel_id,
+        thread_id: row.id,
+        author: row.message_author,
+        kind: row.message_kind,
+        content: row.message_content,
+        metadata_json: row.message_metadata_json,
+        seq: row.last_seq,
+        created_at: row.message_created_at,
+      }),
+      unreadCount: row.unread_count,
+    }));
+  }
+
+  markThreadRead(threadId: string): boolean {
+    const result = this.db
+      .query(
+        `INSERT INTO thread_reads (thread_id, last_read_seq)
+         SELECT id, last_seq FROM threads WHERE id = ?
+         ON CONFLICT(thread_id) DO UPDATE SET
+           last_read_seq = MAX(thread_reads.last_read_seq, excluded.last_read_seq)`,
+      )
+      .run(threadId);
+    return result.changes > 0;
   }
 
   rootMessage(threadId: string): Message | null {
@@ -489,6 +554,17 @@ interface MessageRow {
   metadata_json: string;
   seq: number;
   created_at: string;
+}
+
+interface ActivityRow extends ThreadRow {
+  channel_name: string;
+  message_id: string;
+  message_author: string;
+  message_kind: string;
+  message_content: string;
+  message_metadata_json: string;
+  message_created_at: string;
+  unread_count: number;
 }
 
 interface ThreadSessionRow {

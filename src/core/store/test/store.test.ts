@@ -228,6 +228,67 @@ test("listThreads orders by activity and counts messages", () => {
   store.close();
 });
 
+test("listActivity returns one latest-message row per thread with cursor pagination", () => {
+  const { store, channel } = chatFixture();
+  const first = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "First thread",
+  });
+  const second = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Second thread",
+  });
+  const latest = store.appendMessage(first.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "First thread reply",
+    metadata: { agent: "default" },
+  });
+
+  const page = store.listActivity(first.thread.workspaceId, { limit: 1 });
+  expect(page).toHaveLength(1);
+  expect(page[0]).toMatchObject({
+    thread: { id: first.thread.id },
+    channelName: channel.name,
+    latestMessage: { id: latest.id, content: "First thread reply" },
+    unreadCount: 2,
+  });
+
+  const nextPage = store.listActivity(first.thread.workspaceId, {
+    before: latest.seq,
+  });
+  expect(nextPage.map((item) => item.thread.id)).toEqual([second.thread.id]);
+  expect(nextPage[0]!.latestMessage.id).toBe(second.message.id);
+  store.close();
+});
+
+test("markThreadRead advances a monotonic watermark and reports unknown threads", () => {
+  const { store, channel } = chatFixture();
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Read state",
+  });
+
+  expect(store.markThreadRead("th_missing")).toBe(false);
+  expect(store.markThreadRead(thread.id)).toBe(true);
+  expect(store.listActivity(thread.workspaceId)[0]!.unreadCount).toBe(0);
+
+  store.appendMessage(thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "A new reply",
+    metadata: { agent: "default" },
+  });
+  expect(store.listActivity(thread.workspaceId)[0]!.unreadCount).toBe(1);
+
+  expect(store.markThreadRead(thread.id)).toBe(true);
+  expect(store.listActivity(thread.workspaceId)[0]!.unreadCount).toBe(0);
+  store.close();
+});
+
 test("writes emit post-commit changes", () => {
   const { store, channel } = chatFixture();
   const changes: string[] = [];

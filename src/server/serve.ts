@@ -59,6 +59,17 @@ export function startServer(): void {
         Response.json({ ok: true, workspaceId: workspace.id }),
       "/api/v1/channels": () =>
         Response.json({ channels: store.listChannels(workspace.id) }),
+      "/api/v1/activity": (req) => {
+        const url = new URL(req.url);
+        const before = positiveInteger(url.searchParams.get("before"));
+        const limit = positiveInteger(url.searchParams.get("limit")) ?? 50;
+        return Response.json({
+          activity: store.listActivity(workspace.id, {
+            before,
+            limit: Math.min(limit, 100),
+          }),
+        });
+      },
       "/api/v1/channels/:id/threads": {
         GET: (req) => {
           if (!store.getChannel(req.params.id)) {
@@ -146,6 +157,14 @@ export function startServer(): void {
           }
           runtime.handleUserMessage(lastUserMessage);
           return Response.json({ ok: true }, { status: 202 });
+        },
+      },
+      "/api/v1/threads/:id/read": {
+        POST: (req) => {
+          if (!store.markThreadRead(req.params.id)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json({ ok: true });
         },
       },
       // Read-only file serving for message file links. /files is the
@@ -254,4 +273,10 @@ async function messageContent(req: Request): Promise<string | null> {
   return typeof content === "string" && content.trim().length > 0
     ? content.trim()
     : null;
+}
+
+function positiveInteger(value: string | null): number | undefined {
+  if (value === null || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }

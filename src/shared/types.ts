@@ -56,6 +56,13 @@ export interface Message {
   createdAt: string;
 }
 
+export interface ActivityItem {
+  thread: Thread;
+  channelName: string;
+  latestMessage: Message;
+  unreadCount: number;
+}
+
 export interface ThreadTurn {
   threadId: string;
   active: boolean;
