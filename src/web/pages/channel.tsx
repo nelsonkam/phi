@@ -6,7 +6,9 @@ import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { MessageItem } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
-import { useChannels, useCreateThread, useThreads } from "@/web/lib/queries";
+import { UntaggedAgentTag } from "@/web/components/untagged-agent-tag";
+import { useAgents, useChannels, useCreateThread, useThreads } from "@/web/lib/queries";
+import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import { relativeTime } from "@/web/lib/time";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { EmptyState, Page } from "../app";
@@ -17,7 +19,9 @@ export function ChannelPage() {
   const { channelId = "", threadId } = useParams();
   const navigate = useNavigate();
   const { data: channelData } = useChannels();
+  const { data: agentData } = useAgents();
   const channel = channelData?.channels.find((c) => c.id === channelId);
+  const untaggedAgent = threadUntaggedAgent(null, agentData?.agents);
   const { data, isPending } = useThreads(channelId);
   const create = useCreateThread(channelId);
   const selectedThread = data?.threads.find((thread) => thread.id === threadId);
@@ -43,7 +47,12 @@ export function ChannelPage() {
   }
 
   return (
-    <Page title={channel ? `# ${channel.name}` : "…"}>
+    <Page
+      title={channel ? `# ${channel.name}` : "…"}
+      titleExtra={
+        untaggedAgent ? <UntaggedAgentTag name={untaggedAgent} /> : null
+      }
+    >
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1">

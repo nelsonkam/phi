@@ -3,12 +3,15 @@ import { RotateCcw, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
+import { UntaggedAgentTag } from "@/web/components/untagged-agent-tag";
 import {
+  useAgents,
   useMessages,
   useRetryTurn,
   useSendMessage,
   useThreadTurn,
 } from "@/web/lib/queries";
+import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { cn } from "@/web/lib/utils";
 
@@ -27,9 +30,11 @@ export function ThreadPanel({
   turnAgent: string | null;
 }) {
   const { data } = useMessages(threadId);
+  const { data: agentData } = useAgents();
   const send = useSendMessage(threadId);
   const messages = data?.messages ?? [];
   const [root, ...replies] = messages;
+  const untaggedAgent = threadUntaggedAgent(root, agentData?.agents);
   const liveTurn = useThreadTurn(threadId);
   const persistedAgent = turnActive ? (turnAgent ?? "agent") : null;
   const activeAgent = liveTurn.ready ? liveTurn.agent : persistedAgent;
@@ -50,6 +55,7 @@ export function ThreadPanel({
             # {channelName}
           </span>
         )}
+        {untaggedAgent && <UntaggedAgentTag name={untaggedAgent} />}
         <Link
           to={`/c/${channelId}`}
           aria-label="Close thread"
