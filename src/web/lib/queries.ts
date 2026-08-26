@@ -1,8 +1,9 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { queryClient } from "./query-client";
 import {
   createDefaultAgent,
   createThread,
+  fetchActivity,
   fetchAgent,
   fetchAgents,
   fetchChannels,
@@ -11,6 +12,7 @@ import {
   fetchMessages,
   fetchSetupStatus,
   fetchThreads,
+  markThreadRead,
   retryTurn,
   sendMessage,
   updateAgent,
@@ -35,7 +37,47 @@ export const queryKeys = {
   channelThreads: (channelId: string) => ["channels", channelId, "threads"] as const,
   threadMessages: (threadId: string) => ["threads", threadId, "messages"] as const,
   turnPresence: ["threads", "turn-presence"] as const,
+  activity: ["activity"] as const,
 };
+
+// The Activity feed: one row per thread, newest latest-message first,
+// paginated by that message's workspace-global seq. Realtime frames
+// invalidate rather than patch the cache — the query is one cheap local
+// read, and refetching sidesteps hand-maintaining row order and unread
+// counts across pages.
+export function useActivity() {
+  return useInfiniteQuery({
+    queryKey: queryKeys.activity,
+    queryFn: ({ pageParam }) => fetchActivity(pageParam),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (lastPage) =>
+      lastPage.activity.length > 0
+        ? lastPage.activity.at(-1)!.latestMessage.seq
+        : undefined,
+  });
+}
+
+// Advances the thread's read watermark. Fired when a thread is opened (and
+// as new messages land while it stays open), so it must be quiet: no
+// spinners, and a failure just leaves the row unread.
+export function useMarkThreadRead() {
+  return useMutation({
+    mutationFn: (threadId: string) => markThreadRead(threadId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
+    },
+  });
+}
+
+export function useMarkAllRead() {
+  return useMutation({
+    mutationFn: (threadIds: string[]) =>
+      Promise.all(threadIds.map((id) => markThreadRead(id))),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
+    },
+  });
+}
 
 export function useChannels() {
   return useQuery({ queryKey: queryKeys.channels, queryFn: fetchChannels });
@@ -235,11 +277,13 @@ export function applyServerFrame(frame: ServerFrame): void {
       break;
     case "message.appended":
       appendMessageToCache(frame.message);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
       break;
     case "thread.updated":
       void queryClient.invalidateQueries({
         queryKey: queryKeys.channelThreads(frame.thread.channelId),
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
       break;
     case "thread.turn":
       queryClient.setQueryData<TurnPresenceState>(
@@ -267,6 +311,7 @@ export function applyServerFrame(frame: ServerFrame): void {
       // Deltas may have been missed while disconnected; refetch chat state.
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
       void queryClient.invalidateQueries({ queryKey: ["threads"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
       break;
   }
 }

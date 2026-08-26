@@ -1,4 +1,5 @@
 import type {
+  ActivityItem,
   Agent,
   AgentLoadError,
   Channel,
@@ -26,6 +27,12 @@ export function fetchThreads(
   channelId: string,
 ): Promise<{ threads: ThreadSummary[] }> {
   return get(`/channels/${channelId}/threads`);
+}
+
+export function fetchActivity(
+  before?: number,
+): Promise<{ activity: ActivityItem[] }> {
+  return get(`/activity${before ? `?before=${before}` : ""}`);
 }
 
 export function fetchMessages(
@@ -63,6 +70,10 @@ export function sendMessage(
 
 export function retryTurn(threadId: string): Promise<{ ok: boolean }> {
   return post(`/threads/${threadId}/retry`, {});
+}
+
+export function markThreadRead(threadId: string): Promise<{ ok: boolean }> {
+  return post(`/threads/${threadId}/read`, {});
 }
 
 export function fetchAgents(): Promise<{

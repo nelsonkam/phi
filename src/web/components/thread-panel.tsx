@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Link } from "react-router";
 import { RotateCcw, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
@@ -6,6 +7,7 @@ import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
 import { UntaggedAgentTag } from "@/web/components/untagged-agent-tag";
 import {
   useAgents,
+  useMarkThreadRead,
   useMessages,
   useRetryTurn,
   useSendMessage,
@@ -45,6 +47,16 @@ export function ThreadPanel({
     messages.length,
     threadId,
   );
+
+  // Viewing the thread reads it: advance the watermark on open and again as
+  // messages land while the panel stays open. Optimistic sends re-fire on
+  // commit, which is harmless (the watermark is monotonic server-side).
+  const markRead = useMarkThreadRead();
+  const markReadMutate = markRead.mutate;
+  const latestSeq = messages.at(-1)?.seq;
+  useEffect(() => {
+    if (latestSeq !== undefined) markReadMutate(threadId);
+  }, [markReadMutate, threadId, latestSeq]);
 
   return (
     <aside className="flex min-h-0 w-1/2 shrink-0 flex-col overflow-hidden border-l bg-background">

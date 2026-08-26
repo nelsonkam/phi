@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
-import { Bot, Inbox } from "lucide-react";
+import { Activity, Bot } from "lucide-react";
 import { ThemeToggle } from "@/web/components/theme-toggle";
 import { applyServerFrame, useChannels } from "@/web/lib/queries";
 import { connectDeltaSocket, type ConnectionStatus } from "@/web/lib/ws";
@@ -36,8 +36,8 @@ export function App() {
         </header>
         <nav className="flex-1 overflow-y-auto p-2">
           <SidebarLink to="/" end>
-            <Inbox className="size-4" />
-            Inbox
+            <Activity className="size-4" />
+            Activity
           </SidebarLink>
           <SidebarLink to="/agents">
             <Bot className="size-4" />

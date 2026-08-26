@@ -4,7 +4,7 @@ import { createBrowserRouter, RouterProvider } from "react-router";
 import { queryClient } from "./lib/query-client";
 import { App } from "./app";
 import { SetupGate } from "./components/setup-gate";
-import { InboxPage } from "./pages/inbox";
+import { ActivityPage } from "./pages/activity";
 import { AgentsPage } from "./pages/agents";
 import { AgentDetailPage } from "./pages/agent-detail";
 import { ChannelPage } from "./pages/channel";
@@ -27,7 +27,7 @@ const router = createBrowserRouter([
       </SetupGate>
     ),
     children: [
-      { index: true, element: <InboxPage /> },
+      { index: true, element: <ActivityPage /> },
       { path: "agents", element: <AgentsPage /> },
       { path: "agents/:name", element: <AgentDetailPage /> },
       { path: "c/:channelId", element: <ChannelPage /> },
