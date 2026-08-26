@@ -1,24 +1,15 @@
-import { useEffect, useState } from "react";
 import { AlertTriangle, Bot } from "lucide-react";
-import type { Agent, AgentLoadError } from "@/shared/types";
-import { fetchAgents } from "@/web/lib/api";
+import type { Agent } from "@/shared/types";
+import { useAgents } from "@/web/lib/queries";
 import { cn } from "@/web/lib/utils";
 import { EmptyState, Page } from "../app";
 
 export function AgentsPage() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [errors, setErrors] = useState<AgentLoadError[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const { data, isLoading } = useAgents();
 
-  useEffect(() => {
-    fetchAgents().then(({ agents, errors }) => {
-      setAgents(agents);
-      setErrors(errors);
-      setLoaded(true);
-    });
-  }, []);
+  if (isLoading || !data) return <Page title="Agents">{null}</Page>;
 
-  if (!loaded) return <Page title="Agents">{null}</Page>;
+  const { agents, errors } = data;
 
   return (
     <Page title="Agents">

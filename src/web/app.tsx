@@ -1,17 +1,16 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
 import { Bot, Inbox } from "lucide-react";
-import type { Channel } from "@/shared/types";
-import { fetchChannels } from "@/web/lib/api";
+import { useChannels } from "@/web/lib/queries";
 import { connectDeltaSocket, type ConnectionStatus } from "@/web/lib/ws";
 import { cn } from "@/web/lib/utils";
 
 export function App() {
-  const [channels, setChannels] = useState<Channel[]>([]);
+  const { data } = useChannels();
+  const channels = data?.channels ?? [];
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
 
   useEffect(() => {
-    fetchChannels().then(({ channels }) => setChannels(channels));
     return connectDeltaSocket({
       onFrame: () => {},
       onStatus: setStatus,

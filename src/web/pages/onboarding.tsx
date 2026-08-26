@@ -34,12 +34,12 @@ import {
   PopoverTrigger,
 } from "@/web/components/ui/popover";
 import {
-  createDefaultAgent,
-  fetchHarnesses,
-  fetchHarnessModels,
-} from "@/web/lib/api";
-import type { CreateDefaultAgentInput } from "@/web/lib/api";
+  useCreateDefaultAgent,
+  useHarnessModels,
+  useHarnesses,
+} from "@/web/lib/queries";
 import type { HarnessModel, HarnessStatus } from "@/shared/types";
+import type { CreateDefaultAgentInput } from "@/web/lib/api";
 
 type ModelsState =
   | { status: "loading" }
@@ -60,54 +60,47 @@ export function Onboarding() {
     model: "",
   });
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [harnesses, setHarnesses] = useState<HarnessStatus[]>([]);
+  const { data: harnessData } = useHarnesses();
+  const harnesses = harnessData?.harnesses ?? [];
   const [modelsState, setModelsState] = useState<ModelsState>({
     status: "unavailable",
     reason: null,
   });
 
-  useEffect(() => {
-    fetchHarnesses().then(({ harnesses }) => setHarnesses(harnesses));
-  }, []);
-
   const selectedHarness = harnesses.find((h) => h.id === form.harness);
   const harnessInstalled = selectedHarness?.installed ?? false;
 
+  const modelsQuery = useHarnessModels(form.harness, harnessInstalled);
   useEffect(() => {
     if (!harnessInstalled) {
       setModelsState({ status: "unavailable", reason: null });
       return;
     }
-    let stale = false;
-    setModelsState({ status: "loading" });
-    fetchHarnessModels(form.harness)
-      .catch((error: Error) => ({ error: error.message }) as const)
-      .then((result) => {
-        if (stale) return;
-        if (result.error !== undefined || result.models.length === 0) {
-          setModelsState({
-            status: "unavailable",
-            reason: result.error ?? null,
-          });
-        } else {
-          setModelsState({ status: "ready", models: result.models });
-        }
-      });
-    return () => {
-      stale = true;
-    };
-  }, [form.harness, harnessInstalled]);
+    if (modelsQuery.isPending) {
+      setModelsState({ status: "loading" });
+      return;
+    }
+    if (modelsQuery.isError) {
+      setModelsState({ status: "unavailable", reason: String(modelsQuery.error) });
+      return;
+    }
+    const result = modelsQuery.data;
+    if (result.error !== undefined || result.models.length === 0) {
+      setModelsState({ status: "unavailable", reason: result.error ?? null });
+    } else {
+      setModelsState({ status: "ready", models: result.models });
+    }
+  }, [harnessInstalled, modelsQuery]);
+
+  const createAgent = useCreateDefaultAgent();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setSubmitting(true);
-    const result = await createDefaultAgent({
+    const result = await createAgent.mutateAsync({
       ...form,
       model: form.model?.trim() || undefined,
     });
-    setSubmitting(false);
     if (!result.ok) {
       setError(result.error);
       return;
@@ -226,11 +219,11 @@ export function Onboarding() {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={createAgent.isPending}
             className="flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            {submitting ? "Creating…" : "Create agent"}
-            {!submitting && <ArrowRight className="size-4" />}
+            {createAgent.isPending ? "Creating…" : "Create agent"}
+            {!createAgent.isPending && <ArrowRight className="size-4" />}
           </button>
         </form>
       </div>

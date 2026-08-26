@@ -1,5 +1,7 @@
 import { createRoot } from "react-dom/client";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { createBrowserRouter, RouterProvider } from "react-router";
+import { queryClient } from "./lib/query-client";
 import { App } from "./app";
 import { SetupGate } from "./components/setup-gate";
 import { InboxPage } from "./pages/inbox";
@@ -8,14 +10,7 @@ import { ChannelPage } from "./pages/channel";
 import { Onboarding } from "./pages/onboarding";
 import "./index.css";
 
-// Follow the system theme. A manual override can layer on later; the class
-// stays the single switch the CSS keys off.
-const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
-function applyTheme() {
-  document.documentElement.classList.toggle("dark", darkQuery.matches);
-}
-applyTheme();
-darkQuery.addEventListener("change", applyTheme);
+document.documentElement.classList.add("dark");
 
 const router = createBrowserRouter([
   {
@@ -38,4 +33,8 @@ const router = createBrowserRouter([
 ]);
 
 const root = createRoot(document.getElementById("root")!);
-root.render(<RouterProvider router={router} />);
+root.render(
+  <QueryClientProvider client={queryClient}>
+    <RouterProvider router={router} />
+  </QueryClientProvider>,
+);
