@@ -326,20 +326,31 @@ place. The contract is convention, not tooling:
   `![chart](analysis/chart.png)`. One preamble sentence teaches it; there is
   no `attach_file` tool and no schema change, and in a client that does not
   understand the convention the link is still legible text.
-- The server exposes `GET /api/v1/files/<path>` (`src/server/files.ts`):
-  read-only, workspace-confined (symlinks resolved *before* the containment
-  check, so neither `..` traversal nor symlink escape can leave the root),
-  content-typed by extension, `no-store` cached, size-capped.
-- The web client maps relative hrefs onto that endpoint: images render
-  inline in the bubble; other files render as a chip that opens a viewer
-  dialog (markdown rendered, code/text as-is, PDFs framed, HTML rendered
-  statically in an iframe — scripts never run, enforced by a
-  `script-src 'none'`/`connect-src 'none'` CSP on the response; an iframe
-  sandbox is deliberately not used because its opaque origin trips Chrome's
+- The server serves files read-only (`src/server/files.ts`):
+  `GET /api/v1/files/<path>` is the managed workspace; a channel also
+  exposes its attached folders as named roots (`workspace` plus each
+  folder's basename). `GET /api/v1/channels/:id/files/<path>` searches
+  those roots and 302s to the canonical
+  `/api/v1/channels/:id/file-roots/:root/<path>` when the match is unique
+  (409 if two roots contain the same relative path). Containment is
+  checked per root after symlink resolution, so neither `..` traversal
+  nor a symlink can leave the chosen tree. Responses are content-typed by
+  extension, `no-store` cached, and size-capped.
+- The web client maps relative hrefs onto the channel-scoped endpoint
+  when the message has a channel: images render inline in the bubble;
+  other files render as a chip that opens a viewer dialog (markdown
+  rendered, code/text as-is, PDFs framed, HTML rendered statically in an
+  iframe — scripts never run, enforced by a `script-src 'none'` /
+  `connect-src 'none'` CSP on the response; an iframe sandbox is
+  deliberately not used because its opaque origin trips Chrome's
   private-network-access blocking on localhost-served apps — everything
-  else a
-  download). Verbatim user messages get the same treatment for
-  workspace-looking paths, so users can link files back at agents.
+  else a download).   Href segments are decoded once before encoding, so
+  `My%20Report.md` stays a space and `report.md#summary` keeps `#summary`
+  as a fragment. Markdown opened in the viewer assigns GitHub-style
+  heading ids and scrolls to the matching target. Relative links inside
+  that file resolve from its directory, staying on the same root. Verbatim
+  user messages get the same treatment for workspace-looking paths, so
+  users can link files back at agents.
 - Links are **live references, not snapshots**: the viewer shows the current
   bytes and reports a file that has since been deleted. Pinning a link to
   the checkpoint observed at message time (`git show <sha>:<path>`, sha

@@ -20,6 +20,7 @@ const THREAD_TITLE_MAX = 60;
 // Emitted after a write transaction commits. The WebSocket hub (and later
 // the agent runtime) subscribes; the store itself never talks transport.
 export type StoreChange =
+  | { type: "channel.updated"; channel: Channel }
   | { type: "message.appended"; message: Message }
   | { type: "thread.updated"; thread: Thread }
   | ({ type: "thread.turn" } & ThreadTurn);
@@ -157,7 +158,9 @@ export class PhiStore {
         now,
         now,
       );
-    return this.getChannel(id)!;
+    const channel = this.getChannel(id)!;
+    this.emit({ type: "channel.updated", channel });
+    return channel;
   }
 
   getThread(threadId: string): Thread | null {

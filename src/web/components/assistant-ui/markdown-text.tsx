@@ -10,7 +10,14 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { Button } from "@/web/components/ui/button";
 import { FileLink } from "@/web/components/file-link";
-import { isWorkspaceHref, workspaceFileUrl } from "@/web/lib/file-links";
+import { useFileLinkScope } from "@/web/lib/file-link-context";
+import {
+  isWorkspaceHref,
+  parseWorkspaceHref,
+  resolveLinkedPath,
+  workspaceFileUrl,
+} from "@/web/lib/file-links";
+import { headingIdFromChildren, remarkHeadingIds } from "@/web/lib/heading-ids";
 import { remarkMentions } from "@/web/lib/remark-mentions";
 import { cn } from "@/web/lib/utils";
 
@@ -25,8 +32,8 @@ const MarkdownTextImpl = ({
   const remarkPlugins = useMemo(
     () =>
       mentionNames?.size
-        ? [remarkGfm, remarkMentions(mentionNames)]
-        : [remarkGfm],
+        ? [remarkGfm, remarkHeadingIds, remarkMentions(mentionNames)]
+        : [remarkGfm, remarkHeadingIds],
     [mentionNames],
   );
   return (
@@ -96,59 +103,77 @@ const useCopyToClipboard = ({
 };
 
 const defaultComponents = memoizeMarkdownComponents({
-  h1: ({ className, ...props }) => (
+  h1: ({ className, id, children, ...props }) => (
     <h1
+      id={headingIdFromChildren(id, children)}
       className={cn(
         "aui-md-h1 mt-5 mb-2 scroll-m-20 text-xl font-semibold first:mt-0 last:mb-0",
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </h1>
   ),
-  h2: ({ className, ...props }) => (
+  h2: ({ className, id, children, ...props }) => (
     <h2
+      id={headingIdFromChildren(id, children)}
       className={cn(
         "aui-md-h2 mt-5 mb-2 scroll-m-20 text-lg font-semibold first:mt-0 last:mb-0",
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </h2>
   ),
-  h3: ({ className, ...props }) => (
+  h3: ({ className, id, children, ...props }) => (
     <h3
+      id={headingIdFromChildren(id, children)}
       className={cn(
         "aui-md-h3 mt-4 mb-1.5 scroll-m-20 text-base font-semibold first:mt-0 last:mb-0",
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </h3>
   ),
-  h4: ({ className, ...props }) => (
+  h4: ({ className, id, children, ...props }) => (
     <h4
+      id={headingIdFromChildren(id, children)}
       className={cn(
         "aui-md-h4 mt-3.5 mb-1 scroll-m-20 text-base font-medium first:mt-0 last:mb-0",
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </h4>
   ),
-  h5: ({ className, ...props }) => (
+  h5: ({ className, id, children, ...props }) => (
     <h5
+      id={headingIdFromChildren(id, children)}
       className={cn(
         "aui-md-h5 mt-3 mb-1 text-sm font-semibold first:mt-0 last:mb-0",
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </h5>
   ),
-  h6: ({ className, ...props }) => (
+  h6: ({ className, id, children, ...props }) => (
     <h6
+      id={headingIdFromChildren(id, children)}
       className={cn(
         "aui-md-h6 mt-3 mb-1 text-sm font-medium first:mt-0 last:mb-0",
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </h6>
   ),
   p: ({ className, ...props }) => (
     <p
@@ -159,9 +184,9 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  a: ({ className, href, children, ...props }) => {
-    // A relative href is a workspace file (docs/mcp-tools.md §7): render the
-    // viewer chip instead of a navigation link.
+  a: function MarkdownLink({ className, href, children, ...props }) {
+    // A relative href is a workspace file (docs/mcp-tools.md §7). FileLink
+    // resolves it against the active channel/root/base-dir scope.
     if (href && isWorkspaceHref(href)) {
       const label =
         typeof children === "string"
@@ -171,7 +196,7 @@ const defaultComponents = memoizeMarkdownComponents({
               typeof children[0] === "string"
             ? children[0]
             : undefined;
-      return <FileLink path={href.replace(/^\.\//, "")} label={label} />;
+      return <FileLink path={href} label={label} />;
     }
     return (
       <a
@@ -188,21 +213,31 @@ const defaultComponents = memoizeMarkdownComponents({
       </a>
     );
   },
-  img: ({ className, src, alt, ...props }) => (
-    <img
-      {...props}
-      src={
-        typeof src === "string" && isWorkspaceHref(src)
-          ? workspaceFileUrl(src)
-          : src
-      }
-      alt={alt ?? ""}
-      className={cn(
-        "aui-md-img my-3 max-h-96 max-w-full rounded-md border",
-        className,
-      )}
-    />
-  ),
+  img: function MarkdownImage({ className, src, alt, ...props }) {
+    const scope = useFileLinkScope();
+    const resolvedSrc =
+      typeof src === "string" && isWorkspaceHref(src)
+        ? workspaceFileUrl(
+            resolveLinkedPath(parseWorkspaceHref(src)?.path ?? src, scope.baseDir),
+            {
+              channelId: scope.channelId,
+              root: scope.root,
+              fragment: parseWorkspaceHref(src)?.fragment,
+            },
+          )
+        : src;
+    return (
+      <img
+        {...props}
+        src={resolvedSrc}
+        alt={alt ?? ""}
+        className={cn(
+          "aui-md-img my-3 max-h-96 max-w-full rounded-md border",
+          className,
+        )}
+      />
+    );
+  },
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(

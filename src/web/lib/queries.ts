@@ -16,7 +16,7 @@ import {
   updateAgent,
 } from "./api";
 import type { UpdateAgentInput } from "./api";
-import type { Message, ServerFrame } from "@/shared/types";
+import type { Channel, Message, ServerFrame } from "@/shared/types";
 
 interface TurnPresenceState {
   ready: boolean;
@@ -220,6 +220,19 @@ export function appendMessageToCache(message: Message): void {
 // Applies a server delta frame to the query caches.
 export function applyServerFrame(frame: ServerFrame): void {
   switch (frame.type) {
+    case "channel.updated":
+      queryClient.setQueryData<{ channels: Channel[] }>(
+        queryKeys.channels,
+        (current = { channels: [] }) => ({
+          channels: [
+            ...current.channels.filter(
+              (channel) => channel.id !== frame.channel.id,
+            ),
+            frame.channel,
+          ].sort((left, right) => left.name.localeCompare(right.name)),
+        }),
+      );
+      break;
     case "message.appended":
       appendMessageToCache(frame.message);
       break;

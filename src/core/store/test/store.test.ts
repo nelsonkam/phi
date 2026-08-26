@@ -48,6 +48,8 @@ test("createThread writes the thread and its first message atomically", () => {
 test("creates channels with ordered attached folders", () => {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
+  const changes: string[] = [];
+  store.onChange = (change) => changes.push(change.type);
   const channel = store.createChannel(workspace.id, {
     name: "product-work",
     purpose: "Build the product",
@@ -64,6 +66,7 @@ test("creates channels with ordered attached folders", () => {
   expect(store.listChannels(workspace.id).find((item) => item.id === channel.id)).toEqual(
     channel,
   );
+  expect(changes).toEqual(["channel.updated"]);
   store.close();
 });
 
@@ -167,10 +170,18 @@ test("persists and replaces a thread's harness session binding", () => {
     lastSeenSeq: 0,
   });
   store.advanceThreadSession(thread.id, "reviewer", 7);
-  expect(store.getThreadSession(thread.id, "reviewer")).toMatchObject({
-    ...reviewer,
+  const advancedReviewer = store.getThreadSession(thread.id, "reviewer")!;
+  expect(advancedReviewer).toMatchObject({
+    threadId: reviewer.threadId,
+    harnessId: reviewer.harnessId,
+    agentName: reviewer.agentName,
+    sessionId: reviewer.sessionId,
+    model: reviewer.model,
+    config: reviewer.config,
     lastSeenSeq: 7,
+    createdAt: reviewer.createdAt,
   });
+  expect(advancedReviewer.updatedAt >= reviewer.updatedAt).toBe(true);
   expect(store.getThreadSession(thread.id, "default")!.sessionId).toBe(
     "session-two",
   );

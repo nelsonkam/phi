@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { createFileHandler, resolveWorkspaceFile } from "@/server/files";
+import { basename, join } from "node:path";
+import { PhiStore } from "@/core/store/store";
+import {
+  createFileHandler,
+  listFileRoots,
+  resolveFileInRoots,
+  resolveWorkspaceFile,
+  WORKSPACE_ROOT_ID,
+} from "@/server/files";
 import { tempDir } from "@/testing/tmpdir";
 
 function workspaceWithFiles(): { root: string; outside: string } {
@@ -107,4 +114,147 @@ test("the handler 404s everything the resolver rejects", async () => {
     );
     expect(res.status).toBe(404);
   }
+});
+
+test("lists workspace plus unique folder basenames as file roots", () => {
+  const roots = listFileRoots("/ws", ["/proj/app", "/other/app", "/docs"]);
+  expect(roots.map((root) => root.id)).toEqual([
+    WORKSPACE_ROOT_ID,
+    "app",
+    "app-2",
+    "docs",
+  ]);
+});
+
+test("resolveFileInRoots searches or pins a root and rejects escapes", () => {
+  const { root, outside } = workspaceWithFiles();
+  const attached = tempDir();
+  writeFileSync(join(attached, "readme.md"), "attached");
+  writeFileSync(join(root, "readme.md"), "workspace");
+  const roots = listFileRoots(root, [attached]);
+  const folderId = basename(attached);
+
+  const pinned = resolveFileInRoots(roots, "readme.md", folderId);
+  expect(pinned.ok).toBe(true);
+  if (pinned.ok) expect(pinned.root.id).toBe(folderId);
+
+  const ambiguous = resolveFileInRoots(roots, "readme.md");
+  expect(ambiguous).toMatchObject({ ok: false, reason: "ambiguous" });
+
+  const unique = resolveFileInRoots(roots, "notes.txt");
+  expect(unique.ok).toBe(true);
+  if (unique.ok) expect(unique.root.id).toBe(WORKSPACE_ROOT_ID);
+
+  expect(resolveFileInRoots(roots, "../secret.txt", folderId).ok).toBe(false);
+  expect(resolveFileInRoots(roots, outside, folderId).ok).toBe(false);
+});
+
+test("channel search redirects to the matching file-root URL", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const { root } = workspaceWithFiles();
+  const attached = tempDir();
+  writeFileSync(join(attached, "readme.md"), "from attached\n");
+  const channel = store.createChannel(workspace.id, {
+    name: "code",
+    folders: [attached],
+  });
+  const handler = createFileHandler(root, store);
+  const folderId = basename(attached);
+
+  const search = await handler(
+    new Request(
+      `http://localhost/api/v1/channels/${channel.id}/files/readme.md`,
+    ),
+  );
+  expect(search.status).toBe(302);
+  expect(search.headers.get("location")).toBe(
+    `/api/v1/channels/${channel.id}/file-roots/${folderId}/readme.md`,
+  );
+
+  const canonical = await handler(
+    new Request(`http://localhost${search.headers.get("location")}`),
+  );
+  expect(canonical.status).toBe(200);
+  expect(await canonical.text()).toBe("from attached\n");
+
+  const workspaceHit = await handler(
+    new Request(
+      `http://localhost/api/v1/channels/${channel.id}/files/channels/general/report.md`,
+    ),
+  );
+  expect(workspaceHit.status).toBe(302);
+  expect(workspaceHit.headers.get("location")).toContain(
+    `/file-roots/${WORKSPACE_ROOT_ID}/channels/general/report.md`,
+  );
+
+  store.close();
+});
+
+test("channel search 409s when two roots share a path", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const { root } = workspaceWithFiles();
+  writeFileSync(join(root, "clash.md"), "workspace copy");
+  const attached = tempDir();
+  writeFileSync(join(attached, "clash.md"), "folder copy");
+  const channel = store.createChannel(workspace.id, {
+    name: "clash",
+    folders: [attached],
+  });
+  const handler = createFileHandler(root, store);
+
+  const res = await handler(
+    new Request(
+      `http://localhost/api/v1/channels/${channel.id}/files/clash.md`,
+    ),
+  );
+  expect(res.status).toBe(409);
+  expect(await res.json()).toMatchObject({ error: "ambiguous" });
+
+  const pinned = await handler(
+    new Request(
+      `http://localhost/api/v1/channels/${channel.id}/file-roots/${WORKSPACE_ROOT_ID}/clash.md`,
+    ),
+  );
+  expect(pinned.status).toBe(200);
+  expect(await pinned.text()).toBe("workspace copy");
+
+  store.close();
+});
+
+test("channel file routes stay inside the named root", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const { root, outside } = workspaceWithFiles();
+  const attached = tempDir();
+  writeFileSync(join(attached, "ok.md"), "ok");
+  symlinkSync(outside, join(attached, "leak.txt"));
+  const channel = store.createChannel(workspace.id, {
+    name: "safe",
+    folders: [attached],
+  });
+  const handler = createFileHandler(root, store);
+  const folderId = basename(attached);
+
+  const leak = await handler(
+    new Request(
+      `http://localhost/api/v1/channels/${channel.id}/file-roots/${folderId}/leak.txt`,
+    ),
+  );
+  expect(leak.status).toBe(404);
+
+  const escape = await handler(
+    new Request(
+      `http://localhost/api/v1/channels/${channel.id}/file-roots/${folderId}/../secret.txt`,
+    ),
+  );
+  expect(escape.status).toBe(404);
+
+  const otherChannel = await handler(
+    new Request("http://localhost/api/v1/channels/ch_missing/files/ok.md"),
+  );
+  expect(otherChannel.status).toBe(404);
+
+  store.close();
 });

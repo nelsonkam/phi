@@ -3,6 +3,7 @@ import { Bot } from "lucide-react";
 import type { Message } from "@/shared/types";
 import { AgentAvatar } from "@/web/components/agent-avatar";
 import { MarkdownText } from "@/web/components/assistant-ui/markdown-text";
+import { FileLinkScope } from "@/web/lib/file-link-context";
 import { renderRichText, useKnownAgentNames } from "@/web/lib/mentions";
 import { relativeTime } from "@/web/lib/time";
 import { cn } from "@/web/lib/utils";
@@ -119,22 +120,24 @@ export function MessageItem({
           </span>
           <HandoffChips message={message} />
         </p>
-        {renderAsMarkdown ? (
-          <div className="text-sm wrap-break-word">
-            <TextMessagePartProvider text={message.content}>
-              <MarkdownText mentionNames={knownAgents} />
-            </TextMessagePartProvider>
-          </div>
-        ) : (
-          <p
-            className={cn(
-              "text-sm leading-relaxed wrap-break-word whitespace-pre-wrap",
-              message.kind === "error" && "text-destructive",
-            )}
-          >
-            {renderRichText(message.content, knownAgents)}
-          </p>
-        )}
+        <FileLinkScope channelId={message.channelId}>
+          {renderAsMarkdown ? (
+            <div className="text-sm break-words">
+              <TextMessagePartProvider text={message.content}>
+                <MarkdownText mentionNames={knownAgents} />
+              </TextMessagePartProvider>
+            </div>
+          ) : (
+            <p
+              className={cn(
+                "text-sm leading-relaxed break-words whitespace-pre-wrap",
+                message.kind === "error" && "text-destructive",
+              )}
+            >
+              {renderRichText(message.content, knownAgents)}
+            </p>
+          )}
+        </FileLinkScope>
         {children}
       </div>
     </div>

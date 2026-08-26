@@ -32,6 +32,7 @@ export function startServer(): void {
     mcpPort: port,
     mcpTokens,
   });
+  const fileHandler = createFileHandler(workspace.rootPath, store);
   const mcpHandler = createMcpHandler(
     store,
     mcpTokens,
@@ -147,8 +148,12 @@ export function startServer(): void {
           return Response.json({ ok: true }, { status: 202 });
         },
       },
-      // Read-only workspace file serving for message file links.
-      "/api/v1/files/*": { GET: createFileHandler(workspace.rootPath) },
+      // Read-only file serving for message file links. /files is the
+      // managed workspace; channel routes search attached folders too
+      // and redirect to an unambiguous file-roots URL.
+      "/api/v1/files/*": { GET: fileHandler },
+      "/api/v1/channels/:id/files/*": { GET: fileHandler },
+      "/api/v1/channels/:id/file-roots/:root/*": { GET: fileHandler },
       "/api/v1/agents": async () => Response.json(await listAgents(workspace.rootPath)),
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),

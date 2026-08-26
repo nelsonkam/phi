@@ -134,6 +134,7 @@ export type ServerFrame =
       workspaceId: string;
       activeTurns: ThreadTurn[];
     }
+  | { v: 1; type: "channel.updated"; channel: Channel }
   | { v: 1; type: "message.appended"; message: Message }
   | { v: 1; type: "thread.updated"; thread: Thread }
   | ({ v: 1; type: "thread.turn" } & ThreadTurn);
