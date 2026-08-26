@@ -20,13 +20,13 @@ messaging contract that shapes how agents use them.
 | Hosting | In-process — tools call the live `PhiStore` directly, no subprocess |
 | Announcement | `mcpServers: [{ type: "http", ... }]` in `session/new`, `session/resume`, or `session/load` |
 | Identity | Per-session bearer token minted in `ensureSession`, mapped to `{ threadId, agentName }` |
-| Token lifetime | Exactly one live ACP process attachment; rotated on resume and gone on restart |
+| Token lifetime | Exactly one live logical ACP session attachment; rotated on resume and gone on restart |
 | First tool | `send_message` — the agent's only voice; each call is one chat bubble |
 | Agent traces | Not displayed; `agent_message_chunk` text is kept only as a silent-turn fallback |
 | Messaging contract | Reply first, work out loud, ack ≠ delivery, close the loop (§6) |
 | Working indicator | Explicit per-thread turn state, persisted; replaces last-author inference (§6.1) |
 | Message shape | Short multi-bubble runs, prose over outlines; enforced by prompt, not schema |
-| Read tools | `list_channels`, `list_threads`, `read_thread` follow after `send_message` |
+| Workspace tools | `create_channel` with external folder roots; read tools follow after `send_message` |
 | Stdio fallback | Deferred until a harness without HTTP MCP support needs it |
 | SDK | `@modelcontextprotocol/sdk` (new dependency) |
 
@@ -108,9 +108,10 @@ Lifecycle:
    from arguments. `send_message` posts to the caller's own thread by
    construction — there is nothing the model can put in the arguments to
    post elsewhere.
-4. **Revoke** — `dropSession` removes the thread's token alongside killing
-   the process. The durable harness session binding remains, but a later
-   resume receives a new token. A restart clears the registry, so stale
+4. **Revoke** — `dropSession` removes the logical session's token. ACP host
+   processes are pooled separately and may continue serving other sessions.
+   The durable harness session binding remains, but a later resume receives a
+   new token. A restart clears the registry, so stale
    tokens resolve to nothing — the desired behavior.
 
 The registry is its own small class in the server layer, constructed by
@@ -215,6 +216,25 @@ combines semantic and lexical ranks with reciprocal-rank fusion. If local model
 inference is unavailable, the tool degrades to lexical results and reports that
 semantic search was unavailable.
 
+### 5.4 `create_channel` and attached folders
+
+`create_channel` derives the workspace from the caller token and accepts a
+lowercase channel name, an optional purpose, and zero or more existing absolute
+folder paths. Paths are resolved through symlinks, must be directories outside
+phi's managed workspace, and are deduplicated before being persisted on the
+channel.
+
+The workspace root remains the session `cwd`. Harnesses advertising ACP
+`sessionCapabilities.additionalDirectories` receive the channel folders on
+`session/new`, `session/resume`, and `session/load`. Cursor currently exposes
+the equivalent as repeatable process-level `--add-dir` flags, so Cursor ACP
+hosts are pooled by folder set rather than globally.
+
+Logical sessions remain keyed by `(thread, agent)`, but ACP processes are host
+pools: normally one process per harness, with many isolated session IDs.
+Inactive logical sessions are closed after ten minutes and empty hosts after a
+further thirty seconds; durable bindings let later turns resume normally.
+
 ## 6. The messaging contract
 
 The UX phi is aiming for is a live chat with a competent teammate, not a
@@ -296,7 +316,43 @@ Mechanics:
 - Reconnecting clients receive the active-turn set with their snapshot,
   since they may have missed the `active: true` frame.
 
-## 7. Rejected alternatives
+## 7. File links
+
+Messages can reference workspace files, and the app renders them viewable in
+place. The contract is convention, not tooling:
+
+- **A relative markdown link or image embed in a message refers to a
+  workspace file** — `[the report](channels/general/report.md)`,
+  `![chart](analysis/chart.png)`. One preamble sentence teaches it; there is
+  no `attach_file` tool and no schema change, and in a client that does not
+  understand the convention the link is still legible text.
+- The server exposes `GET /api/v1/files/<path>` (`src/server/files.ts`):
+  read-only, workspace-confined (symlinks resolved *before* the containment
+  check, so neither `..` traversal nor symlink escape can leave the root),
+  content-typed by extension, `no-store` cached, size-capped.
+- The web client maps relative hrefs onto that endpoint: images render
+  inline in the bubble; other files render as a chip that opens a viewer
+  dialog (markdown rendered, code/text as-is, PDFs framed, HTML rendered
+  statically in an iframe — scripts never run, enforced by a
+  `script-src 'none'`/`connect-src 'none'` CSP on the response; an iframe
+  sandbox is deliberately not used because its opaque origin trips Chrome's
+  private-network-access blocking on localhost-served apps — everything
+  else a
+  download). Verbatim user messages get the same treatment for
+  workspace-looking paths, so users can link files back at agents.
+- Links are **live references, not snapshots**: the viewer shows the current
+  bytes and reports a file that has since been deleted. Pinning a link to
+  the checkpoint observed at message time (`git show <sha>:<path>`, sha
+  recorded in message metadata) is deferred; it composes with this design
+  without changing the contract.
+
+Rejected: an `attach_file` tool / `attachments` parameter (a tool-use
+behavior the model must remember, for marginal gain over links — additive
+later if rich cards are wanted); serving absolute filesystem paths (clients
+must work remote/mobile, and absolute paths leak host layout — the preamble
+tells agents to use workspace-relative paths).
+
+## 8. Rejected alternatives
 
 - **Displaying the ACP turn text as the reply (status quo)** — couples
   what the user sees to harness streaming behavior, renders commentary and
@@ -327,7 +383,7 @@ Mechanics:
   structure; schema constraints would fight models that phrase things
   differently without buying correctness. Markdown string in, bubble out.
 
-## 8. Implementation sequence
+## 9. Implementation sequence
 
 1. `McpTokenRegistry` (server layer): mint/lookup/revoke plus per-turn
    send counting, with tests.

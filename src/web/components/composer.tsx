@@ -127,7 +127,7 @@ export function Composer({
             <div
               role="listbox"
               aria-label="Mention an agent"
-              className="absolute inset-x-0 bottom-full z-10 mb-1.5 overflow-hidden rounded-lg border bg-popover py-1 shadow-lg shadow-black/10 dark:shadow-black/40"
+              className="absolute inset-x-0 bottom-full z-10 mb-1.5 overflow-hidden rounded-lg border bg-popover py-1 shadow-sm shadow-black/10 dark:shadow-black/40"
             >
               {suggestions.map((agent, index) => (
                 <button
@@ -157,7 +157,7 @@ export function Composer({
               ))}
             </div>
           )}
-          <ComposerPrimitive.Root className="rounded-xl border bg-card shadow-lg shadow-black/10 transition-colors focus-within:border-ring/60 dark:shadow-black/40">
+          <ComposerPrimitive.Root className="rounded-xl border bg-card shadow-xs shadow-black/10 transition-colors focus-within:border-ring/60 dark:shadow-black/40">
             <ComposerPrimitive.Input
               ref={inputRef}
               rows={1}

@@ -4,6 +4,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import { MESSAGING_PREAMBLE } from "@/core/agents/runtime";
 import { routeAgentContent } from "@/core/agents/routing";
 import { HarnessCapabilityService } from "@/core/agents/capabilities";
@@ -16,6 +18,7 @@ import type { Message } from "@/shared/types";
 export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Use the optional to list for a deliberate handoff to peer agents; without it, only a valid leading @name routes the message. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report.`;
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across your phi workspace using both exact keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace comes from your session; do not ask the user for a thread or channel ID. You may optionally narrow results using a channel name.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
+export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 
 export interface AgentHarnessCapabilityApi {
   list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
@@ -96,6 +99,36 @@ export function createMcpHandler(
             additionalProperties: false,
           },
         },
+        {
+          name: "create_channel",
+          description: CREATE_CHANNEL_DESCRIPTION,
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                minLength: 1,
+                maxLength: 63,
+                pattern: "^[a-z0-9][a-z0-9-]*$",
+                description: "Lowercase channel name",
+              },
+              purpose: {
+                type: "string",
+                minLength: 1,
+                description: "Optional channel purpose",
+              },
+              folders: {
+                type: "array",
+                uniqueItems: true,
+                items: { type: "string", minLength: 1 },
+                description:
+                  "Existing absolute folders outside phi's managed workspace",
+              },
+            },
+            required: ["name"],
+            additionalProperties: false,
+          },
+        },
         ...(messageSearch
           ? [
               {
@@ -130,6 +163,76 @@ export function createMcpHandler(
       ],
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      if (request.params.name === "create_channel") {
+        const thread = store.getThread(caller.threadId);
+        if (!thread) {
+          return toolError("Current thread no longer exists");
+        }
+        const rawName = request.params.arguments?.name;
+        const name = typeof rawName === "string" ? rawName.trim() : "";
+        if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) {
+          return toolError(
+            "name must be 1-63 lowercase letters, numbers, or hyphens, starting with a letter or number",
+          );
+        }
+        const rawPurpose = request.params.arguments?.purpose;
+        if (rawPurpose !== undefined && typeof rawPurpose !== "string") {
+          return toolError("purpose must be a string");
+        }
+        const purpose =
+          typeof rawPurpose === "string" ? rawPurpose.trim() : undefined;
+        if (rawPurpose !== undefined && !purpose) {
+          return toolError("purpose must not be empty");
+        }
+        const rawFolders = request.params.arguments?.folders;
+        if (
+          rawFolders !== undefined &&
+          (!Array.isArray(rawFolders) ||
+            rawFolders.some(
+              (folder) => typeof folder !== "string" || !folder.trim(),
+            ))
+        ) {
+          return toolError("folders must be a list of non-empty paths");
+        }
+        let folders: string[];
+        try {
+          folders = canonicalExternalFolders(
+            Array.isArray(rawFolders) ? rawFolders.map(String) : [],
+            store.defaultWorkspace().rootPath,
+          );
+        } catch (error) {
+          return toolError((error as Error).message);
+        }
+        return tokens.runOnce(
+          token,
+          `create_channel:${JSON.stringify({ name, purpose, folders })}`,
+          extra.requestId,
+          async () => {
+            try {
+              const channel = store.createChannel(thread.workspaceId, {
+                name,
+                purpose,
+                folders,
+              });
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({ channel }),
+                  },
+                ],
+              };
+            } catch (error) {
+              const message = (error as Error).message;
+              return toolError(
+                message.includes("UNIQUE constraint failed")
+                  ? `A channel named "${name}" already exists`
+                  : message,
+              );
+            }
+          },
+        );
+      }
       if (request.params.name === "list_agent_harnesses") {
         const rawHarness = request.params.arguments?.harness;
         if (rawHarness !== undefined && typeof rawHarness !== "string") {
@@ -339,4 +442,44 @@ export function createMcpHandler(
 function bearerToken(header: string | null): string | null {
   const match = header?.match(/^Bearer\s+([^\s]+)$/i);
   return match?.[1] ?? null;
+}
+
+function toolError(message: string) {
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: message }],
+  };
+}
+
+function canonicalExternalFolders(
+  folders: string[],
+  workspaceRoot: string,
+): string[] {
+  const root = realpathSync(workspaceRoot);
+  const canonical: string[] = [];
+  const seen = new Set<string>();
+  for (const rawFolder of folders) {
+    const folder = rawFolder.trim();
+    if (!isAbsolute(folder)) {
+      throw new Error(`folder must be absolute: ${folder}`);
+    }
+    let resolved: string;
+    try {
+      resolved = realpathSync(folder);
+      if (!statSync(resolved).isDirectory()) {
+        throw new Error("not a directory");
+      }
+    } catch {
+      throw new Error(`folder does not exist or is not a directory: ${folder}`);
+    }
+    const fromRoot = relative(root, resolved);
+    if (fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot))) {
+      throw new Error(`folder must be outside phi's workspace: ${folder}`);
+    }
+    if (!seen.has(resolved)) {
+      seen.add(resolved);
+      canonical.push(resolved);
+    }
+  }
+  return canonical;
 }

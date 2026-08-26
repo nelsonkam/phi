@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { PhiStore } from "@/core/store/store";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
@@ -116,9 +117,35 @@ function listAgentHarnesses(
   );
 }
 
+function createChannel(
+  handler: (req: Request) => Promise<Response>,
+  token: string,
+  id: number,
+  args: Record<string, unknown>,
+): Promise<Response> {
+  return handler(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "create_channel", arguments: args },
+      }),
+    }),
+  );
+}
+
 function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void) {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
+  ensureWorkspace(workspace.rootPath);
   const channel = store.listChannels(workspace.id)[0]!;
   const { thread } = store.createThread(channel.id, {
     author: "user",
@@ -236,7 +263,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(3);
+  expect(body.result.tools).toHaveLength(4);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.inputSchema.properties.to).toBeDefined();
@@ -244,11 +271,68 @@ test("advertises messaging and workspace search without a thread argument", asyn
   expect(harnesses.name).toBe("list_agent_harnesses");
   expect(harnesses.description).toContain("copied verbatim from ACP");
   expect(harnesses.inputSchema.properties.harness).toBeDefined();
-  const search = body.result.tools[2]!;
+  const create = body.result.tools[2]!;
+  expect(create.name).toBe("create_channel");
+  expect(create.inputSchema.properties.folders).toBeDefined();
+  const search = body.result.tools[3]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
   expect(search.inputSchema.properties.channel).toBeDefined();
+  store.close();
+});
+
+test("create_channel attaches canonical external folders in caller workspace", async () => {
+  const { store, token, handler, workspace } = fixture();
+  const first = tempDir();
+  const second = tempDir();
+  const response = await createChannel(handler, token, 40, {
+    name: "release-work",
+    purpose: "Prepare the release",
+    folders: [first, second, first],
+  });
+
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  const created = JSON.parse(body.result.content[0]!.text).channel;
+  expect(created).toMatchObject({
+    workspaceId: workspace.id,
+    name: "release-work",
+    purpose: "Prepare the release",
+    folders: [realpathSync(first), realpathSync(second)],
+  });
+  expect(store.getChannel(created.id)).toEqual(created);
+
+  const duplicate = await createChannel(handler, token, 41, {
+    name: "release-work",
+  });
+  const duplicateBody = (await duplicate.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(duplicateBody.result.isError).toBe(true);
+  expect(duplicateBody.result.content[0]!.text).toContain("already exists");
+  store.close();
+});
+
+test("create_channel rejects relative, missing, and phi-owned folders", async () => {
+  const { store, token, handler, workspace } = fixture();
+  for (const [id, folder, message] of [
+    [50, "relative/path", "must be absolute"],
+    [51, "/definitely/missing/phi-folder", "does not exist"],
+    [52, workspace.rootPath, "outside phi's workspace"],
+  ] as const) {
+    const response = await createChannel(handler, token, id, {
+      name: `invalid-${id}`,
+      folders: [folder],
+    });
+    const body = (await response.json()) as {
+      result: { isError: boolean; content: Array<{ text: string }> };
+    };
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0]!.text).toContain(message);
+  }
   store.close();
 });
 

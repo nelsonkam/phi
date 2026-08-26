@@ -77,9 +77,10 @@ with `last_seen_seq = threads.last_seq` (the bound agent has seen everything
 in its own session history).
 
 `AgentRuntime.sessions` keys on the same pair. Each live session keeps its own
-ACP process and its own MCP token; the token already maps to
-`{ threadId, agentName }` (mcp-tools.md §4), so `send_message` attribution,
-turn accounting, and revocation need no changes.
+ACP session ID and MCP token while compatible sessions share a pooled harness
+process. The token already maps to `{ threadId, agentName }`
+(mcp-tools.md §4), so `send_message` attribution and turn accounting remain
+session-scoped even when the transport process is shared.
 
 A thread still has a *default* agent: the agent its root message routed to
 (the leading mention when there was one, else the workspace default). It is

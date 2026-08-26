@@ -20,7 +20,7 @@ interface HarnessCatalogEntry {
   loginHint: string;
   // Command that starts the harness speaking ACP over stdio. Absent when no
   // ACP adapter is available yet.
-  acpCommand?: () => string[];
+  acpCommand?: (additionalDirectories?: string[]) => string[];
 }
 
 const CATALOG: HarnessCatalogEntry[] = [
@@ -70,7 +70,11 @@ const CATALOG: HarnessCatalogEntry[] = [
     cli: "cursor-agent",
     installHint: "curl https://cursor.com/install -fsS | bash",
     loginHint: "cursor-agent login",
-    acpCommand: () => ["cursor-agent", "acp"],
+    acpCommand: (additionalDirectories = []) => [
+      "cursor-agent",
+      ...additionalDirectories.flatMap((directory) => ["--add-dir", directory]),
+      "acp",
+    ],
   },
 ];
 

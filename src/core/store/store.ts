@@ -31,6 +31,12 @@ export interface AppendMessageInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface CreateChannelInput {
+  name: string;
+  purpose?: string | null;
+  folders?: string[];
+}
+
 export interface ThreadSessionBinding {
   threadId: string;
   harnessId: string;
@@ -126,6 +132,32 @@ export class PhiStore {
       .query<ChannelRow, [string]>("SELECT * FROM channels WHERE id = ?")
       .get(channelId);
     return row ? channelFromRow(row) : null;
+  }
+
+  createChannel(workspaceId: string, input: CreateChannelInput): Channel {
+    const workspace = this.db
+      .query<{ id: string }, [string]>("SELECT id FROM workspaces WHERE id = ?")
+      .get(workspaceId);
+    if (!workspace) throw new Error(`no workspace "${workspaceId}"`);
+
+    const id = newId("ch");
+    const now = new Date().toISOString();
+    this.db
+      .query(
+        `INSERT INTO channels
+           (id, workspace_id, name, purpose, folders_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        workspaceId,
+        input.name,
+        input.purpose ?? null,
+        JSON.stringify(input.folders ?? []),
+        now,
+        now,
+      );
+    return this.getChannel(id)!;
   }
 
   getThread(threadId: string): Thread | null {
@@ -415,6 +447,7 @@ interface ChannelRow {
   workspace_id: string;
   name: string;
   purpose: string | null;
+  folders_json: string;
   created_at: string;
   updated_at: string;
 }
@@ -517,6 +550,7 @@ function channelFromRow(row: ChannelRow): Channel {
     workspaceId: row.workspace_id,
     name: row.name,
     purpose: row.purpose,
+    folders: JSON.parse(row.folders_json) as string[],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

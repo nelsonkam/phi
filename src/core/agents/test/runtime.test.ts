@@ -17,19 +17,23 @@ interface Fixture {
   channel: Channel;
   mcpPort: number;
   mcpTokens: McpTokenRegistry;
+  launches: Array<{ harnessId: string; additionalDirectories?: string[] }>;
   done: () => void;
 }
 
 async function fixture(options?: {
   agent?: false;
   agentArgs?: string[];
+  harness?: "claude-code" | "codex" | "cursor" | "gemini";
+  sessionIdleMs?: number;
+  hostIdleMs?: number;
 }): Promise<Fixture> {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
   ensureWorkspace(workspace.rootPath);
   if (options?.agent !== false) {
     await writeDefaultAgent(workspace.rootPath, {
-      harness: "claude-code",
+      harness: options?.harness ?? "claude-code",
       model: "smart",
     });
   }
@@ -39,14 +43,20 @@ async function fixture(options?: {
     port: 0,
     fetch: (req) => mcpHandler(req),
   });
+  const launches: Fixture["launches"] = [];
   const runtime = new AgentRuntime(store, workspace.rootPath, {
     mcpPort: mcpServer.port!,
     mcpTokens,
-    resolveCommand: () => [
-      process.execPath,
-      FAKE_AGENT,
-      ...(options?.agentArgs ?? []),
-    ],
+    sessionIdleMs: options?.sessionIdleMs,
+    hostIdleMs: options?.hostIdleMs,
+    resolveCommand: (harnessId, additionalDirectories) => {
+      launches.push({ harnessId, additionalDirectories });
+      return [
+        process.execPath,
+        FAKE_AGENT,
+        ...(options?.agentArgs ?? []),
+      ];
+    },
   });
   const channel = store.listChannels(workspace.id)[0]!;
   const done = () => {
@@ -60,6 +70,7 @@ async function fixture(options?: {
     channel,
     mcpPort: mcpServer.port!,
     mcpTokens,
+    launches,
     done,
   };
 }
@@ -225,8 +236,8 @@ test("turns in one thread serialize and reuse one session", async () => {
   done();
 });
 
-test("threads get separate sessions", async () => {
-  const { store, runtime, channel, done } = await fixture();
+test("threads get separate sessions on one pooled harness process", async () => {
+  const { store, runtime, channel, launches, done } = await fixture();
   const first = store.createThread(channel.id, {
     author: "user",
     kind: "message",
@@ -242,13 +253,114 @@ test("threads get separate sessions", async () => {
   await runtime.settled(first.thread.id);
   await runtime.settled(second.thread.id);
 
-  // Both threads see turn #1: each got its own fake agent process.
+  // Both threads see turn #1 because their logical sessions are isolated,
+  // while one launch proves they share the harness process.
   expect(store.listMessages(first.thread.id)[1]!.content).toBe(
     "[model=smart] [intro] echo#1: thread one",
   );
   expect(store.listMessages(second.thread.id)[1]!.content).toBe(
     "[model=smart] [intro] echo#1: thread two",
   );
+  expect(launches).toHaveLength(1);
+  done();
+});
+
+test("passes channel folders as ACP additional directories", async () => {
+  const { store, runtime, launches, done } = await fixture({
+    agentArgs: ["roots"],
+  });
+  const workspace = store.defaultWorkspace();
+  const folders = [tempDir(), tempDir()];
+  const channel = store.createChannel(workspace.id, {
+    name: "external-projects",
+    folders,
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "inspect roots",
+  });
+
+  runtime.handleUserMessage(root.message);
+  await runtime.settled(root.thread.id);
+
+  expect(store.listMessages(root.thread.id).at(-1)!.content).toContain(
+    `[roots=${folders.join(",")}]`,
+  );
+  // Standard ACP roots are session-scoped, not process launch arguments.
+  expect(launches).toEqual([
+    { harnessId: "claude-code", additionalDirectories: undefined },
+  ]);
+  done();
+});
+
+test("evicts idle sessions and empty pooled hosts", async () => {
+  const { store, runtime, channel, launches, done } = await fixture({
+    sessionIdleMs: 5,
+    hostIdleMs: 5,
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "first",
+  });
+  runtime.handleUserMessage(root.message);
+  await runtime.settled(root.thread.id);
+  await Bun.sleep(30);
+
+  const second = store.appendMessage(root.thread.id, {
+    author: "user",
+    kind: "message",
+    content: "second",
+  });
+  runtime.handleUserMessage(second);
+  await runtime.settled(root.thread.id);
+
+  expect(launches).toHaveLength(2);
+  expect(store.listMessages(root.thread.id).at(-1)!.content).toBe(
+    "[model=smart] echo#2: second",
+  );
+  done();
+});
+
+test("pools Cursor by channel folder set and passes launch-time roots", async () => {
+  const { store, runtime, launches, done } = await fixture({ harness: "cursor" });
+  const workspace = store.defaultWorkspace();
+  const firstFolders = [tempDir(), tempDir()];
+  const secondFolders = [tempDir()];
+  const firstChannel = store.createChannel(workspace.id, {
+    name: "cursor-one",
+    folders: firstFolders,
+  });
+  const secondChannel = store.createChannel(workspace.id, {
+    name: "cursor-two",
+    folders: secondFolders,
+  });
+  const messages = [
+    store.createThread(firstChannel.id, {
+      author: "user",
+      kind: "message",
+      content: "first",
+    }),
+    store.createThread(firstChannel.id, {
+      author: "user",
+      kind: "message",
+      content: "second",
+    }),
+    store.createThread(secondChannel.id, {
+      author: "user",
+      kind: "message",
+      content: "third",
+    }),
+  ];
+
+  for (const item of messages) runtime.handleUserMessage(item.message);
+  await Promise.all(messages.map((item) => runtime.settled(item.thread.id)));
+
+  expect(launches).toEqual([
+    { harnessId: "cursor", additionalDirectories: firstFolders },
+    { harnessId: "cursor", additionalDirectories: secondFolders },
+  ]);
   done();
 });
 

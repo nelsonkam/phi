@@ -3,7 +3,7 @@ import { Bot } from "lucide-react";
 import type { Message } from "@/shared/types";
 import { AgentAvatar } from "@/web/components/agent-avatar";
 import { MarkdownText } from "@/web/components/assistant-ui/markdown-text";
-import { renderMentions, useKnownAgentNames } from "@/web/lib/mentions";
+import { renderRichText, useKnownAgentNames } from "@/web/lib/mentions";
 import { relativeTime } from "@/web/lib/time";
 import { cn } from "@/web/lib/utils";
 
@@ -132,7 +132,7 @@ export function MessageItem({
               message.kind === "error" && "text-destructive",
             )}
           >
-            {renderMentions(message.content, knownAgents)}
+            {renderRichText(message.content, knownAgents)}
           </p>
         )}
         {children}

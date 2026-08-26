@@ -9,6 +9,8 @@ import { type FC, memo, useMemo, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { Button } from "@/web/components/ui/button";
+import { FileLink } from "@/web/components/file-link";
+import { isWorkspaceHref, workspaceFileUrl } from "@/web/lib/file-links";
 import { remarkMentions } from "@/web/lib/remark-mentions";
 import { cn } from "@/web/lib/utils";
 
@@ -157,13 +159,46 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  a: ({ className, ...props }) => (
-    <a
+  a: ({ className, href, children, ...props }) => {
+    // A relative href is a workspace file (docs/mcp-tools.md §7): render the
+    // viewer chip instead of a navigation link.
+    if (href && isWorkspaceHref(href)) {
+      const label =
+        typeof children === "string"
+          ? children
+          : Array.isArray(children) &&
+              children.length === 1 &&
+              typeof children[0] === "string"
+            ? children[0]
+            : undefined;
+      return <FileLink path={href.replace(/^\.\//, "")} label={label} />;
+    }
+    return (
+      <a
+        {...props}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(
+          "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
+          className,
+        )}
+      >
+        {children}
+      </a>
+    );
+  },
+  img: ({ className, src, alt, ...props }) => (
+    <img
       {...props}
-      target="_blank"
-      rel="noopener noreferrer"
+      src={
+        typeof src === "string" && isWorkspaceHref(src)
+          ? workspaceFileUrl(src)
+          : src
+      }
+      alt={alt ?? ""}
       className={cn(
-        "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
+        "aui-md-img my-3 max-h-96 max-w-full rounded-md border",
         className,
       )}
     />

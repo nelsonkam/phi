@@ -45,6 +45,28 @@ test("createThread writes the thread and its first message atomically", () => {
   store.close();
 });
 
+test("creates channels with ordered attached folders", () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.createChannel(workspace.id, {
+    name: "product-work",
+    purpose: "Build the product",
+    folders: ["/projects/app", "/projects/docs"],
+  });
+
+  expect(channel).toMatchObject({
+    workspaceId: workspace.id,
+    name: "product-work",
+    purpose: "Build the product",
+    folders: ["/projects/app", "/projects/docs"],
+  });
+  expect(store.getChannel(channel.id)).toEqual(channel);
+  expect(store.listChannels(workspace.id).find((item) => item.id === channel.id)).toEqual(
+    channel,
+  );
+  store.close();
+});
+
 test("appendMessage allocates monotonic seqs and bumps the thread", () => {
   const { store, channel } = chatFixture();
   const { thread } = store.createThread(channel.id, {

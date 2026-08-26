@@ -14,6 +14,7 @@ export interface Channel {
   workspaceId: string;
   name: string;
   purpose: string | null;
+  folders: string[];
   createdAt: string;
   updatedAt: string;
 }

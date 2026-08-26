@@ -25,7 +25,7 @@ const AUTH_REQUIRED_CODE = -32000;
 // the phi MCP server repeats the same guidance in send_message's tool
 // description and server instructions, so the model sees it every turn
 // regardless.
-export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content — never prefix your own messages with a handle; your name is attached automatically. Lead with @name only to hand the turn to that agent.`;
+export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content — never prefix your own messages with a handle; your name is attached automatically. Lead with @name only to hand the turn to that agent. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
 
 const RECOVERY_CONTEXT_MAX_CHARS = 16_000;
 
@@ -38,11 +38,10 @@ type SessionAgent = Pick<
 // docs/channels-and-server.md §5). The live process is an in-memory cache; the
 // harness session id is durable in PhiStore and can be resumed after restart.
 interface ThreadSession {
-  acp: AcpProcess;
+  host: AcpHost;
   sessionId: string;
   agentName: string;
   mcpToken: string;
-  closeSupported: boolean;
   // False until the messaging preamble has reached the harness session, either
   // by this process sending it or by resuming a session whose history has it.
   primed: boolean;
@@ -51,12 +50,29 @@ interface ThreadSession {
   // commentary followed by a final answer). Chunks within a message are deltas
   // and concatenate exactly; distinct messages retain a paragraph boundary.
   turnText: Array<{ messageId: string | undefined; chunks: string[] }>;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+}
+
+// One ACP agent process can host many logical sessions. Most harnesses use a
+// single host process; Cursor hosts are keyed by their launch-time --add-dir
+// set because its current ACP implementation does not advertise per-session
+// additionalDirectories.
+interface AcpHost {
+  key: string;
+  harnessId: string;
+  acp: AcpProcess;
+  initialized: InitializeResponse;
+  sessionsById: Map<string, ThreadSession>;
+  idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export interface AgentRuntimeOptions {
   // Test hook: resolves the ACP launch command for a harness id. Defaults to
   // the harness catalog.
-  resolveCommand?: (harnessId: string) => string[] | null;
+  resolveCommand?: (
+    harnessId: string,
+    additionalDirectories?: string[],
+  ) => string[] | null;
   mcpPort: number;
   mcpTokens: {
     mint(caller: { threadId: string; agentName: string }): string;
@@ -65,6 +81,8 @@ export interface AgentRuntimeOptions {
     sendCount(token: string): number;
   };
   hopBudget?: number;
+  sessionIdleMs?: number;
+  hostIdleMs?: number;
 }
 
 // Routes stored user messages to agent sessions and writes replies back
@@ -73,11 +91,18 @@ export interface AgentRuntimeOptions {
 export class AgentRuntime {
   private readonly store: PhiStore;
   private readonly workspaceRoot: string;
-  private readonly resolveCommand: (harnessId: string) => string[] | null;
+  private readonly resolveCommand: (
+    harnessId: string,
+    additionalDirectories?: string[],
+  ) => string[] | null;
   private readonly mcpPort: number;
   private readonly mcpTokens: AgentRuntimeOptions["mcpTokens"];
   private readonly hopBudget: number;
+  private readonly sessionIdleMs: number;
+  private readonly hostIdleMs: number;
   private readonly sessions = new Map<string, ThreadSession>();
+  private readonly hosts = new Map<string, AcpHost>();
+  private readonly startingHosts = new Map<string, Promise<AcpHost>>();
   // Per-thread promise chain; one turn runs at a time per thread and
   // messages posted mid-turn become the next turn.
   private readonly turns = new Map<string, Promise<void>>();
@@ -87,6 +112,7 @@ export class AgentRuntime {
   // them.
   private readonly pendingTurns = new Map<string, number>();
   private readonly agentHops = new Map<string, number>();
+  private closed = false;
 
   constructor(
     store: PhiStore,
@@ -98,9 +124,12 @@ export class AgentRuntime {
     this.mcpPort = options.mcpPort;
     this.mcpTokens = options.mcpTokens;
     this.hopBudget = options.hopBudget ?? 4;
+    this.sessionIdleMs = options.sessionIdleMs ?? 10 * 60_000;
+    this.hostIdleMs = options.hostIdleMs ?? 30_000;
     this.resolveCommand =
       options.resolveCommand ??
-      ((harnessId) => harnessEntry(harnessId)?.acpCommand?.() ?? null);
+      ((harnessId, additionalDirectories) =>
+        harnessEntry(harnessId)?.acpCommand?.(additionalDirectories) ?? null);
   }
 
   // Pass `threadId` when routing a reply so unmentioned messages fall back to
@@ -254,9 +283,19 @@ export class AgentRuntime {
   }
 
   close(): void {
-    for (const key of [...this.sessions.keys()]) {
-      this.dropSessionByKey(key);
+    this.closed = true;
+    for (const session of this.sessions.values()) {
+      if (session.idleTimer) clearTimeout(session.idleTimer);
+      this.mcpTokens.revoke(session.mcpToken);
     }
+    this.sessions.clear();
+    for (const host of this.hosts.values()) {
+      if (host.idleTimer) clearTimeout(host.idleTimer);
+      host.acp.connection.close();
+      host.acp.proc.kill();
+    }
+    this.hosts.clear();
+    this.startingHosts.clear();
   }
 
   // Releases live resources while retaining the durable binding. Archival can
@@ -268,12 +307,15 @@ export class AgentRuntime {
     for (const key of keys) {
       const session = this.sessions.get(key);
       if (!session) continue;
-      if (session.closeSupported) {
-        await session.acp.connection.agent
+      this.dropSessionByKey(key);
+      if (
+        session.host.initialized.agentCapabilities?.sessionCapabilities?.close !=
+        null
+      ) {
+        await session.host.acp.connection.agent
           .request("session/close", { sessionId: session.sessionId })
           .catch(() => undefined);
       }
-      this.dropSessionByKey(key);
     }
   }
 
@@ -295,7 +337,7 @@ export class AgentRuntime {
         session.lastSeenSeq,
         message.seq,
       );
-      const response = (await session.acp.connection.agent.request(
+      const response = (await session.host.acp.connection.agent.request(
         "session/prompt",
         {
           sessionId: session.sessionId,
@@ -372,6 +414,7 @@ export class AgentRuntime {
         );
         session.lastSeenSeq = Math.max(session.lastSeenSeq, lastSeenSeq);
         this.store.advanceThreadSession(threadId, agentName, lastSeenSeq);
+        this.scheduleSessionIdle(key, threadId, agentName, session);
       }
     }
   }
@@ -382,9 +425,17 @@ export class AgentRuntime {
   ): Promise<ThreadSession> {
     const key = sessionKey(threadId, agentName);
     const existing = this.sessions.get(key);
-    if (existing && existing.acp.proc.exitCode === null) return existing;
+    if (existing && existing.host.acp.proc.exitCode === null) {
+      if (existing.idleTimer) clearTimeout(existing.idleTimer);
+      existing.idleTimer = null;
+      return existing;
+    }
     if (existing) this.dropSessionByKey(key);
 
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error(`no thread "${threadId}"`);
+    const channel = this.store.getChannel(thread.channelId);
+    if (!channel) throw new Error(`no channel "${thread.channelId}"`);
     const binding = this.store.getThreadSession(threadId, agentName);
     const agent = binding
       ? agentFromBinding(binding)
@@ -396,26 +447,198 @@ export class AgentRuntime {
           : `no agent named "${agentName}" is configured`,
       );
     }
-    const command = this.resolveCommand(agent.harness);
-    if (!command) {
+    const host = await this.ensureHost(agent.harness, channel.folders);
+    const supportsAdditionalDirectories =
+      host.initialized.agentCapabilities?.sessionCapabilities
+        ?.additionalDirectories != null;
+    if (
+      channel.folders.length > 0 &&
+      agent.harness !== "cursor" &&
+      !supportsAdditionalDirectories
+    ) {
+      this.scheduleHostIdle(host);
       throw new Error(
-        `agent "${agent.name}": harness "${agent.harness}" cannot be launched over ACP`,
+        `${agent.harness} does not support additional channel folders over ACP`,
       );
     }
 
     const session: ThreadSession = {
-      acp: null as unknown as AcpProcess,
+      host,
       sessionId: "",
       agentName: agent.name,
       mcpToken: "",
-      closeSupported: false,
       primed: false,
       lastSeenSeq: binding?.lastSeenSeq ?? 0,
       turnText: [],
+      idleTimer: null,
     };
-    session.acp = connectAcpProcess(command, this.workspaceRoot, {
+    const { proc, connection } = host.acp;
+
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () =>
+        controller.abort(
+          new Error(
+            `session setup timed out after ${HANDSHAKE_TIMEOUT_MS / 1000}s`,
+          ),
+        ),
+      HANDSHAKE_TIMEOUT_MS,
+    );
+    try {
+      session.mcpToken = this.mcpTokens.mint({
+        threadId,
+        agentName: agent.name,
+      });
+      // Fail fast if the agent binary dies before the session exists. Create
+      // this race only after capability validation so every rejection has a
+      // consumer even when initialization is rejected early.
+      const exited = proc.exited.then(() => {
+        throw new Error(`${agent.harness} exited during session setup`);
+      });
+      const mcpServers = this.phiMcpServers(session.mcpToken);
+      const additionalDirectories = supportsAdditionalDirectories
+        ? { additionalDirectories: channel.folders }
+        : {};
+      let needsNewSession = binding === null;
+      if (binding) {
+        session.sessionId = binding.sessionId;
+        host.sessionsById.set(session.sessionId, session);
+        try {
+          if (
+            host.initialized.agentCapabilities?.sessionCapabilities?.resume != null
+          ) {
+            await Promise.race([
+              connection.agent.request(
+                "session/resume",
+                {
+                  sessionId: binding.sessionId,
+                  cwd: this.workspaceRoot,
+                  mcpServers,
+                  ...additionalDirectories,
+                },
+                { cancellationSignal: controller.signal },
+              ),
+              exited,
+            ]);
+          } else if (
+            host.initialized.agentCapabilities?.loadSession === true
+          ) {
+            await Promise.race([
+              connection.agent.request(
+                "session/load",
+                {
+                  sessionId: binding.sessionId,
+                  cwd: this.workspaceRoot,
+                  mcpServers,
+                  ...additionalDirectories,
+                },
+                { cancellationSignal: controller.signal },
+              ),
+              exited,
+            ]);
+          } else {
+            needsNewSession = true;
+          }
+        } catch (error) {
+          if (!isUnavailableSession(error)) throw error;
+          host.sessionsById.delete(binding.sessionId);
+          session.sessionId = "";
+          needsNewSession = true;
+        }
+      }
+      // A resumed session's own history already opens with the preamble.
+      session.primed = !needsNewSession;
+
+      if (needsNewSession) {
+        const created = (await Promise.race([
+          connection.agent.request(
+            "session/new",
+            { cwd: this.workspaceRoot, mcpServers, ...additionalDirectories },
+            { cancellationSignal: controller.signal },
+          ),
+          exited,
+        ])) as NewSessionResponse;
+        session.sessionId = created.sessionId;
+        host.sessionsById.set(session.sessionId, session);
+        session.lastSeenSeq = 0;
+        await this.applyAgentConfig(session, agent, created);
+        this.store.saveThreadSession({
+          threadId,
+          harnessId: agent.harness,
+          agentName: agent.name,
+          sessionId: created.sessionId,
+          model: agent.model,
+          config: agent.config,
+          lastSeenSeq: 0,
+        });
+      }
+
+      // session/load replays history as updates. Phi already has a durable
+      // message read model, so discard those updates before the live turn.
+      session.turnText = [];
+      this.sessions.set(key, session);
+      return session;
+    } catch (error) {
+      if (session.mcpToken) this.mcpTokens.revoke(session.mcpToken);
+      if (session.sessionId) host.sessionsById.delete(session.sessionId);
+      this.scheduleHostIdle(host);
+      if (error instanceof RequestError && error.code === AUTH_REQUIRED_CODE) {
+        const entry = harnessEntry(agent.harness);
+        const hint = entry ? ` — run \`${entry.loginHint}\`` : "";
+        throw new Error(
+          `${agent.harness} is not logged in on this machine${hint}`,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async ensureHost(
+    harnessId: string,
+    additionalDirectories: string[],
+  ): Promise<AcpHost> {
+    if (this.closed) throw new Error("agent runtime is closed");
+    const key = hostKey(harnessId, additionalDirectories);
+    const existing = this.hosts.get(key);
+    if (existing?.acp.proc.exitCode === null) {
+      if (existing.idleTimer) clearTimeout(existing.idleTimer);
+      existing.idleTimer = null;
+      return existing;
+    }
+    const starting = this.startingHosts.get(key);
+    if (starting) return starting;
+
+    const promise = this.startHost(key, harnessId, additionalDirectories);
+    this.startingHosts.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.startingHosts.get(key) === promise) {
+        this.startingHosts.delete(key);
+      }
+    }
+  }
+
+  private async startHost(
+    key: string,
+    harnessId: string,
+    additionalDirectories: string[],
+  ): Promise<AcpHost> {
+    const command = this.resolveCommand(
+      harnessId,
+      harnessId === "cursor" ? additionalDirectories : undefined,
+    );
+    if (!command) {
+      throw new Error(`harness "${harnessId}" cannot be launched over ACP`);
+    }
+
+    let host: AcpHost | null = null;
+    const acp = connectAcpProcess(command, this.workspaceRoot, {
       onSessionUpdate: (notification) => {
-        if (notification.sessionId !== session.sessionId) return;
+        const session = host?.sessionsById.get(notification.sessionId);
+        if (!session) return;
         const update = notification.update;
         if (
           update.sessionUpdate === "agent_message_chunk" &&
@@ -435,135 +658,64 @@ export class AgentRuntime {
       },
       onRequestPermission: approvePermission,
     });
-    const { proc, connection } = session.acp;
-
     const controller = new AbortController();
     const timer = setTimeout(
       () =>
         controller.abort(
           new Error(
-            `session setup timed out after ${HANDSHAKE_TIMEOUT_MS / 1000}s`,
+            `ACP host setup timed out after ${HANDSHAKE_TIMEOUT_MS / 1000}s`,
           ),
         ),
       HANDSHAKE_TIMEOUT_MS,
     );
     try {
-      const initialized = (await connection.agent.request(
-        "initialize",
-        {
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
+      const exited = acp.proc.exited.then(() => {
+        throw new Error(`${harnessId} exited during ACP initialization`);
+      });
+      const initialized = (await Promise.race([
+        acp.connection.agent.request(
+          "initialize",
+          {
+            protocolVersion: PROTOCOL_VERSION,
+            clientCapabilities: {
+              fs: { readTextFile: false, writeTextFile: false },
+            },
           },
-        },
-        { cancellationSignal: controller.signal },
-      )) as InitializeResponse;
+          { cancellationSignal: controller.signal },
+        ),
+        exited,
+      ])) as InitializeResponse;
       if (initialized.agentCapabilities?.mcpCapabilities?.http !== true) {
         throw new Error(
-          `${agent.harness} does not support HTTP MCP, which phi agents require for send_message`,
+          `${harnessId} does not support HTTP MCP, which phi agents require for send_message`,
         );
       }
-      session.mcpToken = this.mcpTokens.mint({
-        threadId,
-        agentName: agent.name,
-      });
-      // Fail fast if the agent binary dies before the session exists. Create
-      // this race only after capability validation so every rejection has a
-      // consumer even when initialization is rejected early.
-      const exited = proc.exited.then(() => {
-        throw new Error(`${agent.harness} exited during session setup`);
-      });
-      session.closeSupported =
-        initialized.agentCapabilities?.sessionCapabilities?.close != null;
-      const mcpServers = this.phiMcpServers(session.mcpToken);
-      let needsNewSession = binding === null;
-      if (binding) {
-        session.sessionId = binding.sessionId;
-        try {
-          if (
-            initialized.agentCapabilities?.sessionCapabilities?.resume != null
-          ) {
-            await Promise.race([
-              connection.agent.request(
-                "session/resume",
-                {
-                  sessionId: binding.sessionId,
-                  cwd: this.workspaceRoot,
-                  mcpServers,
-                },
-                { cancellationSignal: controller.signal },
-              ),
-              exited,
-            ]);
-          } else if (initialized.agentCapabilities?.loadSession === true) {
-            await Promise.race([
-              connection.agent.request(
-                "session/load",
-                {
-                  sessionId: binding.sessionId,
-                  cwd: this.workspaceRoot,
-                  mcpServers,
-                },
-                { cancellationSignal: controller.signal },
-              ),
-              exited,
-            ]);
-          } else {
-            needsNewSession = true;
-          }
-        } catch (error) {
-          if (!isUnavailableSession(error)) throw error;
-          needsNewSession = true;
+      host = {
+        key,
+        harnessId,
+        acp,
+        initialized,
+        sessionsById: new Map(),
+        idleTimer: null,
+      };
+      if (this.closed) throw new Error("agent runtime closed during ACP setup");
+      this.hosts.set(key, host);
+      void acp.proc.exited.then(() => {
+        if (!host || this.hosts.get(key) !== host) return;
+        this.hosts.delete(key);
+        if (host.idleTimer) clearTimeout(host.idleTimer);
+        for (const [sessionKeyValue, session] of this.sessions) {
+          if (session.host !== host) continue;
+          this.sessions.delete(sessionKeyValue);
+          this.mcpTokens.revoke(session.mcpToken);
         }
-      }
-      // A resumed session's own history already opens with the preamble.
-      session.primed = !needsNewSession;
-
-      if (needsNewSession) {
-        const created = (await Promise.race([
-          connection.agent.request(
-            "session/new",
-            { cwd: this.workspaceRoot, mcpServers },
-            { cancellationSignal: controller.signal },
-          ),
-          exited,
-        ])) as NewSessionResponse;
-        session.sessionId = created.sessionId;
-        session.lastSeenSeq = 0;
-        await this.applyAgentConfig(session, agent, created);
-        this.store.saveThreadSession({
-          threadId,
-          harnessId: agent.harness,
-          agentName: agent.name,
-          sessionId: created.sessionId,
-          model: agent.model,
-          config: agent.config,
-          lastSeenSeq: 0,
-        });
-      }
-
-      // session/load replays history as updates. Phi already has a durable
-      // message read model, so discard those updates before the live turn.
-      session.turnText = [];
-      this.sessions.set(key, session);
-      void proc.exited.then(() => {
-        if (this.sessions.get(key) !== session) return;
-        this.sessions.delete(key);
-        this.mcpTokens.revoke(session.mcpToken);
-        connection.close();
+        host.sessionsById.clear();
+        acp.connection.close();
       });
-      return session;
+      return host;
     } catch (error) {
-      if (session.mcpToken) this.mcpTokens.revoke(session.mcpToken);
-      connection.close();
-      proc.kill();
-      if (error instanceof RequestError && error.code === AUTH_REQUIRED_CODE) {
-        const entry = harnessEntry(agent.harness);
-        const hint = entry ? ` — run \`${entry.loginHint}\`` : "";
-        throw new Error(
-          `${agent.harness} is not logged in on this machine${hint}`,
-        );
-      }
+      acp.connection.close();
+      acp.proc.kill();
       throw error;
     } finally {
       clearTimeout(timer);
@@ -599,7 +751,7 @@ export class AgentRuntime {
               value,
             }
           : { sessionId: session.sessionId, configId, value };
-      await session.acp.connection.agent
+      await session.host.acp.connection.agent
         .request("session/set_config_option", params)
         .catch((error: Error) => {
           console.warn(
@@ -670,14 +822,52 @@ export class AgentRuntime {
     const session = this.sessions.get(key);
     if (!session) return;
     this.sessions.delete(key);
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    session.idleTimer = null;
     this.mcpTokens.revoke(session.mcpToken);
-    session.acp.connection.close();
-    session.acp.proc.kill();
+    if (session.host.sessionsById.get(session.sessionId) === session) {
+      session.host.sessionsById.delete(session.sessionId);
+    }
+    this.scheduleHostIdle(session.host);
+  }
+
+  private scheduleSessionIdle(
+    key: string,
+    threadId: string,
+    agentName: string,
+    session: ThreadSession,
+  ): void {
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    if (this.sessionIdleMs < 0) return;
+    session.idleTimer = setTimeout(() => {
+      if (this.sessions.get(key) !== session) return;
+      void this.releaseSession(threadId, agentName);
+    }, this.sessionIdleMs);
+    session.idleTimer.unref?.();
+  }
+
+  private scheduleHostIdle(host: AcpHost): void {
+    if (host.sessionsById.size > 0 || this.hosts.get(host.key) !== host) return;
+    if (host.idleTimer) clearTimeout(host.idleTimer);
+    if (this.hostIdleMs < 0) return;
+    host.idleTimer = setTimeout(() => {
+      if (host.sessionsById.size > 0 || this.hosts.get(host.key) !== host) return;
+      this.hosts.delete(host.key);
+      host.acp.connection.close();
+      host.acp.proc.kill();
+    }, this.hostIdleMs);
+    host.idleTimer.unref?.();
   }
 }
 
 function sessionKey(threadId: string, agentName: string): string {
   return `${threadId}\0${agentName}`;
+}
+
+function hostKey(harnessId: string, additionalDirectories: string[]): string {
+  return harnessId === "cursor"
+    ? `${harnessId}\0${JSON.stringify(additionalDirectories)}`
+    : harnessId;
 }
 
 function messageLabel(message: Message): string {

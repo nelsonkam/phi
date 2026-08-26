@@ -12,6 +12,7 @@ import {
   setupDefaultAgent,
   updateAgent,
 } from "@/server/services/agents";
+import { createFileHandler } from "@/server/files";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { createMessageSearch } from "@/core/search/message-search";
@@ -146,6 +147,8 @@ export function startServer(): void {
           return Response.json({ ok: true }, { status: 202 });
         },
       },
+      // Read-only workspace file serving for message file links.
+      "/api/v1/files/*": { GET: createFileHandler(workspace.rootPath) },
       "/api/v1/agents": async () => Response.json(await listAgents(workspace.rootPath)),
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),

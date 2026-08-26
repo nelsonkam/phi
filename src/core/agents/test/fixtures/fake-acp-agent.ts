@@ -5,11 +5,16 @@
 // session/new fail with the ACP auth_required error instead.
 const mode = process.argv[2] ?? "ok";
 
-const config: Record<string, unknown> = {};
-let turn = 0;
-const newSessionId = `sess_${crypto.randomUUID().replaceAll("-", "")}`;
-let phiMcp:
-  { url: string; headers: Array<{ name: string; value: string }> } | undefined;
+interface FakeSession {
+  config: Record<string, unknown>;
+  turn: number;
+  additionalDirectories: string[];
+  phiMcp:
+    | { url: string; headers: Array<{ name: string; value: string }> }
+    | undefined;
+}
+
+const sessions = new Map<string, FakeSession>();
 
 function send(message: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -35,8 +40,12 @@ async function handle(line: string): Promise<void> {
                   mcpCapabilities: { http: true },
                   sessionCapabilities:
                     mode === "no-resume" || mode === "load-only"
-                      ? {}
-                      : { resume: {}, close: {} },
+                      ? { additionalDirectories: {} }
+                      : {
+                          resume: {},
+                          close: {},
+                          additionalDirectories: {},
+                        },
                 },
         },
       });
@@ -46,7 +55,13 @@ async function handle(line: string): Promise<void> {
         send({ id: msg.id, error: { code: -32000, message: "auth required" } });
         break;
       }
-      capturePhiMcp(msg.params);
+      const newSessionId = `sess_${crypto.randomUUID().replaceAll("-", "")}`;
+      sessions.set(newSessionId, {
+        config: {},
+        turn: 0,
+        additionalDirectories: readAdditionalDirectories(msg.params),
+        phiMcp: findPhiMcp(msg.params),
+      });
       send({
         id: msg.id,
         result: {
@@ -72,18 +87,25 @@ async function handle(line: string): Promise<void> {
         send({ id: msg.id, error: { code: -32001, message: "session not found" } });
         break;
       }
-      capturePhiMcp(msg.params);
+      const resumedParams = msg.params as { sessionId: string };
       // Simulate the one prior turn and its persisted model selection. Runtime
       // tests resume after exactly one prompt.
-      turn = 1;
-      config.model = "smart";
+      sessions.set(resumedParams.sessionId, {
+        config: { model: "smart" },
+        turn: 1,
+        additionalDirectories: readAdditionalDirectories(msg.params),
+        phiMcp: findPhiMcp(msg.params),
+      });
       send({ id: msg.id, result: {} });
       break;
     case "session/load": {
-      capturePhiMcp(msg.params);
-      turn = 1;
-      config.model = "smart";
       const params = msg.params as { sessionId: string };
+      sessions.set(params.sessionId, {
+        config: { model: "smart" },
+        turn: 1,
+        additionalDirectories: readAdditionalDirectories(msg.params),
+        phiMcp: findPhiMcp(msg.params),
+      });
       send({
         method: "session/update",
         params: {
@@ -98,11 +120,16 @@ async function handle(line: string): Promise<void> {
       break;
     }
     case "session/close":
+      sessions.delete(String(msg.params?.sessionId ?? ""));
       send({ id: msg.id, result: {} });
       break;
     case "session/set_config_option": {
-      const params = msg.params as { configId: string; value: unknown };
-      config[params.configId] = params.value;
+      const params = msg.params as {
+        sessionId: string;
+        configId: string;
+        value: unknown;
+      };
+      sessions.get(params.sessionId)!.config[params.configId] = params.value;
       send({ id: msg.id, result: {} });
       break;
     }
@@ -111,7 +138,8 @@ async function handle(line: string): Promise<void> {
         sessionId: string;
         prompt: Array<{ text?: string }>;
       };
-      turn += 1;
+      const session = sessions.get(params.sessionId)!;
+      session.turn += 1;
       const promptText = params.prompt
         .map((block) => block.text ?? "")
         .join("");
@@ -122,7 +150,9 @@ async function handle(line: string): Promise<void> {
       const text = (promptText.split("\n\n").at(-1) ?? promptText)
         .replace(/^New message from the user:\n/, "")
         .replace(/^Message from @[a-z0-9-]+:\n/, "");
-      const model = config.model ? `[model=${config.model}] ` : "";
+      const model = session.config.model
+        ? `[model=${session.config.model}] `
+        : "";
       // Surfaces the once-per-session messaging preamble so tests can assert
       // exactly which prompts carried it.
       const intro = promptText.includes("Use phi's send_message tool")
@@ -131,8 +161,12 @@ async function handle(line: string): Promise<void> {
       const catchup = promptText.includes("Prior conversation from Phi")
         ? "[catchup] "
         : "";
+      const roots =
+        mode === "roots"
+          ? `[roots=${session.additionalDirectories.join(",")}] `
+          : "";
       if (mode === "tool") {
-        await callSendMessage(`tool#${turn}: ${text}`);
+        await callSendMessage(session, `tool#${session.turn}: ${text}`);
         send({
           method: "session/update",
           params: {
@@ -150,7 +184,10 @@ async function handle(line: string): Promise<void> {
         send({ id: msg.id, result: { stopReason: "end_turn" } });
         break;
       }
-      for (const chunk of [`${model}${intro}${catchup}echo#${turn}: `, text]) {
+      for (const chunk of [
+        `${model}${intro}${catchup}${roots}echo#${session.turn}: `,
+        text,
+      ]) {
         send({
           method: "session/update",
           params: {
@@ -172,8 +209,8 @@ async function handle(line: string): Promise<void> {
   }
 }
 
-function capturePhiMcp(params: Record<string, unknown> | undefined): void {
-  phiMcp = (
+function findPhiMcp(params: Record<string, unknown> | undefined) {
+  return (
     params as {
       mcpServers?: Array<{
         name: string;
@@ -184,20 +221,32 @@ function capturePhiMcp(params: Record<string, unknown> | undefined): void {
   ).mcpServers?.find((server) => server.name === "phi");
 }
 
-async function callSendMessage(content: string): Promise<void> {
-  if (!phiMcp) throw new Error("phi MCP server was not announced");
+function readAdditionalDirectories(
+  params: Record<string, unknown> | undefined,
+): string[] {
+  const value = params?.additionalDirectories;
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+async function callSendMessage(
+  session: FakeSession,
+  content: string,
+): Promise<void> {
+  if (!session.phiMcp) throw new Error("phi MCP server was not announced");
   const headers = new Headers({
     accept: "application/json, text/event-stream",
     "content-type": "application/json",
     "mcp-protocol-version": "2025-03-26",
   });
-  for (const header of phiMcp.headers) headers.set(header.name, header.value);
-  const response = await fetch(phiMcp.url, {
+  for (const header of session.phiMcp.headers) {
+    headers.set(header.name, header.value);
+  }
+  const response = await fetch(session.phiMcp.url, {
     method: "POST",
     headers,
     body: JSON.stringify({
       jsonrpc: "2.0",
-      id: turn,
+      id: session.turn,
       method: "tools/call",
       params: { name: "send_message", arguments: { content } },
     }),
