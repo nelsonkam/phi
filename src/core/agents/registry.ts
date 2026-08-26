@@ -1,6 +1,13 @@
 import { join } from "node:path";
 import matter from "gray-matter";
-import { enum as zenum, strictObject, string } from "zod";
+import {
+  boolean,
+  enum as zenum,
+  record,
+  strictObject,
+  string,
+  union,
+} from "zod";
 import type { Agent, AgentLoadError } from "@/shared/types";
 import { KNOWN_HARNESSES } from "./harnesses";
 
@@ -26,6 +33,8 @@ const FrontmatterSchema = strictObject({
   description: string().trim().min(1).nullish(),
   harness: string().trim().min(1),
   model: string().trim().min(1).nullish(),
+  // Harness session config choices, keyed by the ACP config option id.
+  config: record(string(), union([string(), boolean()])).nullish(),
   role: zenum(["default"]).nullish(),
 });
 
@@ -54,37 +63,58 @@ export const DEFAULT_AGENT_DESCRIPTION = "Coordinates work across threads";
 
 export const DEFAULT_AGENT_INSTRUCTIONS = `You are the default agent. You coordinate the workspace: break work down, delegate to other agents, and keep the user informed.`;
 
+export interface WriteAgentInput {
+  harness: Harness;
+  description?: string | null;
+  model?: string | null;
+  config?: Record<string, string | boolean>;
+  instructions: string;
+  role?: "default" | null;
+}
+
+// Serializes and writes an agent definition, overwriting any existing file.
+export async function writeAgent(
+  workspaceRoot: string,
+  name: string,
+  input: WriteAgentInput,
+): Promise<void> {
+  const frontmatter: Record<string, unknown> = {};
+  if (input.role) frontmatter.role = input.role;
+  if (input.description) frontmatter.description = input.description;
+  frontmatter.harness = input.harness;
+  if (input.model) frontmatter.model = input.model;
+  if (input.config && Object.keys(input.config).length > 0) {
+    frontmatter.config = input.config;
+  }
+
+  await Bun.write(
+    join(agentsDir(workspaceRoot), `${name}.md`),
+    matter.stringify(`\n${input.instructions.trim()}\n`, frontmatter),
+  );
+}
+
 export interface WriteDefaultAgentInput {
   harness: Harness;
   description?: string;
   model?: string;
+  config?: Record<string, string | boolean>;
   instructions?: string;
 }
 
-// Serializes and writes the default agent definition. Overwrites any existing
-// default.md. Description and instructions fall back to the phi defaults.
+// Writes the default agent. Description and instructions fall back to the
+// phi defaults.
 export async function writeDefaultAgent(
   workspaceRoot: string,
   input: WriteDefaultAgentInput,
 ): Promise<void> {
-  const description = input.description ?? DEFAULT_AGENT_DESCRIPTION;
-  const instructions = input.instructions ?? DEFAULT_AGENT_INSTRUCTIONS;
-
-  const frontmatter = [
-    "---",
-    "role: default",
-    `description: ${JSON.stringify(description)}`,
-    `harness: ${input.harness}`,
-    input.model ? `model: ${input.model}` : null,
-    "---",
-  ]
-    .filter((line) => line !== null)
-    .join("\n");
-
-  await Bun.write(
-    join(agentsDir(workspaceRoot), `${DEFAULT_AGENT_NAME}.md`),
-    `${frontmatter}\n\n${instructions.trim()}\n`,
-  );
+  await writeAgent(workspaceRoot, DEFAULT_AGENT_NAME, {
+    role: "default",
+    harness: input.harness,
+    description: input.description ?? DEFAULT_AGENT_DESCRIPTION,
+    model: input.model,
+    config: input.config,
+    instructions: input.instructions ?? DEFAULT_AGENT_INSTRUCTIONS,
+  });
 }
 
 // Reads the registry fresh from disk. Callers hit this per request; the
@@ -149,6 +179,7 @@ function parseAgentFile(
       description: result.data.description ?? null,
       harness: result.data.harness,
       model: result.data.model ?? null,
+      config: result.data.config ?? {},
       role: result.data.role ?? null,
       warnings,
       instructions: parsed.content.trim(),

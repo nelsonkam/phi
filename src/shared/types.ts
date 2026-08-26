@@ -53,6 +53,10 @@ export interface Agent {
   description: string | null;
   harness: string;
   model: string | null;
+  // Harness session config choices (effort, fast mode, ...), keyed by the
+  // config option id the harness advertises over ACP. Unset keys mean the
+  // harness default.
+  config: Record<string, string | boolean>;
   role: "default" | null;
   warnings: string[];
 }
@@ -71,23 +75,40 @@ export interface HarnessStatus {
   installHint: string;
 }
 
-export interface HarnessModel {
-  id: string;
+export interface HarnessConfigChoice {
+  value: string;
   name: string;
   description: string | null;
 }
 
-// Result of asking a harness (over ACP) which models it offers. `error` and
-// `models` are mutually exclusive. `loginHint` is the terminal command that
-// fixes an authentication failure.
-export type HarnessModels =
+// One session config option a harness advertises over ACP (model, effort,
+// fast mode, permission mode, ...). `category` carries the spec's semantic
+// grouping; "model" powers the model picker.
+export type HarnessConfigOption =
   | {
-      models: HarnessModel[];
-      currentModelId: string | null;
-      error?: never;
-      loginHint?: never;
+      id: string;
+      name: string;
+      description: string | null;
+      category: string | null;
+      type: "select";
+      currentValue: string;
+      choices: HarnessConfigChoice[];
     }
-  | { error: string; loginHint?: string; models?: never };
+  | {
+      id: string;
+      name: string;
+      description: string | null;
+      category: string | null;
+      type: "boolean";
+      currentValue: boolean;
+    };
+
+// Result of probing a harness (over ACP) for its config options. `error` and
+// `options` are mutually exclusive. `loginHint` is the terminal command that
+// fixes an authentication failure.
+export type HarnessConfig =
+  | { options: HarnessConfigOption[]; error?: never; loginHint?: never }
+  | { error: string; loginHint?: string; options?: never };
 
 // WebSocket frames, server -> client. `v` is the protocol version.
 export type ServerFrame =

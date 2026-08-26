@@ -2,12 +2,15 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { queryClient } from "./query-client";
 import {
   createDefaultAgent,
+  fetchAgent,
   fetchAgents,
   fetchChannels,
-  fetchHarnessModels,
+  fetchHarnessConfig,
   fetchHarnesses,
   fetchSetupStatus,
+  updateAgent,
 } from "./api";
+import type { UpdateAgentInput } from "./api";
 
 // One query key namespace per API resource. Components never call the
 // transport directly; they consume these hooks.
@@ -16,7 +19,8 @@ export const queryKeys = {
   agents: ["agents"] as const,
   harnesses: ["harnesses"] as const,
   setupStatus: ["setup", "status"] as const,
-  harnessModels: (harnessId: string) => ["harnesses", harnessId, "models"] as const,
+  harnessConfig: (harnessId: string) => ["harnesses", harnessId, "config"] as const,
+  agent: (name: string) => ["agents", name] as const,
 };
 
 export function useChannels() {
@@ -35,12 +39,12 @@ export function useSetupStatus() {
   return useQuery({ queryKey: queryKeys.setupStatus, queryFn: fetchSetupStatus });
 }
 
-// Model listing is a live probe of the harness binary (it spawns a process),
+// Config listing is a live probe of the harness binary (it spawns a process),
 // so it is enabled only on demand and never refetched behind the caller's back.
-export function useHarnessModels(harnessId: string, enabled: boolean) {
+export function useHarnessConfig(harnessId: string, enabled: boolean) {
   return useQuery({
-    queryKey: queryKeys.harnessModels(harnessId),
-    queryFn: () => fetchHarnessModels(harnessId),
+    queryKey: queryKeys.harnessConfig(harnessId),
+    queryFn: () => fetchHarnessConfig(harnessId),
     enabled,
     // A successful listing is stable for the session. An error result (not
     // installed, not logged in) goes stale immediately, so selecting the
@@ -49,6 +53,24 @@ export function useHarnessModels(harnessId: string, enabled: boolean) {
       query.state.data?.error !== undefined ? 0 : Infinity,
     refetchOnWindowFocus: false,
     retry: false,
+  });
+}
+
+export function useAgent(name: string) {
+  return useQuery({
+    queryKey: queryKeys.agent(name),
+    queryFn: () => fetchAgent(name),
+    retry: false,
+  });
+}
+
+export function useUpdateAgent(name: string) {
+  return useMutation({
+    mutationFn: (input: UpdateAgentInput) => updateAgent(name, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agent(name) });
+    },
   });
 }
 

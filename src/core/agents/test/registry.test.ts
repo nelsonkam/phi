@@ -106,6 +106,44 @@ test("default agent round-trips through write and load", async () => {
   expect(agent!.instructions).toBe("You coordinate.");
 });
 
+test("config round-trips through write and load", async () => {
+  const root = tempWorkspace();
+  const { writeAgent } = await import("../registry");
+  await writeAgent(root, "tuned", {
+    harness: "claude-code",
+    description: "Tuned agent",
+    model: "sonnet",
+    config: { effort: "high", fast: true },
+    instructions: "Be quick.",
+  });
+
+  const { agents, errors } = await loadAgents(root);
+  expect(errors).toEqual([]);
+  const agent = agents.find((a) => a.name === "tuned")!;
+  expect(agent.model).toBe("sonnet");
+  expect(agent.config).toEqual({ effort: "high", fast: true });
+  expect(agent.instructions).toBe("Be quick.");
+});
+
+test("an empty config map is omitted from the file", async () => {
+  const root = tempWorkspace();
+  const { writeAgent } = await import("../registry");
+  await writeAgent(root, "plain", {
+    harness: "codex",
+    instructions: "Hi.",
+    config: {},
+  });
+
+  const { readFileSync } = await import("node:fs");
+  const content = readFileSync(
+    join(root, ".agents", "agents", "plain.md"),
+    "utf8",
+  );
+  expect(content).not.toContain("config");
+  const { agents } = await loadAgents(root);
+  expect(agents.find((a) => a.name === "plain")!.config).toEqual({});
+});
+
 test("a default.md without role: default does not count as the default agent", async () => {
   const root = tempWorkspace();
   writeAgent(root, "default.md", "---\nharness: codex\n---\nBody.\n");

@@ -1,19 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import {
-  ArrowRight,
-  Check,
-  ChevronsUpDown,
-  LoaderCircle,
-  TriangleAlert,
-} from "lucide-react";
-// Per-icon Mono components, imported directly. The package barrel
-// (`@lobehub/icons`) pulls @lobehub/ui into the bundle and crashes Bun's
-// client build; the Mono components themselves only need react.
-import ClaudeCodeIcon from "@lobehub/icons/es/ClaudeCode/components/Mono";
-import CodexIcon from "@lobehub/icons/es/Codex/components/Mono";
-import CursorIcon from "@lobehub/icons/es/Cursor/components/Mono";
-import GeminiCliIcon from "@lobehub/icons/es/GeminiCLI/components/Mono";
+import { ArrowRight, LoaderCircle, TriangleAlert } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -22,37 +9,26 @@ import {
   SelectValue,
 } from "@/web/components/ui/select";
 import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/web/components/ui/command";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/web/components/ui/popover";
+  ConfigOptionFields,
+  HarnessIcon,
+  ModelCombobox,
+  inputClass,
+  modelOption,
+  otherOptions,
+} from "@/web/components/harness-fields";
 import {
   useCreateDefaultAgent,
-  useHarnessModels,
+  useHarnessConfig,
   useHarnesses,
 } from "@/web/lib/queries";
-import type { HarnessModel, HarnessStatus } from "@/shared/types";
 import type { CreateDefaultAgentInput } from "@/web/lib/api";
-
-type ModelsState =
-  | { status: "loading" }
-  | { status: "ready"; models: HarnessModel[] }
-  | { status: "unavailable"; reason: string | null; loginHint?: string };
 import { cn } from "@/web/lib/utils";
 
 const HARNESS_OPTIONS = [
-  { value: "claude-code", label: "Claude Code", Icon: ClaudeCodeIcon },
-  { value: "cursor", label: "Cursor CLI", Icon: CursorIcon },
-  { value: "gemini", label: "Gemini CLI", Icon: GeminiCliIcon },
-  { value: "codex", label: "Codex", Icon: CodexIcon },
+  { value: "claude-code", label: "Claude Code" },
+  { value: "cursor", label: "Cursor CLI" },
+  { value: "gemini", label: "Gemini CLI" },
+  { value: "codex", label: "Codex" },
 ] as const;
 
 export function Onboarding() {
@@ -60,6 +36,7 @@ export function Onboarding() {
   const [form, setForm] = useState<CreateDefaultAgentInput>({
     harness: "claude-code",
     model: "",
+    config: {},
   });
   const [error, setError] = useState<string | null>(null);
   const { data: harnessData } = useHarnesses();
@@ -68,11 +45,10 @@ export function Onboarding() {
   const selectedHarness = harnesses.find((h) => h.id === form.harness);
   const harnessInstalled = selectedHarness?.installed ?? false;
 
-  // Derived directly from the query on each render — mirroring query results
-  // into local state via an effect loops, because the query result object has
-  // a new identity every render.
-  const modelsQuery = useHarnessModels(form.harness, harnessInstalled);
-  const modelsState = toModelsState(harnessInstalled, modelsQuery);
+  const configQuery = useHarnessConfig(form.harness, harnessInstalled);
+  const config = harnessInstalled ? configQuery.data : undefined;
+  const configLoading = harnessInstalled && configQuery.isPending;
+  const models = modelOption(config);
 
   const createAgent = useCreateDefaultAgent();
 
@@ -82,6 +58,7 @@ export function Onboarding() {
     const result = await createAgent.mutateAsync({
       ...form,
       model: form.model?.trim() || undefined,
+      config: Object.keys(form.config ?? {}).length ? form.config : undefined,
     });
     if (!result.ok) {
       setError(result.error);
@@ -114,18 +91,18 @@ export function Onboarding() {
             <Select
               value={form.harness}
               onValueChange={(harness) =>
-                setForm((f) => ({
-                  ...f,
-                  harness,
-                  model: harness === f.harness ? f.model : "",
-                }))
+                setForm((f) =>
+                  harness === f.harness
+                    ? f
+                    : { ...f, harness, model: "", config: {} },
+                )
               }
             >
               <SelectTrigger className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {HARNESS_OPTIONS.map(({ value, label, Icon }) => {
+                {HARNESS_OPTIONS.map(({ value, label }) => {
                   const status = harnesses.find((h) => h.id === value);
                   return (
                     <SelectItem
@@ -134,7 +111,7 @@ export function Onboarding() {
                       className="[&>span:last-child]:w-full"
                     >
                       <span className="flex w-full items-center gap-2">
-                        <Icon size={16} />
+                        <HarnessIcon id={value} />
                         {label}
                         {status && !status.installed && (
                           <span className="ml-auto text-xs text-muted-foreground/60">
@@ -148,71 +125,61 @@ export function Onboarding() {
               </SelectContent>
             </Select>
             {selectedHarness && !selectedHarness.installed && (
-              <div className="mt-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-3.5 text-xs">
-                <p className="flex items-center gap-2 font-medium text-amber-500">
-                  <TriangleAlert className="size-3.5 shrink-0" />
-                  {selectedHarness.name} is not installed on this machine.
-                </p>
-                <p className="mt-3 text-muted-foreground">
-                  Install it, then come back:
-                </p>
-                <code className="mt-1.5 block rounded-md bg-secondary px-2.5 py-2 font-mono text-muted-foreground">
-                  {selectedHarness.installHint}
-                </code>
-              </div>
+              <HintBox
+                headline={`${selectedHarness.name} is not installed on this machine.`}
+                lead="Install it, then come back:"
+                command={selectedHarness.installHint}
+              />
+            )}
+            {config?.error && (
+              <HintBox
+                headline={`${config.error}.`}
+                lead={config.loginHint ? "Log in, then come back:" : null}
+                command={config.loginHint ?? null}
+              />
             )}
           </div>
 
           <div className="space-y-1.5">
             <Label>Model</Label>
-            {modelsState.status === "ready" ? (
+            {models ? (
               <ModelCombobox
-                models={modelsState.models}
+                choices={models.choices}
                 value={form.model ?? ""}
                 onChange={(model) => setForm((f) => ({ ...f, model }))}
               />
             ) : (
-              <>
-                <div className="relative">
-                  <Input
-                    placeholder="Leave empty for the harness default"
-                    disabled={modelsState.status === "loading"}
-                    value={form.model ?? ""}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, model: e.target.value }))
-                    }
-                  />
-                  {modelsState.status === "loading" && (
-                    <LoaderCircle className="absolute top-1/2 right-3 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
-                  )}
-                </div>
-                {modelsState.status === "unavailable" &&
-                  modelsState.reason &&
-                  (modelsState.loginHint ? (
-                    <div className="mt-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-3.5 text-xs">
-                      <p className="flex items-center gap-2 font-medium text-amber-500">
-                        <TriangleAlert className="size-3.5 shrink-0" />
-                        {modelsState.reason}.
-                      </p>
-                      <p className="mt-3 text-muted-foreground">
-                        Log in, then come back:
-                      </p>
-                      <code className="mt-1.5 block rounded-md bg-secondary px-2.5 py-2 font-mono text-muted-foreground">
-                        {modelsState.loginHint}
-                      </code>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-muted-foreground/60">
-                      Could not list models: {modelsState.reason}
-                    </p>
-                  ))}
-              </>
+              <div className="relative">
+                <input
+                  placeholder="Leave empty for the harness default"
+                  disabled={configLoading}
+                  className={inputClass}
+                  value={form.model ?? ""}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, model: e.target.value }))
+                  }
+                />
+                {configLoading && (
+                  <LoaderCircle className="absolute top-1/2 right-3 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
+                )}
+              </div>
             )}
           </div>
 
-          {error && (
-            <p className="text-xs text-destructive">{error}</p>
-          )}
+          <ConfigOptionFields
+            options={otherOptions(config)}
+            values={form.config ?? {}}
+            onChange={(id, value) =>
+              setForm((f) => {
+                const next = { ...(f.config ?? {}) };
+                if (value === undefined) delete next[id];
+                else next[id] = value;
+                return { ...f, config: next };
+              })
+            }
+          />
+
+          {error && <p className="text-xs text-destructive">{error}</p>}
 
           <button
             type="submit"
@@ -228,117 +195,39 @@ export function Onboarding() {
   );
 }
 
-function toModelsState(
-  installed: boolean,
-  query: ReturnType<typeof useHarnessModels>,
-): ModelsState {
-  if (!installed) return { status: "unavailable", reason: null };
-  if (query.isPending) return { status: "loading" };
-  if (query.isError) return { status: "unavailable", reason: String(query.error) };
-
-  // The endpoint reports harness-level failures in-band as `error`.
-  const result = query.data;
-  if (result.error !== undefined || result.models.length === 0) {
-    return {
-      status: "unavailable",
-      reason: result.error ?? null,
-      loginHint: result.loginHint,
-    };
-  }
-  return { status: "ready", models: result.models };
-}
-
-function ModelCombobox({
-  models,
-  value,
-  onChange,
+function HintBox({
+  headline,
+  lead,
+  command,
 }: {
-  models: HarnessModel[];
-  value: string;
-  onChange: (value: string) => void;
+  headline: string;
+  lead: string | null;
+  command: string | null;
 }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const selected = models.find((m) => m.id === value);
-
-  function pick(model: string) {
-    onChange(model);
-    setOpen(false);
-    setQuery("");
-  }
-
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          role="combobox"
-          aria-expanded={open}
-          className={cn(inputClass, "flex items-center justify-between gap-2")}
-        >
-          <span className={cn(!value && "text-muted-foreground/60")}>
-            {selected?.name ?? value}
-          </span>
-          <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        className="w-[var(--radix-popover-trigger-width)] p-0"
-      >
-        <Command>
-          <CommandInput
-            placeholder="Search models…"
-            value={query}
-            onValueChange={setQuery}
-          />
-          <CommandList>
-            <CommandEmpty className="p-1">
-              <button
-                type="button"
-                onClick={() => pick(query)}
-                className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-              >
-                Use “{query}”
-              </button>
-            </CommandEmpty>
-            <CommandGroup>
-              {models.map((model) => (
-                <CommandItem
-                  key={model.id}
-                  value={`${model.name} ${model.id}`}
-                  onSelect={() => pick(model.id)}
-                >
-                  <div className="min-w-0 flex-1">
-                    <p>{model.name}</p>
-                    {model.description && (
-                      <p className="truncate text-xs text-muted-foreground">
-                        {model.description}
-                      </p>
-                    )}
-                  </div>
-                  {model.id === value && <Check className="size-4 shrink-0" />}
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          </CommandList>
-        </Command>
-      </PopoverContent>
-    </Popover>
+    <div className="mt-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-3.5 text-xs">
+      <p className="flex items-center gap-2 font-medium text-amber-500">
+        <TriangleAlert className="size-3.5 shrink-0" />
+        {headline}
+      </p>
+      {lead && <p className="mt-3 text-muted-foreground">{lead}</p>}
+      {command && (
+        <code className="mt-1.5 block rounded-md bg-secondary px-2.5 py-2 font-mono text-muted-foreground">
+          {command}
+        </code>
+      )}
+    </div>
   );
 }
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
-    <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <label
+      className={cn(
+        "text-xs font-medium uppercase tracking-wide text-muted-foreground",
+      )}
+    >
       {children}
     </label>
   );
-}
-
-const inputClass =
-  "w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-ring";
-
-function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...props} className={cn(inputClass, props.className)} />;
 }

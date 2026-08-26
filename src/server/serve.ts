@@ -1,39 +1,41 @@
 import index from "@/web/index.html";
 import { PhiStore } from "@/core/store/store";
 import { detectHarnesses } from "@/core/agents/harnesses";
-import { listHarnessModels } from "@/core/agents/models";
-import type { HarnessModels } from "@/shared/types";
+import { listHarnessConfig } from "@/core/agents/config";
+import type { HarnessConfig } from "@/shared/types";
 import { ensureWorkspace } from "@/core/workspace";
 import type { ServerFrame } from "@/shared/types";
 import {
+  getAgent,
   getSetupStatus,
   listAgents,
   setupDefaultAgent,
+  updateAgent,
 } from "@/server/services/agents";
 
 const DEFAULT_PORT = 3141;
-const MODELS_CACHE_TTL_MS = 5 * 60_000;
+const CONFIG_CACHE_TTL_MS = 5 * 60_000;
 
-// Spawning a harness to ask for its models takes seconds; successful results
+// Spawning a harness to ask for its config takes seconds; successful results
 // are cached briefly and concurrent requests share one in-flight probe.
-const modelsCache = new Map<
+const configCache = new Map<
   string,
-  { at: number; result: Promise<HarnessModels> }
+  { at: number; result: Promise<HarnessConfig> }
 >();
 
-function cachedHarnessModels(
+function cachedHarnessConfig(
   harnessId: string,
   workspaceRoot: string,
-): Promise<HarnessModels> {
-  const cached = modelsCache.get(harnessId);
-  if (cached && Date.now() - cached.at < MODELS_CACHE_TTL_MS) {
+): Promise<HarnessConfig> {
+  const cached = configCache.get(harnessId);
+  if (cached && Date.now() - cached.at < CONFIG_CACHE_TTL_MS) {
     return cached.result;
   }
-  const result = listHarnessModels(harnessId, workspaceRoot).then((models) => {
-    if (models.error) modelsCache.delete(harnessId);
-    return models;
+  const result = listHarnessConfig(harnessId, workspaceRoot).then((config) => {
+    if (config.error) configCache.delete(harnessId);
+    return config;
   });
-  modelsCache.set(harnessId, { at: Date.now(), result });
+  configCache.set(harnessId, { at: Date.now(), result });
   return result;
 }
 
@@ -58,12 +60,33 @@ export function startServer(): void {
       "/api/v1/agents": async () => Response.json(await listAgents(workspace.rootPath)),
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),
-      "/api/v1/harnesses/:id/models": async (req) => {
-        const result = await cachedHarnessModels(
+      "/api/v1/harnesses/:id/config": async (req) => {
+        const result = await cachedHarnessConfig(
           req.params.id,
           workspace.rootPath,
         );
         return Response.json(result, { status: result.error ? 502 : 200 });
+      },
+      "/api/v1/agents/:name": {
+        GET: async (req) => {
+          const agent = await getAgent(workspace.rootPath, req.params.name);
+          if (!agent) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json({ agent });
+        },
+        PUT: async (req) => {
+          const body = await req.json().catch(() => null);
+          const result = await updateAgent(
+            workspace.rootPath,
+            req.params.name,
+            body,
+          );
+          if (!result.ok) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        },
       },
       "/api/v1/setup/status": async () =>
         Response.json(await getSetupStatus(workspace.rootPath)),

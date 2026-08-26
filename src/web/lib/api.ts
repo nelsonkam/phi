@@ -2,7 +2,7 @@ import type {
   Agent,
   AgentLoadError,
   Channel,
-  HarnessModels,
+  HarnessConfig,
   HarnessStatus,
 } from "@/shared/types";
 
@@ -34,18 +34,49 @@ export function fetchHarnesses(): Promise<{ harnesses: HarnessStatus[] }> {
   return get("/harnesses");
 }
 
-export async function fetchHarnessModels(
+export async function fetchHarnessConfig(
   harnessId: string,
-): Promise<HarnessModels> {
-  const res = await fetch(`/api/v1/harnesses/${harnessId}/models`);
-  const body = (await res.json().catch(() => null)) as HarnessModels | null;
+): Promise<HarnessConfig> {
+  const res = await fetch(`/api/v1/harnesses/${harnessId}/config`);
+  const body = (await res.json().catch(() => null)) as HarnessConfig | null;
   if (body === null) return { error: `Request failed (${res.status})` };
   return body;
+}
+
+export function fetchAgent(
+  name: string,
+): Promise<{ agent: Agent & { instructions: string } }> {
+  return get(`/agents/${name}`);
+}
+
+export interface UpdateAgentInput {
+  harness: string;
+  description?: string;
+  model?: string;
+  config?: Record<string, string | boolean>;
+  instructions: string;
+}
+
+export async function updateAgent(
+  name: string,
+  input: UpdateAgentInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await fetch(`/api/v1/agents/${name}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: body.error ?? `Request failed (${res.status})` };
+  }
+  return { ok: true };
 }
 
 export interface CreateDefaultAgentInput {
   harness: string;
   model?: string;
+  config?: Record<string, string | boolean>;
 }
 
 export async function createDefaultAgent(
