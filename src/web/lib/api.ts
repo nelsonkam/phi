@@ -61,6 +61,10 @@ export function sendMessage(
   return post(`/threads/${threadId}/messages`, { content });
 }
 
+export function retryTurn(threadId: string): Promise<{ ok: boolean }> {
+  return post(`/threads/${threadId}/retry`, {});
+}
+
 export function fetchAgents(): Promise<{
   agents: Agent[];
   errors: AgentLoadError[];

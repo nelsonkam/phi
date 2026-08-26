@@ -11,11 +11,17 @@ import {
   fetchMessages,
   fetchSetupStatus,
   fetchThreads,
+  retryTurn,
   sendMessage,
   updateAgent,
 } from "./api";
 import type { UpdateAgentInput } from "./api";
 import type { Message, ServerFrame } from "@/shared/types";
+
+interface TurnPresenceState {
+  ready: boolean;
+  agentsByThread: Record<string, string>;
+}
 
 // One query key namespace per API resource. Components never call the
 // transport directly; they consume these hooks.
@@ -28,6 +34,7 @@ export const queryKeys = {
   agent: (name: string) => ["agents", name] as const,
   channelThreads: (channelId: string) => ["channels", channelId, "threads"] as const,
   threadMessages: (threadId: string) => ["threads", threadId, "messages"] as const,
+  turnPresence: ["threads", "turn-presence"] as const,
 };
 
 export function useChannels() {
@@ -95,6 +102,22 @@ export function useMessages(threadId: string) {
   });
 }
 
+export function useThreadTurn(threadId: string): {
+  ready: boolean;
+  agent: string | null;
+} {
+  const { data } = useQuery<TurnPresenceState>({
+    queryKey: queryKeys.turnPresence,
+    queryFn: async () => ({ ready: false, agentsByThread: {} }),
+    initialData: { ready: false, agentsByThread: {} },
+    enabled: false,
+  });
+  return {
+    ready: data.ready,
+    agent: data.agentsByThread[threadId] ?? null,
+  };
+}
+
 export function useCreateThread(channelId: string) {
   return useMutation({
     mutationFn: (content: string) => createThread(channelId, content),
@@ -109,13 +132,53 @@ export function useCreateThread(channelId: string) {
 export function useSendMessage(threadId: string) {
   return useMutation({
     mutationFn: (content: string) => sendMessage(threadId, content),
-    onSuccess: ({ message }) => {
+    // The user's message appears the moment they hit send; the POST response
+    // (or the WebSocket frame, whichever lands first) replaces it with the
+    // committed row, and a failure rolls it back.
+    onMutate: async (content) => {
+      const queryKey = queryKeys.threadMessages(threadId);
+      await queryClient.cancelQueries({ queryKey });
+      const cached = queryClient.getQueryData<{ messages: Message[] }>(queryKey);
+      if (!cached) return {};
+      const optimistic: Message = {
+        id: `optimistic-${crypto.randomUUID()}`,
+        workspaceId: "",
+        channelId: "",
+        threadId,
+        author: "user",
+        kind: "message",
+        content,
+        metadata: { optimistic: true },
+        seq: (cached.messages.at(-1)?.seq ?? 0) + 1,
+        createdAt: new Date().toISOString(),
+      };
+      queryClient.setQueryData(queryKey, {
+        messages: [...cached.messages, optimistic],
+      });
+      return { optimisticId: optimistic.id };
+    },
+    onError: (_error, _content, context) => {
+      if (context?.optimisticId) {
+        removeMessageFromCache(threadId, context.optimisticId);
+      }
+    },
+    onSuccess: ({ message }, _content, context) => {
+      if (context?.optimisticId) {
+        removeMessageFromCache(threadId, context.optimisticId);
+      }
       appendMessageToCache(message);
       void queryClient.invalidateQueries({
         queryKey: queryKeys.channelThreads(message.channelId),
       });
     },
   });
+}
+
+// Re-runs the thread's last user message after a failed turn. No cache
+// changes here: the resulting turn frames and messages arrive over the
+// socket like any other turn's.
+export function useRetryTurn(threadId: string) {
+  return useMutation({ mutationFn: () => retryTurn(threadId) });
 }
 
 export function useCreateDefaultAgent() {
@@ -125,6 +188,15 @@ export function useCreateDefaultAgent() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.agents });
       void queryClient.invalidateQueries({ queryKey: queryKeys.setupStatus });
     },
+  });
+}
+
+function removeMessageFromCache(threadId: string, messageId: string): void {
+  const queryKey = queryKeys.threadMessages(threadId);
+  const cached = queryClient.getQueryData<{ messages: Message[] }>(queryKey);
+  if (!cached) return;
+  queryClient.setQueryData(queryKey, {
+    messages: cached.messages.filter((m) => m.id !== messageId),
   });
 }
 
@@ -156,7 +228,29 @@ export function applyServerFrame(frame: ServerFrame): void {
         queryKey: queryKeys.channelThreads(frame.thread.channelId),
       });
       break;
+    case "thread.turn":
+      queryClient.setQueryData<TurnPresenceState>(
+        queryKeys.turnPresence,
+        (current = { ready: true, agentsByThread: {} }) => {
+          const agentsByThread = { ...current.agentsByThread };
+          if (frame.active && frame.agent) {
+            agentsByThread[frame.threadId] = frame.agent;
+          } else {
+            delete agentsByThread[frame.threadId];
+          }
+          return { ready: true, agentsByThread };
+        },
+      );
+      break;
     case "hello":
+      queryClient.setQueryData<TurnPresenceState>(queryKeys.turnPresence, {
+        ready: true,
+        agentsByThread: Object.fromEntries(
+          frame.activeTurns.flatMap((turn) =>
+            turn.active && turn.agent ? [[turn.threadId, turn.agent]] : [],
+          ),
+        ),
+      });
       // Deltas may have been missed while disconnected; refetch chat state.
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
       void queryClient.invalidateQueries({ queryKey: ["threads"] });

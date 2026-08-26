@@ -32,15 +32,16 @@ export function authorLabel(author: Message["author"]): string {
   return author === "user" ? "You" : author;
 }
 
-export function AgentWorkingMessage() {
+export function AgentWorkingMessage({ agent }: { agent: string }) {
   return (
-    <div className="flex gap-3" role="status" aria-live="polite">
-      <AuthorAvatar author="coordinator" />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">{authorLabel("coordinator")}</p>
-        <p className="working-shimmer w-fit text-sm">is working...</p>
-      </div>
-    </div>
+    <p
+      className="ml-12 flex items-baseline gap-1 text-xs text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="font-medium text-foreground">{agent}</span>
+      <span className="working-shimmer">is working...</span>
+    </p>
   );
 }
 
@@ -57,7 +58,7 @@ export function MessageItem({
   const renderAsMarkdown =
     message.author !== "user" && message.kind !== "error";
   return (
-    <div className="flex gap-3">
+    <div className="message-enter flex gap-3">
       <AuthorAvatar author={message.author} />
       <div className="min-w-0 flex-1">
         <p className="flex items-baseline gap-2">

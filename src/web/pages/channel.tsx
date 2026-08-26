@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { useNavigate, useParams } from "react-router";
 import { MessageSquareText } from "lucide-react";
 import type { ThreadSummary } from "@/shared/types";
 import { Composer } from "@/web/components/composer";
+import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { MessageItem } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
 import { useChannels, useCreateThread, useThreads } from "@/web/lib/queries";
 import { relativeTime } from "@/web/lib/time";
+import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { EmptyState, Page } from "../app";
 
 // Slack-style channel: a chronological flow of thread root messages, with
@@ -18,6 +20,7 @@ export function ChannelPage() {
   const channel = channelData?.channels.find((c) => c.id === channelId);
   const { data, isPending } = useThreads(channelId);
   const create = useCreateThread(channelId);
+  const selectedThread = data?.threads.find((thread) => thread.id === threadId);
 
   // The flow reads oldest-first by root message; replies bump a thread's
   // activity but never move it in the flow.
@@ -29,11 +32,10 @@ export function ChannelPage() {
     [data?.threads],
   );
 
-  const messageListRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const messageList = messageListRef.current;
-    if (messageList) messageList.scrollTop = messageList.scrollHeight;
-  }, [threads.length, channelId]);
+  const { scrollProps, pinned, hasNew, scrollToBottom } = useStickToBottom(
+    threads.length,
+    channelId,
+  );
 
   async function startThread(content: string) {
     const { thread } = await create.mutateAsync(content);
@@ -44,23 +46,28 @@ export function ChannelPage() {
     <Page title={channel ? `# ${channel.name}` : "…"}>
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div
-            ref={messageListRef}
-            className="flex flex-1 flex-col overflow-y-auto"
-          >
-            {!isPending && threads.length === 0 ? (
-              <EmptyState message="No messages yet. Say something below." />
-            ) : (
-              <div className="mt-auto py-3">
-                {threads.map((thread) => (
-                  <ThreadRoot
-                    key={thread.id}
-                    thread={thread}
-                    active={thread.id === threadId}
-                    onOpen={() => navigate(`/c/${channelId}/t/${thread.id}`)}
-                  />
-                ))}
-              </div>
+          <div className="relative min-h-0 flex-1">
+            <div
+              {...scrollProps}
+              className="flex h-full flex-col overflow-y-auto"
+            >
+              {!isPending && threads.length === 0 ? (
+                <EmptyState message="No messages yet. Say something below." />
+              ) : (
+                <div className="mt-auto py-3">
+                  {threads.map((thread) => (
+                    <ThreadRoot
+                      key={thread.id}
+                      thread={thread}
+                      active={thread.id === threadId}
+                      onOpen={() => navigate(`/c/${channelId}/t/${thread.id}`)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+            {!pinned && (
+              <JumpToLatest hasNew={hasNew} onClick={() => scrollToBottom()} />
             )}
           </div>
           <Composer
@@ -76,6 +83,8 @@ export function ChannelPage() {
             channelId={channelId}
             channelName={channel?.name}
             threadId={threadId}
+            turnActive={selectedThread?.turnActive ?? false}
+            turnAgent={selectedThread?.turnAgent ?? null}
           />
         )}
       </div>
