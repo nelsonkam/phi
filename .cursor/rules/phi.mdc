@@ -1,0 +1,45 @@
+---
+description: Phi project conventions for Bun, imports, testing, and code style. Applies to all source files.
+globs: **/*.ts,**/*.tsx,**/*.html,**/*.css
+alwaysApply: true
+---
+
+# Phi
+
+Phi is a workspace app that coordinates AI coding agents over ACP (Agent Client Protocol).
+
+## Runtime: Bun, not Node.js
+
+- Run files with `bun <file>`, tests with `bun test`, scripts with `bun run <script>`.
+- Install dependencies with `bun install`.
+- Use `Bun.serve()` routes (supports HTML imports and WebSockets), `bun:sqlite` for storage, `Bun.file` over `node:fs` reads, `Bun.spawn` over `node:child_process`.
+- Do not use express, vite, jest, better-sqlite3, or ws.
+- Bun loads `.env` automatically; do not use dotenv.
+
+## Imports
+
+- Use the `@/*` alias for cross-folder imports from `src/` (for example `import { PhiStore } from "@/core/store/store"`).
+- Never write deep relative chains like `../../..`. Relative imports (`./`, `../`) are fine within the same feature folder.
+
+## Architecture
+
+- `src/core/` — domain logic (store, agents registry, ACP process management). No HTTP or React types here.
+- `src/server/` — Bun.serve routes plus a transport-free service layer in `src/server/services/`. Route handlers only translate service results to `Response.json`.
+- `src/web/` — React frontend served through HTML imports. Pages in `src/web/pages/`, shadcn components in `src/web/components/`.
+- `src/shared/types.ts` — wire types shared by server and clients. This module must not import from core/, server/, or web/.
+- `src/web/lib/api.ts` is the only fetch layer. Components consume TanStack Query hooks from `src/web/lib/queries.ts`, never `fetch` directly.
+
+## Validation
+
+- Validate request bodies and file frontmatter with zod (`object`, `strictObject`, `enum`). Derive enums from source-of-truth constants such as `KNOWN_HARNESSES`; do not duplicate lists.
+
+## Testing
+
+- Tests use `bun:test` and live in a `test/` folder next to the code they exercise (for example `src/core/store/test/store.test.ts`).
+- Use `src/testing/tmpdir.ts` for temp directories; clean up in `afterAll`.
+
+## Conventions
+
+- TypeScript strict mode is on. Do not weaken it.
+- Keep error handling explicit: services return discriminated results (`{ ok: true } | { ok: false, status, error }`) instead of throwing for expected failures.
+- The default agent lives at `.agents/agents/default.md` with `role: default` frontmatter. No backwards compatibility with older layouts.
