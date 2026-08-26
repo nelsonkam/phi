@@ -19,18 +19,16 @@ export function ActivityPage() {
     useActivity();
   const markAllRead = useMarkAllRead();
   const items = data?.pages.flatMap((page) => page.activity) ?? [];
-  const unreadThreadIds = items
-    .filter((item) => item.unreadCount > 0)
-    .map((item) => item.thread.id);
+  const hasUnread = items.some((item) => item.unreadCount > 0);
 
   return (
     <Page
       title="Activity"
       titleExtra={
-        unreadThreadIds.length > 0 ? (
+        hasUnread ? (
           <button
             type="button"
-            onClick={() => markAllRead.mutate(unreadThreadIds)}
+            onClick={() => markAllRead.mutate()}
             disabled={markAllRead.isPending}
             className="ml-auto flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
           >
@@ -74,13 +72,25 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   const isError = !workingAgent && latestMessage.kind === "error";
   const unread = unreadCount > 0;
 
+  // Not an <a>: the row nests its own interactive elements (Retry, links in
+  // excerpts), so it gets link semantics by hand instead.
+  const open = () => navigate(`/c/${thread.channelId}/t/${thread.id}`);
   return (
     <div
+      role="link"
+      tabIndex={0}
+      aria-label={`Open thread in #${channelName}: ${thread.title ?? latestMessage.content}`}
       onClick={(e) => {
         if ((e.target as HTMLElement).closest("a, button")) return;
-        navigate(`/c/${thread.channelId}/t/${thread.id}`);
+        open();
       }}
-      className="group flex cursor-pointer gap-3 px-5 py-3 transition-colors hover:bg-accent/40"
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        open();
+      }}
+      className="group flex cursor-pointer gap-3 px-5 py-3 transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-none"
     >
       <AuthorAvatar message={latestMessage} />
       <div className="min-w-0 flex-1">

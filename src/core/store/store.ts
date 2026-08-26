@@ -272,6 +272,19 @@ export class PhiStore {
     return result.changes > 0;
   }
 
+  // "Mark all read" as one server-side write, so it covers every thread in
+  // the workspace regardless of how much of the feed a client has loaded.
+  markAllThreadsRead(workspaceId: string): void {
+    this.db
+      .query(
+        `INSERT INTO thread_reads (thread_id, last_read_seq)
+         SELECT id, last_seq FROM threads WHERE workspace_id = ?
+         ON CONFLICT(thread_id) DO UPDATE SET
+           last_read_seq = MAX(thread_reads.last_read_seq, excluded.last_read_seq)`,
+      )
+      .run(workspaceId);
+  }
+
   rootMessage(threadId: string): Message | null {
     const row = this.db
       .query<MessageRow, [string]>(

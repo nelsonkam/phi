@@ -59,16 +59,24 @@ export function startServer(): void {
         Response.json({ ok: true, workspaceId: workspace.id }),
       "/api/v1/channels": () =>
         Response.json({ channels: store.listChannels(workspace.id) }),
-      "/api/v1/activity": (req) => {
-        const url = new URL(req.url);
-        const before = positiveInteger(url.searchParams.get("before"));
-        const limit = positiveInteger(url.searchParams.get("limit")) ?? 50;
-        return Response.json({
-          activity: store.listActivity(workspace.id, {
-            before,
-            limit: Math.min(limit, 100),
-          }),
-        });
+      "/api/v1/activity": {
+        GET: (req) => {
+          const url = new URL(req.url);
+          const before = positiveInteger(url.searchParams.get("before"));
+          const limit = positiveInteger(url.searchParams.get("limit")) ?? 50;
+          return Response.json({
+            activity: store.listActivity(workspace.id, {
+              before,
+              limit: Math.min(limit, 100),
+            }),
+          });
+        },
+      },
+      "/api/v1/activity/read": {
+        POST: () => {
+          store.markAllThreadsRead(workspace.id);
+          return Response.json({ ok: true });
+        },
       },
       "/api/v1/channels/:id/threads": {
         GET: (req) => {

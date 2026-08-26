@@ -289,6 +289,34 @@ test("markThreadRead advances a monotonic watermark and reports unknown threads"
   store.close();
 });
 
+test("markAllThreadsRead clears every thread in the workspace", () => {
+  const { store, channel } = chatFixture();
+  const first = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "First",
+  });
+  store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Second",
+  });
+
+  store.markAllThreadsRead(first.thread.workspaceId);
+  const activity = store.listActivity(first.thread.workspaceId);
+  expect(activity).toHaveLength(2);
+  expect(activity.map((item) => item.unreadCount)).toEqual([0, 0]);
+
+  store.appendMessage(first.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "New reply",
+    metadata: { agent: "default" },
+  });
+  expect(store.listActivity(first.thread.workspaceId)[0]!.unreadCount).toBe(1);
+  store.close();
+});
+
 test("writes emit post-commit changes", () => {
   const { store, channel } = chatFixture();
   const changes: string[] = [];

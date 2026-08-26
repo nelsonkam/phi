@@ -13,6 +13,7 @@ import {
   useSendMessage,
   useThreadTurn,
 } from "@/web/lib/queries";
+import { latestCommittedMessageId } from "@/web/lib/activity";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { cn } from "@/web/lib/utils";
@@ -49,14 +50,15 @@ export function ThreadPanel({
   );
 
   // Viewing the thread reads it: advance the watermark on open and again as
-  // messages land while the panel stays open. Optimistic sends re-fire on
-  // commit, which is harmless (the watermark is monotonic server-side).
+  // messages land while the panel stays open. Keyed on the latest committed
+  // message id — an optimistic row's predicted seq can equal the committed
+  // one's, so a seq key could skip the re-advance after a send commits.
   const markRead = useMarkThreadRead();
   const markReadMutate = markRead.mutate;
-  const latestSeq = messages.at(-1)?.seq;
+  const committedId = latestCommittedMessageId(messages);
   useEffect(() => {
-    if (latestSeq !== undefined) markReadMutate(threadId);
-  }, [markReadMutate, threadId, latestSeq]);
+    if (committedId !== undefined) markReadMutate(threadId);
+  }, [markReadMutate, threadId, committedId]);
 
   return (
     <aside className="flex min-h-0 w-1/2 shrink-0 flex-col overflow-hidden border-l bg-background">

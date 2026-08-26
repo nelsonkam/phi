@@ -4,6 +4,7 @@ import {
   createDefaultAgent,
   createThread,
   fetchActivity,
+  markAllRead,
   fetchAgent,
   fetchAgents,
   fetchChannels,
@@ -18,6 +19,7 @@ import {
   updateAgent,
 } from "./api";
 import type { UpdateAgentInput } from "./api";
+import { ACTIVITY_PAGE_SIZE, activityNextCursor } from "./activity";
 import type { Channel, Message, ServerFrame } from "@/shared/types";
 
 interface TurnPresenceState {
@@ -48,12 +50,9 @@ export const queryKeys = {
 export function useActivity() {
   return useInfiniteQuery({
     queryKey: queryKeys.activity,
-    queryFn: ({ pageParam }) => fetchActivity(pageParam),
+    queryFn: ({ pageParam }) => fetchActivity(pageParam, ACTIVITY_PAGE_SIZE),
     initialPageParam: undefined as number | undefined,
-    getNextPageParam: (lastPage) =>
-      lastPage.activity.length > 0
-        ? lastPage.activity.at(-1)!.latestMessage.seq
-        : undefined,
+    getNextPageParam: activityNextCursor,
   });
 }
 
@@ -69,10 +68,11 @@ export function useMarkThreadRead() {
   });
 }
 
+// One server-side bulk write: every thread in the workspace, not just the
+// pages the feed has loaded so far.
 export function useMarkAllRead() {
   return useMutation({
-    mutationFn: (threadIds: string[]) =>
-      Promise.all(threadIds.map((id) => markThreadRead(id))),
+    mutationFn: () => markAllRead(),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
     },

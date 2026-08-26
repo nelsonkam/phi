@@ -30,9 +30,12 @@ export function fetchThreads(
 }
 
 export function fetchActivity(
-  before?: number,
+  before: number | undefined,
+  limit: number,
 ): Promise<{ activity: ActivityItem[] }> {
-  return get(`/activity${before ? `?before=${before}` : ""}`);
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (before !== undefined) params.set("before", String(before));
+  return get(`/activity?${params}`);
 }
 
 export function fetchMessages(
@@ -74,6 +77,10 @@ export function retryTurn(threadId: string): Promise<{ ok: boolean }> {
 
 export function markThreadRead(threadId: string): Promise<{ ok: boolean }> {
   return post(`/threads/${threadId}/read`, {});
+}
+
+export function markAllRead(): Promise<{ ok: boolean }> {
+  return post("/activity/read", {});
 }
 
 export function fetchAgents(): Promise<{
