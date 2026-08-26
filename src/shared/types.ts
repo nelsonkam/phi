@@ -78,10 +78,16 @@ export interface HarnessModel {
 }
 
 // Result of asking a harness (over ACP) which models it offers. `error` and
-// `models` are mutually exclusive.
+// `models` are mutually exclusive. `loginHint` is the terminal command that
+// fixes an authentication failure.
 export type HarnessModels =
-  | { models: HarnessModel[]; currentModelId: string | null; error?: never }
-  | { error: string; models?: never };
+  | {
+      models: HarnessModel[];
+      currentModelId: string | null;
+      error?: never;
+      loginHint?: never;
+    }
+  | { error: string; loginHint?: string; models?: never };
 
 // WebSocket frames, server -> client. `v` is the protocol version.
 export type ServerFrame =

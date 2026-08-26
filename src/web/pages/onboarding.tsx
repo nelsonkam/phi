@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import {
   ArrowRight,
@@ -12,6 +12,7 @@ import {
 // client build; the Mono components themselves only need react.
 import ClaudeCodeIcon from "@lobehub/icons/es/ClaudeCode/components/Mono";
 import CodexIcon from "@lobehub/icons/es/Codex/components/Mono";
+import CursorIcon from "@lobehub/icons/es/Cursor/components/Mono";
 import GeminiCliIcon from "@lobehub/icons/es/GeminiCLI/components/Mono";
 import {
   Select,
@@ -44,11 +45,12 @@ import type { CreateDefaultAgentInput } from "@/web/lib/api";
 type ModelsState =
   | { status: "loading" }
   | { status: "ready"; models: HarnessModel[] }
-  | { status: "unavailable"; reason: string | null };
+  | { status: "unavailable"; reason: string | null; loginHint?: string };
 import { cn } from "@/web/lib/utils";
 
 const HARNESS_OPTIONS = [
   { value: "claude-code", label: "Claude Code", Icon: ClaudeCodeIcon },
+  { value: "cursor", label: "Cursor CLI", Icon: CursorIcon },
   { value: "gemini", label: "Gemini CLI", Icon: GeminiCliIcon },
   { value: "codex", label: "Codex", Icon: CodexIcon },
 ] as const;
@@ -62,35 +64,15 @@ export function Onboarding() {
   const [error, setError] = useState<string | null>(null);
   const { data: harnessData } = useHarnesses();
   const harnesses = harnessData?.harnesses ?? [];
-  const [modelsState, setModelsState] = useState<ModelsState>({
-    status: "unavailable",
-    reason: null,
-  });
 
   const selectedHarness = harnesses.find((h) => h.id === form.harness);
   const harnessInstalled = selectedHarness?.installed ?? false;
 
+  // Derived directly from the query on each render — mirroring query results
+  // into local state via an effect loops, because the query result object has
+  // a new identity every render.
   const modelsQuery = useHarnessModels(form.harness, harnessInstalled);
-  useEffect(() => {
-    if (!harnessInstalled) {
-      setModelsState({ status: "unavailable", reason: null });
-      return;
-    }
-    if (modelsQuery.isPending) {
-      setModelsState({ status: "loading" });
-      return;
-    }
-    if (modelsQuery.isError) {
-      setModelsState({ status: "unavailable", reason: String(modelsQuery.error) });
-      return;
-    }
-    const result = modelsQuery.data;
-    if (result.error !== undefined || result.models.length === 0) {
-      setModelsState({ status: "unavailable", reason: result.error ?? null });
-    } else {
-      setModelsState({ status: "ready", models: result.models });
-    }
-  }, [harnessInstalled, modelsQuery]);
+  const modelsState = toModelsState(harnessInstalled, modelsQuery);
 
   const createAgent = useCreateDefaultAgent();
 
@@ -204,11 +186,26 @@ export function Onboarding() {
                     <LoaderCircle className="absolute top-1/2 right-3 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
                   )}
                 </div>
-                {modelsState.status === "unavailable" && modelsState.reason && (
-                  <p className="text-xs text-muted-foreground/60">
-                    Could not list models: {modelsState.reason}
-                  </p>
-                )}
+                {modelsState.status === "unavailable" &&
+                  modelsState.reason &&
+                  (modelsState.loginHint ? (
+                    <div className="mt-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-3.5 text-xs">
+                      <p className="flex items-center gap-2 font-medium text-amber-500">
+                        <TriangleAlert className="size-3.5 shrink-0" />
+                        {modelsState.reason}.
+                      </p>
+                      <p className="mt-3 text-muted-foreground">
+                        Log in, then come back:
+                      </p>
+                      <code className="mt-1.5 block rounded-md bg-secondary px-2.5 py-2 font-mono text-muted-foreground">
+                        {modelsState.loginHint}
+                      </code>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground/60">
+                      Could not list models: {modelsState.reason}
+                    </p>
+                  ))}
               </>
             )}
           </div>
@@ -229,6 +226,26 @@ export function Onboarding() {
       </div>
     </div>
   );
+}
+
+function toModelsState(
+  installed: boolean,
+  query: ReturnType<typeof useHarnessModels>,
+): ModelsState {
+  if (!installed) return { status: "unavailable", reason: null };
+  if (query.isPending) return { status: "loading" };
+  if (query.isError) return { status: "unavailable", reason: String(query.error) };
+
+  // The endpoint reports harness-level failures in-band as `error`.
+  const result = query.data;
+  if (result.error !== undefined || result.models.length === 0) {
+    return {
+      status: "unavailable",
+      reason: result.error ?? null,
+      loginHint: result.loginHint,
+    };
+  }
+  return { status: "ready", models: result.models };
 }
 
 function ModelCombobox({

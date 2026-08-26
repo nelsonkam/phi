@@ -3,6 +3,7 @@ import {
   client,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from "@agentclientprotocol/sdk";
 import type { NewSessionResponse } from "@agentclientprotocol/sdk";
 import { connectAcpProcess } from "./acp-process";
@@ -10,6 +11,8 @@ import { harnessEntry } from "./harnesses";
 import type { HarnessModel, HarnessModels } from "@/shared/types";
 
 const SESSION_TIMEOUT_MS = 20_000;
+// JSON-RPC error code ACP agents use for `auth_required`.
+const AUTH_REQUIRED_CODE = -32000;
 
 // Spawns the harness's ACP process, creates a session, and reads the models
 // it advertises. The process is killed afterwards either way.
@@ -66,6 +69,12 @@ export async function listHarnessModels(
     }
     return models;
   } catch (error) {
+    if (error instanceof RequestError && error.code === AUTH_REQUIRED_CODE) {
+      return {
+        error: `${entry.name} is not logged in on this machine`,
+        loginHint: entry.loginHint,
+      };
+    }
     return { error: `${entry.name}: ${(error as Error).message}` };
   } finally {
     clearTimeout(timer);
