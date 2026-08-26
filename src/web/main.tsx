@@ -30,6 +30,7 @@ const router = createBrowserRouter([
       { path: "agents", element: <AgentsPage /> },
       { path: "agents/:name", element: <AgentDetailPage /> },
       { path: "c/:channelId", element: <ChannelPage /> },
+      { path: "c/:channelId/t/:threadId", element: <ChannelPage /> },
     ],
   },
 ]);

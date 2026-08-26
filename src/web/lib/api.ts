@@ -4,6 +4,9 @@ import type {
   Channel,
   HarnessConfig,
   HarnessStatus,
+  Message,
+  Thread,
+  ThreadSummary,
 } from "@/shared/types";
 
 // The only file (with ws.ts) that knows the transport. Everything else
@@ -17,6 +20,45 @@ async function get<T>(path: string): Promise<T> {
 
 export function fetchChannels(): Promise<{ channels: Channel[] }> {
   return get("/channels");
+}
+
+export function fetchThreads(
+  channelId: string,
+): Promise<{ threads: ThreadSummary[] }> {
+  return get(`/channels/${channelId}/threads`);
+}
+
+export function fetchMessages(
+  threadId: string,
+): Promise<{ messages: Message[] }> {
+  return get(`/threads/${threadId}/messages`);
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`/api/v1${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `POST ${path} failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function createThread(
+  channelId: string,
+  content: string,
+): Promise<{ thread: Thread; message: Message }> {
+  return post(`/channels/${channelId}/threads`, { content });
+}
+
+export function sendMessage(
+  threadId: string,
+  content: string,
+): Promise<{ message: Message }> {
+  return post(`/threads/${threadId}/messages`, { content });
 }
 
 export function fetchAgents(): Promise<{

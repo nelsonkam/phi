@@ -2,15 +2,20 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { queryClient } from "./query-client";
 import {
   createDefaultAgent,
+  createThread,
   fetchAgent,
   fetchAgents,
   fetchChannels,
   fetchHarnessConfig,
   fetchHarnesses,
+  fetchMessages,
   fetchSetupStatus,
+  fetchThreads,
+  sendMessage,
   updateAgent,
 } from "./api";
 import type { UpdateAgentInput } from "./api";
+import type { Message, ServerFrame } from "@/shared/types";
 
 // One query key namespace per API resource. Components never call the
 // transport directly; they consume these hooks.
@@ -21,6 +26,8 @@ export const queryKeys = {
   setupStatus: ["setup", "status"] as const,
   harnessConfig: (harnessId: string) => ["harnesses", harnessId, "config"] as const,
   agent: (name: string) => ["agents", name] as const,
+  channelThreads: (channelId: string) => ["channels", channelId, "threads"] as const,
+  threadMessages: (threadId: string) => ["threads", threadId, "messages"] as const,
 };
 
 export function useChannels() {
@@ -74,6 +81,43 @@ export function useUpdateAgent(name: string) {
   });
 }
 
+export function useThreads(channelId: string) {
+  return useQuery({
+    queryKey: queryKeys.channelThreads(channelId),
+    queryFn: () => fetchThreads(channelId),
+  });
+}
+
+export function useMessages(threadId: string) {
+  return useQuery({
+    queryKey: queryKeys.threadMessages(threadId),
+    queryFn: () => fetchMessages(threadId),
+  });
+}
+
+export function useCreateThread(channelId: string) {
+  return useMutation({
+    mutationFn: (content: string) => createThread(channelId, content),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.channelThreads(channelId),
+      });
+    },
+  });
+}
+
+export function useSendMessage(threadId: string) {
+  return useMutation({
+    mutationFn: (content: string) => sendMessage(threadId, content),
+    onSuccess: ({ message }) => {
+      appendMessageToCache(message);
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.channelThreads(message.channelId),
+      });
+    },
+  });
+}
+
 export function useCreateDefaultAgent() {
   return useMutation({
     mutationFn: createDefaultAgent,
@@ -82,4 +126,36 @@ export function useCreateDefaultAgent() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.setupStatus });
     },
   });
+}
+
+// Inserts a message into its thread's cached list, deduplicating by id (the
+// sender's own POST response and the WebSocket delta both land here).
+export function appendMessageToCache(message: Message): void {
+  queryClient.setQueryData<{ messages: Message[] }>(
+    queryKeys.threadMessages(message.threadId),
+    (cached) => {
+      if (!cached) return cached;
+      if (cached.messages.some((m) => m.id === message.id)) return cached;
+      return { messages: [...cached.messages, message] };
+    },
+  );
+}
+
+// Applies a server delta frame to the query caches.
+export function applyServerFrame(frame: ServerFrame): void {
+  switch (frame.type) {
+    case "message.appended":
+      appendMessageToCache(frame.message);
+      break;
+    case "thread.updated":
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.channelThreads(frame.thread.channelId),
+      });
+      break;
+    case "hello":
+      // Deltas may have been missed while disconnected; refetch chat state.
+      void queryClient.invalidateQueries({ queryKey: ["channels"] });
+      void queryClient.invalidateQueries({ queryKey: ["threads"] });
+      break;
+  }
 }

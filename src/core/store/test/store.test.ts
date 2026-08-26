@@ -16,6 +16,105 @@ test("migrates a fresh database and seeds defaults", () => {
   store.close();
 });
 
+function chatFixture() {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  return { store, channel };
+}
+
+test("createThread writes the thread and its first message atomically", () => {
+  const { store, channel } = chatFixture();
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Ship the chat slice\nwith details below",
+  });
+
+  expect(thread.title).toBe("Ship the chat slice");
+  expect(thread.status).toBe("open");
+  expect(thread.lastSeq).toBe(1);
+  expect(message.seq).toBe(1);
+  expect(message.threadId).toBe(thread.id);
+  expect(store.listMessages(thread.id)).toHaveLength(1);
+  store.close();
+});
+
+test("appendMessage allocates monotonic seqs and bumps the thread", () => {
+  const { store, channel } = chatFixture();
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "First",
+  });
+  const second = store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Second",
+  });
+  const other = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Other thread",
+  });
+
+  expect(second.seq).toBe(2);
+  // Seq is per-workspace, so the next thread's first message continues it.
+  expect(other.message.seq).toBe(3);
+  expect(store.getThread(thread.id)!.lastSeq).toBe(2);
+  store.close();
+});
+
+test("listThreads orders by activity and counts messages", () => {
+  const { store, channel } = chatFixture();
+  const a = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "A",
+  });
+  const b = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "B",
+  });
+  store.appendMessage(a.thread.id, {
+    author: "user",
+    kind: "message",
+    content: "reply",
+  });
+
+  const threads = store.listThreads(channel.id);
+  expect(threads.map((t) => t.title)).toEqual(["A", "B"]);
+  expect(threads[0]!.messageCount).toBe(2);
+  expect(threads[1]!.messageCount).toBe(1);
+  store.close();
+});
+
+test("writes emit post-commit changes", () => {
+  const { store, channel } = chatFixture();
+  const changes: string[] = [];
+  store.onChange = (change) => changes.push(change.type);
+
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Hello",
+  });
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Again",
+  });
+
+  expect(changes).toEqual([
+    "thread.updated",
+    "message.appended",
+    "message.appended",
+    "thread.updated",
+  ]);
+  store.close();
+});
+
 test("migrations are idempotent across reopen", () => {
   const root = tempDir();
   new PhiStore(root).close();

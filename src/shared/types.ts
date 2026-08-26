@@ -31,6 +31,13 @@ export interface Thread {
   updatedAt: string;
 }
 
+// A thread as rendered in a channel's message flow: the root message plus
+// reply metadata.
+export interface ThreadSummary extends Thread {
+  messageCount: number;
+  rootMessage: Message | null;
+}
+
 export type MessageAuthor = "user" | "coordinator" | "worker" | "system";
 
 export interface Message {

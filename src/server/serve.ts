@@ -57,6 +57,58 @@ export function startServer(): void {
         Response.json({ ok: true, workspaceId: workspace.id }),
       "/api/v1/channels": () =>
         Response.json({ channels: store.listChannels(workspace.id) }),
+      "/api/v1/channels/:id/threads": {
+        GET: (req) => {
+          if (!store.getChannel(req.params.id)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json({ threads: store.listThreads(req.params.id) });
+        },
+        POST: async (req) => {
+          const content = await messageContent(req);
+          if (content === null) {
+            return Response.json(
+              { error: "content is required" },
+              { status: 400 },
+            );
+          }
+          if (!store.getChannel(req.params.id)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          const result = store.createThread(req.params.id, {
+            author: "user",
+            kind: "message",
+            content,
+          });
+          return Response.json(result, { status: 201 });
+        },
+      },
+      "/api/v1/threads/:id/messages": {
+        GET: (req) => {
+          if (!store.getThread(req.params.id)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json({ messages: store.listMessages(req.params.id) });
+        },
+        POST: async (req) => {
+          const content = await messageContent(req);
+          if (content === null) {
+            return Response.json(
+              { error: "content is required" },
+              { status: 400 },
+            );
+          }
+          if (!store.getThread(req.params.id)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          const message = store.appendMessage(req.params.id, {
+            author: "user",
+            kind: "message",
+            content,
+          });
+          return Response.json({ message }, { status: 201 });
+        },
+      },
       "/api/v1/agents": async () => Response.json(await listAgents(workspace.rootPath)),
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),
@@ -128,5 +180,21 @@ export function startServer(): void {
     },
   });
 
+  // Store writes broadcast to every connected client after commit.
+  store.onChange = (change) => {
+    const frame: ServerFrame = { v: 1, ...change };
+    server.publish("deltas", JSON.stringify(frame));
+  };
+
   console.log(`phi serving on http://localhost:${server.port}`);
+}
+
+async function messageContent(req: Request): Promise<string | null> {
+  const body = (await req.json().catch(() => null)) as {
+    content?: unknown;
+  } | null;
+  const content = body?.content;
+  return typeof content === "string" && content.trim().length > 0
+    ? content.trim()
+    : null;
 }

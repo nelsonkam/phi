@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
 import { Bot, Inbox } from "lucide-react";
-import { useChannels } from "@/web/lib/queries";
+import { applyServerFrame, useChannels } from "@/web/lib/queries";
 import { connectDeltaSocket, type ConnectionStatus } from "@/web/lib/ws";
 import { cn } from "@/web/lib/utils";
 
@@ -12,7 +12,7 @@ export function App() {
 
   useEffect(() => {
     return connectDeltaSocket({
-      onFrame: () => {},
+      onFrame: applyServerFrame,
       onStatus: setStatus,
     });
   }, []);
@@ -86,17 +86,20 @@ function SidebarLink({
 
 export function Page({
   title,
+  titleExtra,
   children,
 }: {
   title: string;
+  titleExtra?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <main className="flex flex-1 flex-col">
-      <header className="flex h-12 items-center border-b px-4">
+    <main className="flex min-w-0 flex-1 flex-col">
+      <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
         <h1 className="text-sm font-medium">{title}</h1>
+        {titleExtra}
       </header>
-      <section className="flex flex-1 flex-col">{children}</section>
+      <section className="flex min-h-0 flex-1 flex-col">{children}</section>
     </main>
   );
 }
