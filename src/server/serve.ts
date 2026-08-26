@@ -1,9 +1,8 @@
 import index from "@/web/index.html";
 import { PhiStore } from "@/core/store/store";
 import { detectHarnesses } from "@/core/agents/harnesses";
-import { listHarnessConfig } from "@/core/agents/config";
+import { HarnessCapabilityService } from "@/core/agents/capabilities";
 import { AgentRuntime } from "@/core/agents/runtime";
-import type { HarnessConfig } from "@/shared/types";
 import { ensureWorkspace } from "@/core/workspace";
 import type { ServerFrame } from "@/shared/types";
 import {
@@ -18,30 +17,6 @@ import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { createMessageSearch } from "@/core/search/message-search";
 
 const DEFAULT_PORT = 3141;
-const CONFIG_CACHE_TTL_MS = 5 * 60_000;
-
-// Spawning a harness to ask for its config takes seconds; successful results
-// are cached briefly and concurrent requests share one in-flight probe.
-const configCache = new Map<
-  string,
-  { at: number; result: Promise<HarnessConfig> }
->();
-
-function cachedHarnessConfig(
-  harnessId: string,
-  workspaceRoot: string,
-): Promise<HarnessConfig> {
-  const cached = configCache.get(harnessId);
-  if (cached && Date.now() - cached.at < CONFIG_CACHE_TTL_MS) {
-    return cached.result;
-  }
-  const result = listHarnessConfig(harnessId, workspaceRoot).then((config) => {
-    if (config.error) configCache.delete(harnessId);
-    return config;
-  });
-  configCache.set(harnessId, { at: Date.now(), result });
-  return result;
-}
 
 export function startServer(): void {
   const store = new PhiStore();
@@ -49,13 +24,20 @@ export function startServer(): void {
   ensureWorkspace(workspace.rootPath);
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
   const mcpTokens = new McpTokenRegistry();
+  const harnessCapabilities = new HarnessCapabilityService(workspace.rootPath);
   const messageSearch = createMessageSearch(store, store.rootPath);
   messageSearch.start();
-  const mcpHandler = createMcpHandler(store, mcpTokens, messageSearch);
   const runtime = new AgentRuntime(store, workspace.rootPath, {
     mcpPort: port,
     mcpTokens,
   });
+  const mcpHandler = createMcpHandler(
+    store,
+    mcpTokens,
+    messageSearch,
+    (message, routedTo) => runtime.handleAgentMessage(message, routedTo),
+    harnessCapabilities,
+  );
   runtime.recoverInterruptedTurns();
 
   const server = Bun.serve({
@@ -93,12 +75,14 @@ export function startServer(): void {
           if (!store.getChannel(req.params.id)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
+          const routing = await runtime.routeUserContent(content);
           const result = store.createThread(req.params.id, {
             author: "user",
             kind: "message",
             content,
+            metadata: { ...routing },
           });
-          runtime.handleUserMessage(result.message);
+          runtime.handleUserMessage(result.message, routing.routedTo[0]);
           return Response.json(result, { status: 201 });
         },
       },
@@ -120,12 +104,17 @@ export function startServer(): void {
           if (!store.getThread(req.params.id)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
+          const routing = await runtime.routeUserContent(
+            content,
+            req.params.id,
+          );
           const message = store.appendMessage(req.params.id, {
             author: "user",
             kind: "message",
             content,
+            metadata: { ...routing },
           });
-          runtime.handleUserMessage(message);
+          runtime.handleUserMessage(message, routing.routedTo[0]);
           return Response.json({ message }, { status: 201 });
         },
       },
@@ -161,10 +150,7 @@ export function startServer(): void {
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),
       "/api/v1/harnesses/:id/config": async (req) => {
-        const result = await cachedHarnessConfig(
-          req.params.id,
-          workspace.rootPath,
-        );
+        const result = await harnessCapabilities.getConfig(req.params.id);
         return Response.json(result, { status: result.error ? 502 : 200 });
       },
       "/api/v1/agents/:name": {

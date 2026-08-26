@@ -40,7 +40,7 @@ export interface ThreadSummary extends Thread {
   rootMessage: Message | null;
 }
 
-export type MessageAuthor = "user" | "coordinator" | "worker" | "system";
+export type MessageAuthor = "user" | "agent" | "system";
 
 export interface Message {
   id: string;

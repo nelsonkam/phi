@@ -5,18 +5,31 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, memo, useState } from "react";
+import { type FC, memo, useMemo, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { Button } from "@/web/components/ui/button";
+import { remarkMentions } from "@/web/lib/remark-mentions";
 import { cn } from "@/web/lib/utils";
 
 // Messages arrive whole (never streamed), so the streaming affordances
-// (`smooth` reveal, `defer`) are disabled.
-const MarkdownTextImpl = () => {
+// (`smooth` reveal, `defer`) are disabled. `mentionNames` (the loaded agent
+// registry) turns valid @mentions into styled pills.
+const MarkdownTextImpl = ({
+  mentionNames,
+}: {
+  mentionNames?: ReadonlySet<string>;
+}) => {
+  const remarkPlugins = useMemo(
+    () =>
+      mentionNames?.size
+        ? [remarkGfm, remarkMentions(mentionNames)]
+        : [remarkGfm],
+    [mentionNames],
+  );
   return (
     <MarkdownTextPrimitive
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={remarkPlugins}
       className="aui-md"
       components={defaultComponents}
       smooth={false}

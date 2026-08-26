@@ -31,10 +31,10 @@ export function ThreadPanel({
   const messages = data?.messages ?? [];
   const [root, ...replies] = messages;
   const liveTurn = useThreadTurn(threadId);
-  const persistedAgent = turnActive ? (turnAgent ?? "coordinator") : null;
+  const persistedAgent = turnActive ? (turnAgent ?? "agent") : null;
   const activeAgent = liveTurn.ready ? liveTurn.agent : persistedAgent;
   const isAgentWorking = send.isPending || activeAgent !== null;
-  const workingAgent = activeAgent ?? turnAgent ?? "coordinator";
+  const workingAgent = activeAgent ?? turnAgent ?? "agent";
 
   const { scrollProps, pinned, hasNew, scrollToBottom } = useStickToBottom(
     messages.length,

@@ -5,17 +5,30 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { MESSAGING_PREAMBLE } from "@/core/agents/runtime";
+import { routeAgentContent } from "@/core/agents/routing";
+import { HarnessCapabilityService } from "@/core/agents/capabilities";
+import type { AgentHarnessCapabilityList } from "@/core/agents/capabilities";
 import type { MessageSearchApi } from "@/core/search/message-search";
 import type { PhiStore } from "@/core/store/store";
 import type { McpTokenRegistry } from "@/server/mcp-token-registry";
+import type { Message } from "@/shared/types";
 
-export const SEND_MESSAGE_DESCRIPTION = `Send a message to the user in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown to the user. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report.`;
+export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Use the optional to list for a deliberate handoff to peer agents; without it, only a valid leading @name routes the message. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report.`;
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across your phi workspace using both exact keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace comes from your session; do not ask the user for a thread or channel ID. You may optionally narrow results using a channel name.`;
+export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
+
+export interface AgentHarnessCapabilityApi {
+  list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
+}
 
 export function createMcpHandler(
   store: PhiStore,
   tokens: McpTokenRegistry,
   messageSearch?: MessageSearchApi,
+  onAgentMessage?: (message: Message, routedTo: string[]) => void,
+  harnessCapabilities: AgentHarnessCapabilityApi = new HarnessCapabilityService(
+    store.defaultWorkspace().rootPath,
+  ),
 ): (req: Request) => Promise<Response> {
   return async (req) => {
     const token = bearerToken(req.headers.get("authorization"));
@@ -54,8 +67,32 @@ export function createMcpHandler(
                 minLength: 1,
                 description: "Markdown message to send",
               },
+              to: {
+                type: "array",
+                minItems: 1,
+                uniqueItems: true,
+                items: { type: "string", minLength: 1 },
+                description:
+                  "Optional agent handles to route to, in turn order",
+              },
             },
             required: ["content"],
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "list_agent_harnesses",
+          description: LIST_AGENT_HARNESSES_DESCRIPTION,
+          inputSchema: {
+            type: "object",
+            properties: {
+              harness: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "Optional harness ID; omit to list every known harness",
+              },
+            },
             additionalProperties: false,
           },
         },
@@ -93,6 +130,45 @@ export function createMcpHandler(
       ],
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      if (request.params.name === "list_agent_harnesses") {
+        const rawHarness = request.params.arguments?.harness;
+        if (rawHarness !== undefined && typeof rawHarness !== "string") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "harness must be a string" }],
+          };
+        }
+        const harness =
+          typeof rawHarness === "string" ? rawHarness.trim() : undefined;
+        if (rawHarness !== undefined && !harness) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "harness is required" }],
+          };
+        }
+        return tokens.runOnce(
+          token,
+          `list_agent_harnesses:${harness ?? "*"}`,
+          extra.requestId,
+          async () => {
+            try {
+              const result = await harnessCapabilities.list(harness);
+              return {
+                content: [
+                  { type: "text" as const, text: JSON.stringify(result) },
+                ],
+              };
+            } catch (error) {
+              return {
+                isError: true,
+                content: [
+                  { type: "text" as const, text: (error as Error).message },
+                ],
+              };
+            }
+          },
+        );
+      }
       if (request.params.name === "search_messages" && messageSearch) {
         const rawQuery = request.params.arguments?.query;
         const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
@@ -178,19 +254,57 @@ export function createMcpHandler(
           content: [{ type: "text", text: "content is required" }],
         };
       }
-
+      const rawTo = request.params.arguments?.to;
+      if (
+        rawTo !== undefined &&
+        (!Array.isArray(rawTo) ||
+          rawTo.length === 0 ||
+          rawTo.some((name) => typeof name !== "string" || !name.trim()))
+      ) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "to must be a non-empty list of agent names",
+            },
+          ],
+        };
+      }
+      const explicitRecipients = Array.isArray(rawTo)
+        ? rawTo.map((name) => String(name).trim())
+        : undefined;
       return tokens.runOnce(
         token,
-        `send_message:${content}`,
+        `send_message:${JSON.stringify({ content, to: explicitRecipients })}`,
         extra.requestId,
-        () => {
+        async () => {
+          let routing: Awaited<ReturnType<typeof routeAgentContent>>;
+          try {
+            routing = await routeAgentContent(
+              store.defaultWorkspace().rootPath,
+              content,
+              caller.agentName,
+              explicitRecipients,
+            );
+          } catch (error) {
+            return {
+              isError: true,
+              content: [
+                { type: "text" as const, text: (error as Error).message },
+              ],
+            };
+          }
           const message = store.appendMessage(caller.threadId, {
-            author: "coordinator",
+            author: "agent",
             kind: "message",
             content,
-            metadata: { agent: caller.agentName },
+            metadata: { agent: caller.agentName, ...routing },
           });
           tokens.recordSend(token);
+          if (routing.routedTo.length > 0) {
+            onAgentMessage?.(message, routing.routedTo);
+          }
           return {
             content: [
               {

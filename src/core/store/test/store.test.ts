@@ -1,8 +1,13 @@
 import { test, expect } from "bun:test";
+import { Database } from "bun:sqlite";
 import { copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "@/testing/tmpdir";
 import { PhiStore } from "../store";
+import m001 from "@/db/migrations/001_init.sql" with { type: "text" };
+import m002 from "@/db/migrations/002_thread_turn_state.sql" with { type: "text" };
+import m003 from "@/db/migrations/003_thread_sessions.sql" with { type: "text" };
+import m004 from "@/db/migrations/004_message_search.sql" with { type: "text" };
 
 test("migrates a fresh database and seeds defaults", () => {
   const root = tempDir();
@@ -118,6 +123,7 @@ test("persists and replaces a thread's harness session binding", () => {
     sessionId: "session-one",
     model: "smart",
     config: { effort: "high", fast: true },
+    lastSeenSeq: 1,
   });
   expect(store.getThreadSession(thread.id)).toEqual(first);
 
@@ -129,6 +135,23 @@ test("persists and replaces a thread's harness session binding", () => {
   });
   expect(replacement.createdAt).toBe(first.createdAt);
   expect(replacement.sessionId).toBe("session-two");
+  const reviewer = store.saveThreadSession({
+    threadId: thread.id,
+    harnessId: "claude-code",
+    agentName: "reviewer",
+    sessionId: "review-session",
+    model: "careful",
+    config: {},
+    lastSeenSeq: 0,
+  });
+  store.advanceThreadSession(thread.id, "reviewer", 7);
+  expect(store.getThreadSession(thread.id, "reviewer")).toMatchObject({
+    ...reviewer,
+    lastSeenSeq: 7,
+  });
+  expect(store.getThreadSession(thread.id, "default")!.sessionId).toBe(
+    "session-two",
+  );
   store.close();
 
   const reopened = new PhiStore(root);
@@ -138,6 +161,11 @@ test("persists and replaces a thread's harness session binding", () => {
     sessionId: "session-two",
     model: null,
     config: {},
+    lastSeenSeq: 1,
+  });
+  expect(reopened.getThreadSession(thread.id, "reviewer")).toMatchObject({
+    sessionId: "review-session",
+    lastSeenSeq: 7,
   });
   reopened.close();
 });
@@ -209,4 +237,83 @@ test("default workspace root follows a moved phi root", () => {
   const moved = new PhiStore(newRoot);
   expect(moved.defaultWorkspace().rootPath).toBe(join(newRoot, "workspace"));
   moved.close();
+});
+
+test("multi-agent migration preserves history and re-keys existing sessions", () => {
+  const root = tempDir();
+  const db = new Database(join(root, "phi.db"), { create: true });
+  db.run("PRAGMA foreign_keys = ON");
+  db.run(m001);
+  db.run(m002);
+  db.run(m003);
+  db.run(m004);
+  db.run(
+    "CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+  );
+  for (const id of [
+    "001_init",
+    "002_thread_turn_state",
+    "003_thread_sessions",
+    "004_message_search",
+  ]) {
+    db.query(
+      "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+    ).run(id, "2026-01-01T00:00:00.000Z");
+  }
+  db.query(
+    "INSERT INTO workspaces VALUES (?, ?, ?, ?, ?)",
+  ).run("ws_old", "old", root, "now", "now");
+  db.query(
+    "INSERT INTO channels VALUES (?, ?, ?, ?, ?, ?)",
+  ).run("ch_old", "ws_old", "general", null, "now", "now");
+  db.query(
+    `INSERT INTO threads
+       (id, workspace_id, channel_id, title, status, last_seq, created_at, updated_at, turn_active, turn_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("th_old", "ws_old", "ch_old", "Old", "open", 1, "now", "now", 0, null);
+  db.query(
+    `INSERT INTO messages
+       (id, workspace_id, channel_id, thread_id, author, kind, content, metadata_json, seq, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "msg_old",
+    "ws_old",
+    "ch_old",
+    "th_old",
+    "coordinator",
+    "message",
+    "legacy reply",
+    "{}",
+    1,
+    "now",
+  );
+  db.query(
+    `INSERT INTO thread_sessions
+       (thread_id, harness_id, agent_name, session_id, model, config_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("th_old", "codex", "default", "sess_old", null, "{}", "now", "now");
+  db.query(
+    `INSERT INTO message_search_chunks
+       (message_id, workspace_id, channel_id, thread_id, chunk_index, content, content_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run("msg_old", "ws_old", "ch_old", "th_old", 0, "legacy reply", "hash");
+  db.close();
+
+  const migrated = new PhiStore(root);
+  expect(migrated.listMessages("th_old")[0]).toMatchObject({
+    author: "agent",
+    metadata: { agent: "default" },
+  });
+  expect(migrated.getThreadSession("th_old", "default")).toMatchObject({
+    sessionId: "sess_old",
+    lastSeenSeq: 1,
+  });
+  expect(
+    migrated.db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM message_search_chunks WHERE message_id = 'msg_old'",
+      )
+      .get()!.count,
+  ).toBe(1);
+  migrated.close();
 });

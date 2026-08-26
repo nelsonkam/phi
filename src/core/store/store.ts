@@ -38,6 +38,7 @@ export interface ThreadSessionBinding {
   sessionId: string;
   model: string | null;
   config: Record<string, string | boolean>;
+  lastSeenSeq: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -171,12 +172,24 @@ export class PhiStore {
       .map(messageFromRow);
   }
 
-  getThreadSession(threadId: string): ThreadSessionBinding | null {
+  rootMessage(threadId: string): Message | null {
     const row = this.db
-      .query<ThreadSessionRow, [string]>(
-        "SELECT * FROM thread_sessions WHERE thread_id = ?",
+      .query<MessageRow, [string]>(
+        "SELECT * FROM messages WHERE thread_id = ? ORDER BY seq LIMIT 1",
       )
       .get(threadId);
+    return row ? messageFromRow(row) : null;
+  }
+
+  getThreadSession(
+    threadId: string,
+    agentName = "default",
+  ): ThreadSessionBinding | null {
+    const row = this.db
+      .query<ThreadSessionRow, [string, string]>(
+        "SELECT * FROM thread_agent_sessions WHERE thread_id = ? AND agent_name = ?",
+      )
+      .get(threadId, agentName);
     return row ? threadSessionFromRow(row) : null;
   }
 
@@ -184,19 +197,19 @@ export class PhiStore {
     if (!this.getThread(input.threadId)) {
       throw new Error(`no thread "${input.threadId}"`);
     }
-    const existing = this.getThreadSession(input.threadId);
+    const existing = this.getThreadSession(input.threadId, input.agentName);
     const now = new Date().toISOString();
     this.db
       .query(
-        `INSERT INTO thread_sessions
-           (thread_id, harness_id, agent_name, session_id, model, config_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(thread_id) DO UPDATE SET
+        `INSERT INTO thread_agent_sessions
+           (thread_id, harness_id, agent_name, session_id, model, config_json, last_seen_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(thread_id, agent_name) DO UPDATE SET
            harness_id = excluded.harness_id,
-           agent_name = excluded.agent_name,
            session_id = excluded.session_id,
            model = excluded.model,
            config_json = excluded.config_json,
+           last_seen_seq = excluded.last_seen_seq,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -206,10 +219,34 @@ export class PhiStore {
         input.sessionId,
         input.model,
         JSON.stringify(input.config),
+        input.lastSeenSeq,
         existing?.createdAt ?? now,
         now,
       );
-    return this.getThreadSession(input.threadId)!;
+    return this.getThreadSession(input.threadId, input.agentName)!;
+  }
+
+  advanceThreadSession(
+    threadId: string,
+    agentName: string,
+    lastSeenSeq: number,
+  ): void {
+    this.db
+      .query(
+        `UPDATE thread_agent_sessions
+         SET last_seen_seq = MAX(last_seen_seq, ?), updated_at = ?
+         WHERE thread_id = ? AND agent_name = ?`,
+      )
+      .run(lastSeenSeq, new Date().toISOString(), threadId, agentName);
+  }
+
+  updateMessageMetadata(
+    messageId: string,
+    metadata: Record<string, unknown>,
+  ): void {
+    this.db
+      .query("UPDATE messages SET metadata_json = ? WHERE id = ?")
+      .run(JSON.stringify(metadata), messageId);
   }
 
   listActiveTurns(workspaceId: string): ThreadTurn[] {
@@ -308,6 +345,12 @@ export class PhiStore {
       .get(workspaceId)!;
     const id = newId("msg");
     const now = new Date().toISOString();
+    if (
+      input.author === "agent" &&
+      typeof input.metadata?.agent !== "string"
+    ) {
+      throw new Error('agent messages require metadata.agent');
+    }
 
     this.db
       .query(
@@ -419,6 +462,7 @@ interface ThreadSessionRow {
   session_id: string;
   model: string | null;
   config_json: string;
+  last_seen_seq: number;
   created_at: string;
   updated_at: string;
 }
@@ -461,6 +505,7 @@ function threadSessionFromRow(row: ThreadSessionRow): ThreadSessionBinding {
     sessionId: row.session_id,
     model: row.model,
     config: JSON.parse(row.config_json) as Record<string, string | boolean>,
+    lastSeenSeq: row.last_seen_seq,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

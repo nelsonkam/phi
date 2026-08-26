@@ -57,6 +57,15 @@ export async function loadDefaultAgent(
   return result.ok && result.agent.role === "default" ? result.agent : null;
 }
 
+export async function loadAgent(
+  workspaceRoot: string,
+  name: string,
+): Promise<AgentDefinition | null> {
+  if (name === DEFAULT_AGENT_NAME) return loadDefaultAgent(workspaceRoot);
+  const { agents } = await loadAgents(workspaceRoot);
+  return agents.find((agent) => agent.name === name) ?? null;
+}
+
 // Sensible defaults so setup only needs a harness choice. Users can edit
 // default.md afterwards.
 export const DEFAULT_AGENT_DESCRIPTION = "Coordinates work across threads";

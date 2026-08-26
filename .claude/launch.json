@@ -6,6 +6,12 @@
       "runtimeExecutable": "bun",
       "runtimeArgs": ["run", "dev"],
       "port": 3141
+    },
+    {
+      "name": "phi-alt",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["PHI_PORT=3142", "bun", "run", "dev"],
+      "port": 3142
     }
   ]
 }

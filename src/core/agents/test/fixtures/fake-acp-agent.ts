@@ -115,12 +115,21 @@ async function handle(line: string): Promise<void> {
       const promptText = params.prompt
         .map((block) => block.text ?? "")
         .join("");
-      const text = promptText.split("User request:\n").at(-1) ?? promptText;
+      // The live message is the prompt's last blank-line-separated segment
+      // (after the optional preamble and catch-up blocks), labeled only when
+      // catch-up precedes it or a peer agent sent it. Test contents are
+      // single-line, so the segment split is unambiguous here.
+      const text = (promptText.split("\n\n").at(-1) ?? promptText)
+        .replace(/^New message from the user:\n/, "")
+        .replace(/^Message from @[a-z0-9-]+:\n/, "");
       const model = config.model ? `[model=${config.model}] ` : "";
       // Surfaces the once-per-session messaging preamble so tests can assert
       // exactly which prompts carried it.
       const intro = promptText.includes("Use phi's send_message tool")
         ? "[intro] "
+        : "";
+      const catchup = promptText.includes("Prior conversation from Phi")
+        ? "[catchup] "
         : "";
       if (mode === "tool") {
         await callSendMessage(`tool#${turn}: ${text}`);
@@ -141,7 +150,7 @@ async function handle(line: string): Promise<void> {
         send({ id: msg.id, result: { stopReason: "end_turn" } });
         break;
       }
-      for (const chunk of [`${model}${intro}echo#${turn}: `, text]) {
+      for (const chunk of [`${model}${intro}${catchup}echo#${turn}: `, text]) {
         send({
           method: "session/update",
           params: {

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { ArrowRight, LoaderCircle, TriangleAlert } from "lucide-react";
+import { ThemeToggle } from "@/web/components/theme-toggle";
 import {
   Select,
   SelectContent,
@@ -75,6 +76,9 @@ export function Onboarding() {
             φ
           </span>
           <span className="text-sm font-semibold tracking-tight">phi</span>
+          <div className="ml-auto">
+            <ThemeToggle />
+          </div>
         </div>
 
         <h1 className="text-lg font-semibold tracking-tight">

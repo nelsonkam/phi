@@ -9,8 +9,10 @@ import type {
 import { connectAcpProcess } from "./acp-process";
 import type { AcpProcess } from "./acp-process";
 import { harnessEntry } from "./harnesses";
-import { DEFAULT_AGENT_NAME, loadDefaultAgent } from "./registry";
+import { DEFAULT_AGENT_NAME, loadAgent } from "./registry";
 import type { AgentDefinition } from "./registry";
+import { routeAgentContent, routeUserContent } from "./routing";
+import type { MessageRouting } from "./routing";
 import type { PhiStore } from "@/core/store/store";
 import type { ThreadSessionBinding } from "@/core/store/store";
 import type { Message } from "@/shared/types";
@@ -23,7 +25,7 @@ const AUTH_REQUIRED_CODE = -32000;
 // the phi MCP server repeats the same guidance in send_message's tool
 // description and server instructions, so the model sees it every turn
 // regardless.
-export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap.`;
+export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content — never prefix your own messages with a handle; your name is attached automatically. Lead with @name only to hand the turn to that agent.`;
 
 const RECOVERY_CONTEXT_MAX_CHARS = 16_000;
 
@@ -44,7 +46,7 @@ interface ThreadSession {
   // False until the messaging preamble has reached the harness session, either
   // by this process sending it or by resuming a session whose history has it.
   primed: boolean;
-  recoveryContext?: string;
+  lastSeenSeq: number;
   // ACP may emit multiple logical agent messages during one turn (for example,
   // commentary followed by a final answer). Chunks within a message are deltas
   // and concatenate exactly; distinct messages retain a paragraph boundary.
@@ -62,6 +64,7 @@ export interface AgentRuntimeOptions {
     beginTurn(token: string): void;
     sendCount(token: string): number;
   };
+  hopBudget?: number;
 }
 
 // Routes stored user messages to agent sessions and writes replies back
@@ -73,6 +76,7 @@ export class AgentRuntime {
   private readonly resolveCommand: (harnessId: string) => string[] | null;
   private readonly mcpPort: number;
   private readonly mcpTokens: AgentRuntimeOptions["mcpTokens"];
+  private readonly hopBudget: number;
   private readonly sessions = new Map<string, ThreadSession>();
   // Per-thread promise chain; one turn runs at a time per thread and
   // messages posted mid-turn become the next turn.
@@ -82,6 +86,7 @@ export class AgentRuntime {
   // working state across chained turns instead of an off/on blink between
   // them.
   private readonly pendingTurns = new Map<string, number>();
+  private readonly agentHops = new Map<string, number>();
 
   constructor(
     store: PhiStore,
@@ -92,30 +97,135 @@ export class AgentRuntime {
     this.workspaceRoot = workspaceRoot;
     this.mcpPort = options.mcpPort;
     this.mcpTokens = options.mcpTokens;
+    this.hopBudget = options.hopBudget ?? 4;
     this.resolveCommand =
       options.resolveCommand ??
       ((harnessId) => harnessEntry(harnessId)?.acpCommand?.() ?? null);
   }
 
-  handleUserMessage(message: Message): void {
+  // Pass `threadId` when routing a reply so unmentioned messages fall back to
+  // the thread's own agent; omit it for a thread root, which has no history.
+  async routeUserContent(
+    content: string,
+    threadId?: string,
+  ): Promise<MessageRouting> {
+    return routeUserContent(
+      this.workspaceRoot,
+      content,
+      threadId ? this.threadFallbackAgent(threadId) : undefined,
+    );
+  }
+
+  // The agent the thread's root message routed to. A thread opened with
+  // "@researcher ..." belongs to researcher; unmentioned replies stay with it.
+  private threadFallbackAgent(threadId: string): string {
+    const routed = this.store.rootMessage(threadId)?.metadata.routedTo;
+    const agent = Array.isArray(routed) ? routed[0] : undefined;
+    return typeof agent === "string" ? agent : DEFAULT_AGENT_NAME;
+  }
+
+  handleUserMessage(message: Message, routedTo?: string): void {
     if (message.author !== "user") return;
+    this.agentHops.set(message.threadId, 0);
+    this.enqueueMessage(message, routedTo ? [routedTo] : undefined);
+  }
+
+  handleAgentMessage(message: Message, routedTo?: string[]): void {
+    if (message.author !== "agent") return;
+    if (routedTo?.length === 0) return;
+    this.enqueueMessage(message, routedTo);
+  }
+
+  private enqueueMessage(message: Message, routedTo?: string[]): void {
     const threadId = message.threadId;
     // Flip the working flag synchronously, before the caller's HTTP response
     // is sent, so the thread.turn frame can never trail the send round-trip.
     const pending = (this.pendingTurns.get(threadId) ?? 0) + 1;
     this.pendingTurns.set(threadId, pending);
     if (pending === 1) {
-      const agentName =
-        this.sessions.get(threadId)?.agentName ??
-        this.store.getThreadSession(threadId)?.agentName ??
-        DEFAULT_AGENT_NAME;
+      const agentName = routedTo?.[0] ?? this.threadFallbackAgent(threadId);
       this.store.setThreadTurn(threadId, true, agentName);
     }
     const prev = this.turns.get(threadId) ?? Promise.resolve();
     // runTurn reports every failure as a message, so the chain never rejects.
     this.turns.set(
       threadId,
-      prev.then(() => this.runTurn(message)),
+      prev.then(() => this.processMessage(message, routedTo)),
+    );
+  }
+
+  private async processMessage(
+    message: Message,
+    routedTo?: string[],
+  ): Promise<void> {
+    const threadId = message.threadId;
+    try {
+      const routing = await this.resolveRouting(message, routedTo);
+      const metadata = { ...message.metadata, ...routing };
+      message.metadata = metadata;
+      this.store.updateMessageMetadata(message.id, metadata);
+
+      for (const agentName of routing.routedTo) {
+        if (message.author === "agent") {
+          const nextHop = (this.agentHops.get(threadId) ?? 0) + 1;
+          if (nextHop > this.hopBudget) {
+            this.store.appendMessage(threadId, {
+              author: "system",
+              kind: "message",
+              content: `Agent exchange paused after ${this.hopBudget} hops; @${agentName} was next. Send a user message to continue.`,
+              metadata: {
+                reason: "agent-hop-budget",
+                routedTo: [agentName],
+              },
+            });
+            break;
+          }
+          this.agentHops.set(threadId, nextHop);
+        }
+        await this.runTurn(message, agentName);
+      }
+    } catch (error) {
+      this.store.appendMessage(threadId, {
+        author: "system",
+        kind: "error",
+        content: (error as Error).message,
+        metadata: { retriable: true },
+      });
+    } finally {
+      const remaining = (this.pendingTurns.get(threadId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.pendingTurns.set(threadId, remaining);
+      } else {
+        this.pendingTurns.delete(threadId);
+        this.store.setThreadTurn(threadId, false, null);
+      }
+    }
+  }
+
+  private async resolveRouting(
+    message: Message,
+    routedTo?: string[],
+  ): Promise<MessageRouting> {
+    if (routedTo) {
+      return {
+        mentions: Array.isArray(message.metadata.mentions)
+          ? (message.metadata.mentions as string[])
+          : [],
+        routedTo,
+      };
+    }
+    if (message.author === "user") {
+      return routeUserContent(
+        this.workspaceRoot,
+        message.content,
+        this.threadFallbackAgent(message.threadId),
+      );
+    }
+    const authorAgent = String(message.metadata.agent ?? "");
+    return routeAgentContent(
+      this.workspaceRoot,
+      message.content,
+      authorAgent,
     );
   }
 
@@ -144,28 +254,35 @@ export class AgentRuntime {
   }
 
   close(): void {
-    for (const threadId of [...this.sessions.keys()]) {
-      this.dropSession(threadId);
+    for (const key of [...this.sessions.keys()]) {
+      this.dropSessionByKey(key);
     }
   }
 
   // Releases live resources while retaining the durable binding. Archival can
   // call this; reopening the thread will resume the same harness session.
-  async releaseSession(threadId: string): Promise<void> {
-    const session = this.sessions.get(threadId);
-    if (!session) return;
-    if (session.closeSupported) {
-      await session.acp.connection.agent
-        .request("session/close", { sessionId: session.sessionId })
-        .catch(() => undefined);
+  async releaseSession(threadId: string, agentName?: string): Promise<void> {
+    const keys = agentName
+      ? [sessionKey(threadId, agentName)]
+      : [...this.sessions.keys()].filter((key) => key.startsWith(`${threadId}\0`));
+    for (const key of keys) {
+      const session = this.sessions.get(key);
+      if (!session) continue;
+      if (session.closeSupported) {
+        await session.acp.connection.agent
+          .request("session/close", { sessionId: session.sessionId })
+          .catch(() => undefined);
+      }
+      this.dropSessionByKey(key);
     }
-    this.dropSession(threadId);
   }
 
-  private async runTurn(userMessage: Message): Promise<void> {
-    const threadId = userMessage.threadId;
+  private async runTurn(message: Message, agentName: string): Promise<void> {
+    const threadId = message.threadId;
+    const key = sessionKey(threadId, agentName);
+    let session: ThreadSession | null = null;
     try {
-      const session = await this.ensureSession(threadId, userMessage);
+      session = await this.ensureSession(threadId, agentName);
       // handleUserMessage flagged the turn with the best name it had; correct
       // it once the session pins the actual agent.
       if (this.store.getThread(threadId)?.turnAgent !== session.agentName) {
@@ -173,7 +290,11 @@ export class AgentRuntime {
       }
       session.turnText = [];
       this.mcpTokens.beginTurn(session.mcpToken);
-      const recoveryContext = session.recoveryContext;
+      const catchUpContext = this.catchUpContext(
+        threadId,
+        session.lastSeenSeq,
+        message.seq,
+      );
       const response = (await session.acp.connection.agent.request(
         "session/prompt",
         {
@@ -183,8 +304,12 @@ export class AgentRuntime {
               type: "text",
               text: [
                 session.primed ? undefined : MESSAGING_PREAMBLE,
-                recoveryContext,
-                `User request:\n${userMessage.content}`,
+                catchUpContext,
+                routedPrompt(
+                  message,
+                  session.agentName,
+                  catchUpContext.length > 0,
+                ),
               ]
                 .filter(Boolean)
                 .join("\n\n"),
@@ -193,7 +318,6 @@ export class AgentRuntime {
         },
       )) as PromptResponse;
       session.primed = true;
-      session.recoveryContext = undefined;
 
       const text = session.turnText
         .map(({ chunks }) => chunks.join("").trim())
@@ -204,16 +328,23 @@ export class AgentRuntime {
         return;
       }
       if (text.length > 0) {
-        this.store.appendMessage(threadId, {
-          author: "coordinator",
+        const routing = await routeAgentContent(
+          this.workspaceRoot,
+          text,
+          session.agentName,
+        );
+        const fallback = this.store.appendMessage(threadId, {
+          author: "agent",
           kind: "message",
           content: text,
           metadata: {
             agent: session.agentName,
             stopReason: response.stopReason,
             via: "turn-text-fallback",
+            ...routing,
           },
         });
+        this.handleAgentMessage(fallback, routing.routedTo);
       } else {
         this.store.appendMessage(threadId, {
           author: "system",
@@ -225,7 +356,7 @@ export class AgentRuntime {
     } catch (error) {
       // The session may be mid-broken (dead process, protocol error); drop it
       // so the next message starts clean.
-      this.dropSession(threadId);
+      this.dropSessionByKey(key);
       this.store.appendMessage(threadId, {
         author: "system",
         kind: "error",
@@ -233,30 +364,37 @@ export class AgentRuntime {
         metadata: { retriable: true },
       });
     } finally {
-      const remaining = (this.pendingTurns.get(threadId) ?? 1) - 1;
-      if (remaining > 0) {
-        this.pendingTurns.set(threadId, remaining);
-      } else {
-        this.pendingTurns.delete(threadId);
-        this.store.setThreadTurn(threadId, false, null);
+      if (session && this.sessions.get(key) === session) {
+        const lastSeenSeq = this.seenCursorAfterTurn(
+          threadId,
+          message.seq,
+          agentName,
+        );
+        session.lastSeenSeq = Math.max(session.lastSeenSeq, lastSeenSeq);
+        this.store.advanceThreadSession(threadId, agentName, lastSeenSeq);
       }
     }
   }
 
   private async ensureSession(
     threadId: string,
-    userMessage: Message,
+    agentName: string,
   ): Promise<ThreadSession> {
-    const existing = this.sessions.get(threadId);
+    const key = sessionKey(threadId, agentName);
+    const existing = this.sessions.get(key);
     if (existing && existing.acp.proc.exitCode === null) return existing;
-    if (existing) this.dropSession(threadId);
+    if (existing) this.dropSessionByKey(key);
 
-    const binding = this.store.getThreadSession(threadId);
+    const binding = this.store.getThreadSession(threadId, agentName);
     const agent = binding
       ? agentFromBinding(binding)
-      : await loadDefaultAgent(this.workspaceRoot);
+      : await loadAgent(this.workspaceRoot, agentName);
     if (!agent) {
-      throw new Error("no default agent is configured; finish setup first");
+      throw new Error(
+        agentName === DEFAULT_AGENT_NAME
+          ? "no default agent is configured; finish setup first"
+          : `no agent named "${agentName}" is configured`,
+      );
     }
     const command = this.resolveCommand(agent.harness);
     if (!command) {
@@ -272,6 +410,7 @@ export class AgentRuntime {
       mcpToken: "",
       closeSupported: false,
       primed: false,
+      lastSeenSeq: binding?.lastSeenSeq ?? 0,
       turnText: [],
     };
     session.acp = connectAcpProcess(command, this.workspaceRoot, {
@@ -390,6 +529,7 @@ export class AgentRuntime {
           exited,
         ])) as NewSessionResponse;
         session.sessionId = created.sessionId;
+        session.lastSeenSeq = 0;
         await this.applyAgentConfig(session, agent, created);
         this.store.saveThreadSession({
           threadId,
@@ -398,22 +538,17 @@ export class AgentRuntime {
           sessionId: created.sessionId,
           model: agent.model,
           config: agent.config,
+          lastSeenSeq: 0,
         });
-        if (binding) {
-          session.recoveryContext = this.recoveryContext(
-            threadId,
-            userMessage.seq,
-          );
-        }
       }
 
       // session/load replays history as updates. Phi already has a durable
       // message read model, so discard those updates before the live turn.
       session.turnText = [];
-      this.sessions.set(threadId, session);
+      this.sessions.set(key, session);
       void proc.exited.then(() => {
-        if (this.sessions.get(threadId) !== session) return;
-        this.sessions.delete(threadId);
+        if (this.sessions.get(key) !== session) return;
+        this.sessions.delete(key);
         this.mcpTokens.revoke(session.mcpToken);
         connection.close();
       });
@@ -485,31 +620,99 @@ export class AgentRuntime {
     ];
   }
 
-  private recoveryContext(threadId: string, beforeSeq: number): string {
+  private catchUpContext(
+    threadId: string,
+    lastSeenSeq: number,
+    beforeSeq: number,
+  ): string {
     const transcript = this.store
       .listMessages(threadId)
-      .filter((message) => message.seq < beforeSeq)
+      .filter(
+        (message) =>
+          message.seq > lastSeenSeq && message.seq < beforeSeq,
+      )
       .filter(
         (message) => message.author !== "system" || message.kind !== "error",
       )
-      .map((message) => `${message.author}: ${message.content}`)
-      .join("\n\n");
+      .map((message) => `${messageLabel(message)}: ${message.content}`)
+      .join("\n");
     if (!transcript) return "";
     const bounded = transcript.slice(-RECOVERY_CONTEXT_MAX_CHARS);
     return [
-      "Recovered context from Phi's durable thread log follows. Treat it as prior conversation, do not answer it independently, and continue with the new user request.",
+      "Prior conversation from Phi's durable thread log follows. Treat it as context, do not answer it independently; the new message to respond to comes after it.",
       bounded,
     ].join("\n\n");
   }
 
-  private dropSession(threadId: string): void {
-    const session = this.sessions.get(threadId);
+  private seenCursorAfterTurn(
+    threadId: string,
+    currentSeq: number,
+    agentName: string,
+  ): number {
+    let cursor = currentSeq;
+    for (const message of this.store.listMessages(threadId)) {
+      if (message.seq <= cursor) continue;
+      // An agent sees the messages it sends during its own turn. Stop at the
+      // first other row so a user message committed concurrently cannot be
+      // skipped by a later self-authored update.
+      if (
+        message.author !== "agent" ||
+        message.metadata.agent !== agentName
+      ) {
+        break;
+      }
+      cursor = message.seq;
+    }
+    return cursor;
+  }
+
+  private dropSessionByKey(key: string): void {
+    const session = this.sessions.get(key);
     if (!session) return;
-    this.sessions.delete(threadId);
+    this.sessions.delete(key);
     this.mcpTokens.revoke(session.mcpToken);
     session.acp.connection.close();
     session.acp.proc.kill();
   }
+}
+
+function sessionKey(threadId: string, agentName: string): string {
+  return `${threadId}\0${agentName}`;
+}
+
+function messageLabel(message: Message): string {
+  if (message.author === "agent") {
+    return `[@${String(message.metadata.agent ?? "agent")}]`;
+  }
+  return `[${message.author}]`;
+}
+
+// The leading mention that routed a message to `recipient` is addressing, not
+// content; strip it so the model never sees scaffolding to imitate. The
+// durable log keeps the original text.
+function stripRoutedMention(content: string, recipient: string): string {
+  const match = content.match(/^\s*@([a-z0-9][a-z0-9-]*)\s*/i);
+  if (!match || match[1]!.toLowerCase() !== recipient.toLowerCase()) {
+    return content;
+  }
+  const rest = content.slice(match[0].length);
+  return rest.length > 0 ? rest : content;
+}
+
+// An ACP prompt is definitionally the user's channel, so a plain user message
+// needs no label. Framing appears only where the channel would otherwise lie:
+// a peer agent's message, or a live message that must be set apart from the
+// catch-up block preceding it.
+function routedPrompt(
+  message: Message,
+  recipient: string,
+  hasCatchUp: boolean,
+): string {
+  const content = stripRoutedMention(message.content, recipient);
+  if (message.author !== "user") {
+    return `Message from @${String(message.metadata.agent)}:\n${content}`;
+  }
+  return hasCatchUp ? `New message from the user:\n${content}` : content;
 }
 
 function agentFromBinding(binding: ThreadSessionBinding): SessionAgent {

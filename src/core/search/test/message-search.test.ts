@@ -71,9 +71,10 @@ test("backfills existing messages and indexes new messages immediately for FTS",
   });
 
   const appended = store.appendMessage(first.thread.id, {
-    author: "coordinator",
+    author: "agent",
     kind: "message",
     content: "The regression is tracked under PHI-4821.",
+    metadata: { agent: "default" },
   });
   const immediate = await search.search(workspace.id, { query: "PHI-4821" });
   expect(
@@ -88,10 +89,11 @@ test("backfills existing messages and indexes new messages immediately for FTS",
 test("semantic candidates recover related messages without a lexical match", async () => {
   const { store, workspace, first, search } = fixture();
   const related = store.appendMessage(first.thread.id, {
-    author: "coordinator",
+    author: "agent",
     kind: "message",
     content:
       "The open conversation panel makes the page extend below the viewport.",
+    metadata: { agent: "default" },
   });
   await search.settled();
 
@@ -122,11 +124,12 @@ test("semantic candidates recover related messages without a lexical match", asy
 test("long messages are split into independently indexed chunks", async () => {
   const { store, workspace, first, search } = fixture();
   const long = store.appendMessage(first.thread.id, {
-    author: "coordinator",
+    author: "agent",
     kind: "message",
     content: Array.from({ length: 700 }, (_, index) => `word${index}`).join(
       " ",
     ),
+    metadata: { agent: "default" },
   });
   await search.settled();
 

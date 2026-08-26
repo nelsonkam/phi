@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 import { AlertTriangle, ChevronRight } from "lucide-react";
 import type { Agent } from "@/shared/types";
+import { AgentAvatar } from "@/web/components/agent-avatar";
 import { HarnessIcon } from "@/web/components/harness-fields";
 import { useAgents } from "@/web/lib/queries";
 import { EmptyState, Page } from "../app";
@@ -50,9 +51,7 @@ function AgentRow({ agent }: { agent: Agent }) {
         to={`/agents/${agent.name}`}
         className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/50"
       >
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary text-secondary-foreground">
-          <HarnessIcon id={agent.harness} size={18} />
-        </span>
+        <AgentAvatar name={agent.name} />
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-2 text-sm font-medium">
             @{agent.name}
@@ -76,6 +75,12 @@ function AgentRow({ agent }: { agent: Agent }) {
           ))}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          <span
+            title={agent.harness}
+            className="flex size-6 items-center justify-center text-muted-foreground"
+          >
+            <HarnessIcon id={agent.harness} size={16} />
+          </span>
           {agent.model && <Badge>{agent.model}</Badge>}
           {configEntries.length > 0 && (
             <Badge>

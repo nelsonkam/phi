@@ -9,9 +9,10 @@ import { AgentsPage } from "./pages/agents";
 import { AgentDetailPage } from "./pages/agent-detail";
 import { ChannelPage } from "./pages/channel";
 import { Onboarding } from "./pages/onboarding";
+import { applyTheme, getTheme } from "./lib/theme";
 import "./index.css";
 
-document.documentElement.classList.add("dark");
+applyTheme(getTheme());
 
 const router = createBrowserRouter([
   {

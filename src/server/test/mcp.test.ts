@@ -3,6 +3,9 @@ import { PhiStore } from "@/core/store/store";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { tempDir } from "@/testing/tmpdir";
+import { ensureWorkspace } from "@/core/workspace";
+import { writeAgent } from "@/core/agents/registry";
+import type { Message } from "@/shared/types";
 import type { SearchMessagesInput } from "@/core/search/types";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
@@ -12,6 +15,7 @@ function toolCall(
   token: string | null,
   id: number,
   content = "Hello from the agent",
+  to?: string[],
 ): Promise<Response> {
   const headers = new Headers({
     accept: "application/json, text/event-stream",
@@ -27,7 +31,10 @@ function toolCall(
         jsonrpc: "2.0",
         id,
         method: "tools/call",
-        params: { name: "send_message", arguments: { content } },
+        params: {
+          name: "send_message",
+          arguments: { content, ...(to ? { to } : {}) },
+        },
       }),
     }),
   );
@@ -81,7 +88,35 @@ function searchMessages(
   );
 }
 
-function fixture() {
+function listAgentHarnesses(
+  handler: (req: Request) => Promise<Response>,
+  token: string,
+  id: number,
+  harness?: string,
+): Promise<Response> {
+  return handler(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "list_agent_harnesses",
+          arguments: harness ? { harness } : {},
+        },
+      }),
+    }),
+  );
+}
+
+function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void) {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
   const channel = store.listChannels(workspace.id)[0]!;
@@ -118,13 +153,49 @@ function fixture() {
       };
     },
   };
+  const harnessCalls: Array<string | undefined> = [];
+  const harnessCapabilities = {
+    async list(harnessId?: string) {
+      harnessCalls.push(harnessId);
+      if (harnessId === "missing") throw new Error('unknown harness "missing"');
+      return {
+        harnesses: [
+          {
+            id: harnessId ?? "codex",
+            name: "Codex",
+            installed: true,
+            available: true,
+            installHint: "install codex",
+            models: ["gpt-exact", "gpt-fast"],
+            defaultModel: "gpt-exact",
+            configOptions: [
+              {
+                id: "effort",
+                type: "select" as const,
+                defaultValue: "medium",
+                values: ["low", "medium", "high"],
+              },
+            ],
+          },
+        ],
+      };
+    },
+  };
   return {
     store,
     thread,
     tokens,
     token,
     searchCalls,
-    handler: createMcpHandler(store, tokens, messageSearch),
+    harnessCalls,
+    workspace,
+    handler: createMcpHandler(
+      store,
+      tokens,
+      messageSearch,
+      onAgentMessage,
+      harnessCapabilities,
+    ),
   };
 }
 
@@ -141,9 +212,13 @@ test("send_message posts one attributed bubble to the caller's thread", async ()
 
   expect(response.status).toBe(200);
   const message = store.listMessages(thread.id).at(-1)!;
-  expect(message.author).toBe("coordinator");
+  expect(message.author).toBe("agent");
   expect(message.content).toBe("Agent update");
-  expect(message.metadata).toEqual({ agent: "default" });
+  expect(message.metadata).toEqual({
+    agent: "default",
+    mentions: [],
+    routedTo: [],
+  });
   expect(tokens.sendCount(token)).toBe(1);
   store.close();
 });
@@ -161,14 +236,58 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(2);
+  expect(body.result.tools).toHaveLength(3);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
-  const search = body.result.tools[1]!;
+  expect(body.result.tools[0]!.inputSchema.properties.to).toBeDefined();
+  const harnesses = body.result.tools[1]!;
+  expect(harnesses.name).toBe("list_agent_harnesses");
+  expect(harnesses.description).toContain("copied verbatim from ACP");
+  expect(harnesses.inputSchema.properties.harness).toBeDefined();
+  const search = body.result.tools[2]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
   expect(search.inputSchema.properties.channel).toBeDefined();
+  store.close();
+});
+
+test("list_agent_harnesses returns verbatim dispatch values", async () => {
+  const { store, token, handler, harnessCalls } = fixture();
+  const response = await listAgentHarnesses(handler, token, 20, "codex");
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(body.result.content[0]!.text)).toEqual({
+    harnesses: [
+      {
+        id: "codex",
+        name: "Codex",
+        installed: true,
+        available: true,
+        installHint: "install codex",
+        models: ["gpt-exact", "gpt-fast"],
+        defaultModel: "gpt-exact",
+        configOptions: [
+          {
+            id: "effort",
+            type: "select",
+            defaultValue: "medium",
+            values: ["low", "medium", "high"],
+          },
+        ],
+      },
+    ],
+  });
+  expect(harnessCalls).toEqual(["codex"]);
+
+  const invalid = await listAgentHarnesses(handler, token, 21, "missing");
+  const invalidBody = (await invalid.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(invalidBody.result.isError).toBe(true);
+  expect(invalidBody.result.content[0]!.text).toContain("unknown harness");
   store.close();
 });
 
@@ -209,8 +328,43 @@ test("retries reuse a result while distinct calls create distinct bubbles", asyn
   expect(
     store
       .listMessages(thread.id)
-      .filter((message) => message.author === "coordinator")
+      .filter((message) => message.author === "agent")
       .map((message) => message.content),
   ).toEqual(["First", "Second"]);
+  store.close();
+});
+
+test("send_message validates and routes explicit agent handoffs", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, thread, token, handler, workspace } = fixture(
+    (message, routedTo) => routed.push({ message, routedTo }),
+  );
+  ensureWorkspace(workspace.rootPath);
+  await writeAgent(workspace.rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the work.",
+  });
+
+  const response = await toolCall(handler, token, 31, "Plan is ready", [
+    "reviewer",
+    "default",
+  ]);
+  expect(response.status).toBe(200);
+  const message = store.listMessages(thread.id).at(-1)!;
+  expect(message.metadata).toEqual({
+    agent: "default",
+    mentions: [],
+    routedTo: ["reviewer"],
+  });
+  expect(routed).toEqual([{ message, routedTo: ["reviewer"] }]);
+
+  const before = store.listMessages(thread.id).length;
+  const invalid = await toolCall(handler, token, 32, "handoff", ["missing"]);
+  const body = (await invalid.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBe(true);
+  expect(body.result.content[0]!.text).toContain("unknown agent: @missing");
+  expect(store.listMessages(thread.id)).toHaveLength(before);
   store.close();
 });

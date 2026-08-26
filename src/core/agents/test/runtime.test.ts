@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tempDir } from "@/testing/tmpdir";
 import { PhiStore } from "@/core/store/store";
 import { ensureWorkspace } from "@/core/workspace";
-import { writeDefaultAgent } from "@/core/agents/registry";
+import { writeAgent, writeDefaultAgent } from "@/core/agents/registry";
 import { AgentRuntime } from "@/core/agents/runtime";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
@@ -77,13 +77,15 @@ test("a user message gets the agent's reply appended to its thread", async () =>
   const messages = store.listMessages(thread.id);
   expect(messages).toHaveLength(2);
   const reply = messages[1]!;
-  expect(reply.author).toBe("coordinator");
+  expect(reply.author).toBe("agent");
   // "[model=smart]" proves the agent's saved model reached the session's
   // model config option before the prompt; "[intro]" proves the fresh
   // session's first prompt carried the messaging preamble.
   expect(reply.content).toBe("[model=smart] [intro] echo#1: hello agent");
   expect(reply.metadata).toEqual({
     agent: "default",
+    mentions: [],
+    routedTo: [],
     stopReason: "end_turn",
     via: "turn-text-fallback",
   });
@@ -104,7 +106,7 @@ test("send_message is delivered live and suppresses private turn text", async ()
   store.onChange = (change) => {
     if (
       change.type === "message.appended" &&
-      change.message.author === "coordinator"
+      change.message.author === "agent"
     ) {
       activeWhenDelivered = store.getThread(thread.id)!.turnActive;
     }
@@ -115,10 +117,14 @@ test("send_message is delivered live and suppresses private turn text", async ()
 
   const replies = store
     .listMessages(thread.id)
-    .filter((item) => item.author === "coordinator");
+    .filter((item) => item.author === "agent");
   expect(replies).toHaveLength(1);
   expect(replies[0]!.content).toBe("tool#1: do the work");
-  expect(replies[0]!.metadata).toEqual({ agent: "default" });
+  expect(replies[0]!.metadata).toEqual({
+    agent: "default",
+    mentions: [],
+    routedTo: [],
+  });
   expect(activeWhenDelivered).toBe(true);
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
   done();
@@ -207,7 +213,7 @@ test("turns in one thread serialize and reuse one session", async () => {
 
   const replies = store
     .listMessages(thread.id)
-    .filter((m) => m.author === "coordinator")
+    .filter((m) => m.author === "agent")
     .map((m) => m.content);
   // The fake's turn counter is per process, so "#2" proves session reuse,
   // and the missing "[intro]" proves the preamble is sent only once per
@@ -330,7 +336,7 @@ test("session/load restores context without duplicating replayed messages", asyn
   expect(
     store
       .listMessages(first.thread.id)
-      .filter((message) => message.author === "coordinator")
+      .filter((message) => message.author === "agent")
       .map((message) => message.content),
   ).toEqual([
     "[model=smart] [intro] echo#1: first",
@@ -377,7 +383,7 @@ test("a non-resumable harness replaces the session with recovered context", asyn
   );
   // "[intro]": the replacement session starts fresh, so it is re-primed.
   expect(store.listMessages(first.thread.id).at(-1)!.content).toBe(
-    "[model=smart] [intro] echo#1: second",
+    "[model=smart] [intro] [catchup] echo#1: second",
   );
   replacementRuntime.close();
   done();
@@ -416,7 +422,7 @@ test("a missing durable harness session is replaced", async () => {
     originalSessionId,
   );
   expect(store.listMessages(first.thread.id).at(-1)!.content).toBe(
-    "[model=smart] [intro] echo#1: second",
+    "[model=smart] [intro] [catchup] echo#1: second",
   );
   replacementRuntime.close();
   done();
@@ -455,5 +461,172 @@ test("auth_required surfaces the harness login hint", async () => {
   expect(reply.author).toBe("system");
   expect(reply.content).toContain("not logged in");
   expect(reply.content).toContain("claude /login");
+  done();
+});
+
+test("a leading mention lazily creates a separate agent session with catch-up", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    model: "smart",
+    instructions: "Review the request.",
+  });
+  const first = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "establish context",
+  });
+  runtime.handleUserMessage(first.message);
+  await runtime.settled(first.thread.id);
+
+  const second = store.appendMessage(first.thread.id, {
+    author: "user",
+    kind: "message",
+    content: "@reviewer inspect the context",
+  });
+  runtime.handleUserMessage(second);
+  await runtime.settled(first.thread.id);
+
+  const reply = store.listMessages(first.thread.id).at(-1)!;
+  expect(reply.metadata.agent).toBe("reviewer");
+  // The routing mention is stripped from the prompt; the durable log row
+  // (asserted below) keeps the original text.
+  expect(reply.content).toBe(
+    "[model=smart] [intro] [catchup] echo#1: inspect the context",
+  );
+  expect(store.getThreadSession(first.thread.id, "default")).not.toBeNull();
+  expect(store.getThreadSession(first.thread.id, "reviewer")).toMatchObject({
+    agentName: "reviewer",
+    lastSeenSeq: reply.seq,
+  });
+  expect(second.metadata).toEqual({
+    mentions: ["reviewer"],
+    routedTo: ["reviewer"],
+  });
+  done();
+});
+
+test("unmentioned replies stay with the agent that started the thread", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    model: "smart",
+    instructions: "Review the request.",
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "@reviewer own this thread",
+    metadata: { mentions: ["reviewer"], routedTo: ["reviewer"] },
+  });
+  runtime.handleUserMessage(root.message, "reviewer");
+  await runtime.settled(root.thread.id);
+
+  const reply = store.appendMessage(root.thread.id, {
+    author: "user",
+    kind: "message",
+    content: "now keep going",
+  });
+  runtime.handleUserMessage(reply);
+  await runtime.settled(root.thread.id);
+
+  const answer = store.listMessages(root.thread.id).at(-1)!;
+  expect(answer.metadata.agent).toBe("reviewer");
+  expect(answer.content).toBe("[model=smart] echo#2: now keep going");
+  expect(reply.metadata).toEqual({ mentions: [], routedTo: ["reviewer"] });
+  // The workspace default was never pulled into the thread.
+  expect(store.getThreadSession(root.thread.id, "default")).toBeNull();
+  done();
+});
+
+test("the hop budget pauses further agent-triggered turns until a user message", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the request.",
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "start",
+  });
+  runtime.handleUserMessage(root.message);
+  await runtime.settled(root.thread.id);
+
+  for (let index = 1; index <= 5; index += 1) {
+    const handoff = store.appendMessage(root.thread.id, {
+      author: "agent",
+      kind: "message",
+      content: `handoff ${index}`,
+      metadata: { agent: "default" },
+    });
+    runtime.handleAgentMessage(handoff, ["reviewer"]);
+    await runtime.settled(root.thread.id);
+  }
+
+  const messages = store.listMessages(root.thread.id);
+  expect(
+    messages.filter(
+      (message) =>
+        message.author === "agent" && message.metadata.agent === "reviewer",
+    ),
+  ).toHaveLength(4);
+  const pause = messages.at(-1)!;
+  expect(pause).toMatchObject({
+    author: "system",
+    metadata: { reason: "agent-hop-budget", routedTo: ["reviewer"] },
+  });
+  expect(pause.content).toContain("paused after 4 hops");
+
+  const continuation = store.appendMessage(root.thread.id, {
+    author: "user",
+    kind: "message",
+    content: "@reviewer continue",
+  });
+  runtime.handleUserMessage(continuation);
+  await runtime.settled(root.thread.id);
+  expect(
+    store.listMessages(root.thread.id).filter(
+      (message) =>
+        message.author === "agent" && message.metadata.agent === "reviewer",
+    ),
+  ).toHaveLength(5);
+  done();
+});
+
+test("multiple handoff recipients take serialized turns in list order", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  for (const name of ["reviewer", "implementer"]) {
+    await writeAgent(store.defaultWorkspace().rootPath, name, {
+      harness: "codex",
+      instructions: `Act as the ${name}.`,
+    });
+  }
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "shared brief",
+  });
+  const handoff = store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "take your turns",
+    metadata: { agent: "default" },
+  });
+
+  runtime.handleAgentMessage(handoff, ["reviewer", "implementer"]);
+  await runtime.settled(root.thread.id);
+
+  expect(
+    store
+      .listMessages(root.thread.id)
+      .filter(
+        (message) =>
+          message.author === "agent" &&
+          ["reviewer", "implementer"].includes(String(message.metadata.agent)),
+      )
+      .map((message) => message.metadata.agent),
+  ).toEqual(["reviewer", "implementer"]);
+  expect(store.getThread(root.thread.id)!.turnActive).toBe(false);
   done();
 });

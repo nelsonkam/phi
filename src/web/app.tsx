@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
 import { Bot, Inbox } from "lucide-react";
+import { ThemeToggle } from "@/web/components/theme-toggle";
 import { applyServerFrame, useChannels } from "@/web/lib/queries";
 import { connectDeltaSocket, type ConnectionStatus } from "@/web/lib/ws";
 import { cn } from "@/web/lib/utils";
@@ -31,6 +32,7 @@ export function App() {
               status === "disconnected" && "bg-red-500",
             )}
           />
+          <ThemeToggle />
         </header>
         <nav className="flex-1 overflow-y-auto p-2">
           <SidebarLink to="/" end>

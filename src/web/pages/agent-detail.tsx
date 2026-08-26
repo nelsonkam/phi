@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Check, TriangleAlert } from "lucide-react";
 import type { Agent } from "@/shared/types";
+import { AgentAvatar } from "@/web/components/agent-avatar";
 import {
   ConfigOptionFields,
   HarnessIcon,
@@ -99,9 +100,7 @@ function AgentEditor({ agent }: { agent: Agent & { instructions: string } }) {
         </Link>
 
         <header className="mb-6 flex items-center gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-secondary text-secondary-foreground">
-            <HarnessIcon id={agent.harness} size={22} />
-          </span>
+          <AgentAvatar name={agent.name} size="lg" />
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-base font-semibold">
               @{agent.name}
@@ -111,7 +110,8 @@ function AgentEditor({ agent }: { agent: Agent & { instructions: string } }) {
                 </span>
               )}
             </h2>
-            <p className="text-xs text-muted-foreground">
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <HarnessIcon id={agent.harness} size={12} />
               {harness?.name ?? agent.harness}
               {harness && !harness.installed && " · not installed"}
             </p>
