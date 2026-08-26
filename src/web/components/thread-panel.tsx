@@ -25,12 +25,15 @@ export function ThreadPanel({
   threadId,
   turnActive,
   turnAgent,
+  closeTo,
 }: {
   channelId: string;
   channelName: string | undefined;
   threadId: string;
   turnActive: boolean;
   turnAgent: string | null;
+  // Where the close button navigates; defaults to the thread's channel.
+  closeTo?: string;
 }) {
   const { data } = useMessages(threadId);
   const { data: agentData } = useAgents();
@@ -71,7 +74,7 @@ export function ThreadPanel({
         )}
         {untaggedAgent && <UntaggedAgentTag name={untaggedAgent} />}
         <Link
-          to={`/c/${channelId}`}
+          to={closeTo ?? `/c/${channelId}`}
           aria-label="Close thread"
           className="ml-auto flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >

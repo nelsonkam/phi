@@ -3,6 +3,7 @@ import type { ActivityItem, Message } from "@/shared/types";
 import {
   ACTIVITY_PAGE_SIZE,
   activityNextCursor,
+  excerptText,
   latestCommittedMessageId,
 } from "@/web/lib/activity";
 
@@ -41,6 +42,19 @@ function item(seq: number): ActivityItem {
     unreadCount: 0,
   };
 }
+
+test("excerptText flattens markdown to plain text", () => {
+  expect(
+    excerptText("**Summary ready.** See [the report](channels/phi/r.md)."),
+  ).toBe("Summary ready. See the report.");
+  expect(excerptText("## Heading\n- item `code`\n> quote")).toBe(
+    "Heading item code quote",
+  );
+  expect(excerptText("before\n```ts\nconst x = 1;\n```\nafter")).toBe(
+    "before after",
+  );
+  expect(excerptText("plain text stays")).toBe("plain text stays");
+});
 
 test("activityNextCursor pages only after a full page", () => {
   const full = Array.from({ length: ACTIVITY_PAGE_SIZE }, (_, i) =>

@@ -28,6 +28,7 @@ const router = createBrowserRouter([
     ),
     children: [
       { index: true, element: <ActivityPage /> },
+      { path: "t/:threadId", element: <ActivityPage /> },
       { path: "agents", element: <AgentsPage /> },
       { path: "agents/:name", element: <AgentDetailPage /> },
       { path: "c/:channelId", element: <ChannelPage /> },

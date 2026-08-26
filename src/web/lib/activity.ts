@@ -14,6 +14,21 @@ export function activityNextCursor(page: {
     : undefined;
 }
 
+// Flattens markdown to plain text for one-line feed excerpts: links and
+// images keep their label, emphasis/code markers and structural prefixes
+// drop, whitespace collapses. Not a parser — just enough that a row never
+// shows raw `**` or `](...)`.
+export function excerptText(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+|\d+\.[ \t]+)/gm, "")
+    .replace(/(\*\*|__|[*_~])/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // The read watermark must re-advance once per *committed* message.
 // Optimistic sends predict their seq (last + 1) and the committed row can
 // land on that same value, so keying an effect on seq can miss the commit
