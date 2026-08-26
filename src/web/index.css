@@ -159,3 +159,33 @@
     @apply min-h-svh antialiased bg-background text-foreground;
   }
 }
+
+@keyframes working-shimmer {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -200% center;
+  }
+}
+
+.working-shimmer {
+  color: transparent;
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 20%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 80%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  animation: working-shimmer 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .working-shimmer {
+    color: var(--muted-foreground);
+    background: none;
+    animation: none;
+  }
+}

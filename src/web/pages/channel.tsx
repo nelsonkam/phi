@@ -29,9 +29,10 @@ export function ChannelPage() {
     [data?.threads],
   );
 
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "nearest" });
+    const messageList = messageListRef.current;
+    if (messageList) messageList.scrollTop = messageList.scrollHeight;
   }, [threads.length, channelId]);
 
   async function startThread(content: string) {
@@ -41,9 +42,12 @@ export function ChannelPage() {
 
   return (
     <Page title={channel ? `# ${channel.name}` : "…"}>
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex flex-1 flex-col overflow-y-auto">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div
+            ref={messageListRef}
+            className="flex flex-1 flex-col overflow-y-auto"
+          >
             {!isPending && threads.length === 0 ? (
               <EmptyState message="No messages yet. Say something below." />
             ) : (
@@ -58,7 +62,6 @@ export function ChannelPage() {
                 ))}
               </div>
             )}
-            <div ref={bottomRef} />
           </div>
           <Composer
             placeholder={`Message #${channel?.name ?? ""}`}
@@ -69,6 +72,7 @@ export function ChannelPage() {
 
         {threadId && (
           <ThreadPanel
+            key={threadId}
             channelId={channelId}
             channelName={channel?.name}
             threadId={threadId}
@@ -93,7 +97,12 @@ function ThreadRoot({
 
   return (
     <div
-      onClick={onOpen}
+      onClick={(e) => {
+        // Markdown bodies contain their own interactive elements (links, the
+        // code-header copy button); those clicks must not also open the thread.
+        if ((e.target as HTMLElement).closest("a, button")) return;
+        onOpen();
+      }}
       className={`group cursor-pointer px-5 py-2 transition-colors ${
         active ? "bg-accent/60" : "hover:bg-accent/40"
       }`}
