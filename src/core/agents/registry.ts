@@ -1,11 +1,14 @@
 import { join } from "node:path";
 import matter from "gray-matter";
-import { strictObject, string } from "zod";
+import { enum as zenum, strictObject, string } from "zod";
 import type { Agent, AgentLoadError } from "@/shared/types";
+import { KNOWN_HARNESSES } from "./harnesses";
 
-// Harnesses phi knows how to launch over ACP. Launch commands land with the
-// runtime slice; for now the ids gate validation warnings.
-export const KNOWN_HARNESSES = ["claude-code", "gemini", "codex"] as const;
+export { KNOWN_HARNESSES } from "./harnesses";
+
+export type Harness = (typeof KNOWN_HARNESSES)[number];
+
+export const DEFAULT_AGENT_NAME = "default";
 
 export interface AgentDefinition extends Agent {
   instructions: string;
@@ -23,10 +26,65 @@ const FrontmatterSchema = strictObject({
   description: string().trim().min(1).nullish(),
   harness: string().trim().min(1),
   model: string().trim().min(1).nullish(),
+  role: zenum(["default"]).nullish(),
 });
 
 export function agentsDir(workspaceRoot: string): string {
   return join(workspaceRoot, ".agents", "agents");
+}
+
+// The default agent (the old coordinator) is the file `default.md`. Setup
+// status is "configured" only when that file exists and parses cleanly.
+export async function loadDefaultAgent(
+  workspaceRoot: string,
+): Promise<AgentDefinition | null> {
+  const filePath = join(agentsDir(workspaceRoot), `${DEFAULT_AGENT_NAME}.md`);
+  const content = await Bun.file(filePath)
+    .text()
+    .catch(() => null);
+  if (content === null) return null;
+
+  const result = parseAgentFile(DEFAULT_AGENT_NAME, filePath, content);
+  return result.ok && result.agent.role === "default" ? result.agent : null;
+}
+
+// Sensible defaults so setup only needs a harness choice. Users can edit
+// default.md afterwards.
+export const DEFAULT_AGENT_DESCRIPTION = "Coordinates work across threads";
+
+export const DEFAULT_AGENT_INSTRUCTIONS = `You are the default agent. You coordinate the workspace: break work down, delegate to other agents, and keep the user informed.`;
+
+export interface WriteDefaultAgentInput {
+  harness: Harness;
+  description?: string;
+  model?: string;
+  instructions?: string;
+}
+
+// Serializes and writes the default agent definition. Overwrites any existing
+// default.md. Description and instructions fall back to the phi defaults.
+export async function writeDefaultAgent(
+  workspaceRoot: string,
+  input: WriteDefaultAgentInput,
+): Promise<void> {
+  const description = input.description ?? DEFAULT_AGENT_DESCRIPTION;
+  const instructions = input.instructions ?? DEFAULT_AGENT_INSTRUCTIONS;
+
+  const frontmatter = [
+    "---",
+    "role: default",
+    `description: ${JSON.stringify(description)}`,
+    `harness: ${input.harness}`,
+    input.model ? `model: ${input.model}` : null,
+    "---",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+
+  await Bun.write(
+    join(agentsDir(workspaceRoot), `${DEFAULT_AGENT_NAME}.md`),
+    `${frontmatter}\n\n${instructions.trim()}\n`,
+  );
 }
 
 // Reads the registry fresh from disk. Callers hit this per request; the
@@ -91,6 +149,7 @@ function parseAgentFile(
       description: result.data.description ?? null,
       harness: result.data.harness,
       model: result.data.model ?? null,
+      role: result.data.role ?? null,
       warnings,
       instructions: parsed.content.trim(),
       filePath,

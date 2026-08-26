@@ -70,6 +70,7 @@ function AgentRow({ agent }: { agent: Agent }) {
         ))}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        {agent.role === "default" && <Badge>default</Badge>}
         <Badge>{agent.harness}</Badge>
         {agent.model && <Badge>{agent.model}</Badge>}
       </div>

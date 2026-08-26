@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "@/testing/tmpdir";
-import { loadAgents } from "../registry";
+import { loadAgents, loadDefaultAgent, writeDefaultAgent } from "../registry";
 
 function tempWorkspace(): string {
   const root = tempDir();
@@ -83,4 +83,32 @@ test("warns on unknown harness but still lists the agent", async () => {
   const { agents, errors } = await loadAgents(root);
   expect(errors).toEqual([]);
   expect(agents[0]!.warnings).toEqual(['unknown harness "hal9000"']);
+});
+
+test("default agent round-trips through write and load", async () => {
+  const root = tempWorkspace();
+
+  expect(await loadDefaultAgent(root)).toBeNull();
+
+  await writeDefaultAgent(root, {
+    harness: "claude-code",
+    description: "Coordinates work",
+    model: "claude-opus-5",
+    instructions: "You coordinate.",
+  });
+
+  const agent = await loadDefaultAgent(root);
+  expect(agent).not.toBeNull();
+  expect(agent!.name).toBe("default");
+  expect(agent!.role).toBe("default");
+  expect(agent!.harness).toBe("claude-code");
+  expect(agent!.model).toBe("claude-opus-5");
+  expect(agent!.instructions).toBe("You coordinate.");
+});
+
+test("a default.md without role: default does not count as the default agent", async () => {
+  const root = tempWorkspace();
+  writeAgent(root, "default.md", "---\nharness: codex\n---\nBody.\n");
+
+  expect(await loadDefaultAgent(root)).toBeNull();
 });

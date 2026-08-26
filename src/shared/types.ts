@@ -53,6 +53,7 @@ export interface Agent {
   description: string | null;
   harness: string;
   model: string | null;
+  role: "default" | null;
   warnings: string[];
 }
 
@@ -60,6 +61,27 @@ export interface AgentLoadError {
   file: string;
   message: string;
 }
+
+// A harness phi can launch agents on, with its live install state on this
+// machine.
+export interface HarnessStatus {
+  id: string;
+  name: string;
+  installed: boolean;
+  installHint: string;
+}
+
+export interface HarnessModel {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
+// Result of asking a harness (over ACP) which models it offers. `error` and
+// `models` are mutually exclusive.
+export type HarnessModels =
+  | { models: HarnessModel[]; currentModelId: string | null; error?: never }
+  | { error: string; models?: never };
 
 // WebSocket frames, server -> client. `v` is the protocol version.
 export type ServerFrame =

@@ -1,4 +1,10 @@
-import type { Agent, AgentLoadError, Channel } from "@/shared/types";
+import type {
+  Agent,
+  AgentLoadError,
+  Channel,
+  HarnessModels,
+  HarnessStatus,
+} from "@/shared/types";
 
 // The only file (with ws.ts) that knows the transport. Everything else
 // consumes typed results, so a future mobile client mirrors just these two.
@@ -18,4 +24,41 @@ export function fetchAgents(): Promise<{
   errors: AgentLoadError[];
 }> {
   return get("/agents");
+}
+
+export function fetchSetupStatus(): Promise<{ configured: boolean }> {
+  return get("/setup/status");
+}
+
+export function fetchHarnesses(): Promise<{ harnesses: HarnessStatus[] }> {
+  return get("/harnesses");
+}
+
+export async function fetchHarnessModels(
+  harnessId: string,
+): Promise<HarnessModels> {
+  const res = await fetch(`/api/v1/harnesses/${harnessId}/models`);
+  const body = (await res.json().catch(() => null)) as HarnessModels | null;
+  if (body === null) return { error: `Request failed (${res.status})` };
+  return body;
+}
+
+export interface CreateDefaultAgentInput {
+  harness: string;
+  model?: string;
+}
+
+export async function createDefaultAgent(
+  input: CreateDefaultAgentInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await fetch("/api/v1/setup/agent", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: body.error ?? `Request failed (${res.status})` };
+  }
+  return { ok: true };
 }
