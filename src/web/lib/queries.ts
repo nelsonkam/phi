@@ -42,7 +42,12 @@ export function useHarnessModels(harnessId: string, enabled: boolean) {
     queryKey: queryKeys.harnessModels(harnessId),
     queryFn: () => fetchHarnessModels(harnessId),
     enabled,
-    staleTime: Infinity,
+    // A successful listing is stable for the session. An error result (not
+    // installed, not logged in) goes stale immediately, so selecting the
+    // harness again re-probes after the user fixes the cause.
+    staleTime: (query) =>
+      query.state.data?.error !== undefined ? 0 : Infinity,
+    refetchOnWindowFocus: false,
     retry: false,
   });
 }
