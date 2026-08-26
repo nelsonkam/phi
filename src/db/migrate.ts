@@ -2,12 +2,14 @@ import type { Database } from "bun:sqlite";
 import m001 from "./migrations/001_init.sql" with { type: "text" };
 import m002 from "./migrations/002_thread_turn_state.sql" with { type: "text" };
 import m003 from "./migrations/003_thread_sessions.sql" with { type: "text" };
+import m004 from "./migrations/004_message_search.sql" with { type: "text" };
 
 // Explicit list keeps migrations ordered and bundle-safe (no directory scan).
 const MIGRATIONS: Array<{ id: string; sql: string }> = [
   { id: "001_init", sql: m001 },
   { id: "002_thread_turn_state", sql: m002 },
   { id: "003_thread_sessions", sql: m003 },
+  { id: "004_message_search", sql: m004 },
 ];
 
 export function migrate(db: Database): void {

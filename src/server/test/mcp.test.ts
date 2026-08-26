@@ -3,6 +3,7 @@ import { PhiStore } from "@/core/store/store";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { tempDir } from "@/testing/tmpdir";
+import type { SearchMessagesInput } from "@/core/search/types";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 
@@ -55,6 +56,31 @@ function listTools(
   );
 }
 
+function searchMessages(
+  handler: (req: Request) => Promise<Response>,
+  token: string,
+  id: number,
+  args: Record<string, unknown>,
+): Promise<Response> {
+  return handler(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "search_messages", arguments: args },
+      }),
+    }),
+  );
+}
+
 function fixture() {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
@@ -66,12 +92,39 @@ function fixture() {
   });
   const tokens = new McpTokenRegistry();
   const token = tokens.mint({ threadId: thread.id, agentName: "default" });
+  const searchCalls: Array<{
+    workspaceId: string;
+    input: SearchMessagesInput;
+  }> = [];
+  const messageSearch = {
+    async search(workspaceId: string, input: SearchMessagesInput) {
+      searchCalls.push({ workspaceId, input });
+      return {
+        semanticAvailable: true,
+        results: [
+          {
+            messageId: "msg_result",
+            workspaceId,
+            channel: channel.name,
+            threadId: thread.id,
+            author: "user" as const,
+            content: "Matched message",
+            snippet: "Matched message",
+            createdAt: new Date(0).toISOString(),
+            score: 1,
+            matchedBy: ["semantic" as const],
+          },
+        ],
+      };
+    },
+  };
   return {
     store,
     thread,
     tokens,
     token,
-    handler: createMcpHandler(store, tokens),
+    searchCalls,
+    handler: createMcpHandler(store, tokens, messageSearch),
   };
 }
 
@@ -95,16 +148,54 @@ test("send_message posts one attributed bubble to the caller's thread", async ()
   store.close();
 });
 
-test("advertises only send_message with the messaging contract", async () => {
+test("advertises messaging and workspace search without a thread argument", async () => {
   const { store, token, handler } = fixture();
   const response = await listTools(handler, token);
   const body = (await response.json()) as {
-    result: { tools: Array<{ name: string; description: string }> };
+    result: {
+      tools: Array<{
+        name: string;
+        description: string;
+        inputSchema: { properties: Record<string, unknown> };
+      }>;
+    };
   };
 
-  expect(body.result.tools).toHaveLength(1);
+  expect(body.result.tools).toHaveLength(2);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
+  const search = body.result.tools[1]!;
+  expect(search.name).toBe("search_messages");
+  expect(search.inputSchema.properties.threadId).toBeUndefined();
+  expect(search.inputSchema.properties.channelId).toBeUndefined();
+  expect(search.inputSchema.properties.channel).toBeDefined();
+  store.close();
+});
+
+test("search_messages derives the workspace from the caller token", async () => {
+  const { store, token, handler, searchCalls } = fixture();
+  const response = await searchMessages(handler, token, 19, {
+    query: "prior authentication decision",
+    channel: "GENERAL",
+    limit: 3,
+  });
+  expect(response.status).toBe(200);
+  expect(searchCalls).toEqual([
+    {
+      workspaceId: store.defaultWorkspace().id,
+      input: {
+        query: "prior authentication decision",
+        channel: "GENERAL",
+        limit: 3,
+      },
+    },
+  ]);
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(body.result.content[0]!.text).results[0].content).toBe(
+    "Matched message",
+  );
   store.close();
 });
 

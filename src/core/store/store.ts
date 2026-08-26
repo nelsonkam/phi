@@ -63,6 +63,7 @@ export class PhiStore {
   private readonly root: string;
   // Post-commit change listener; assigned by the server after construction.
   onChange: ((change: StoreChange) => void) | null = null;
+  private readonly listeners = new Set<(change: StoreChange) => void>();
 
   constructor(root: string = phiRoot()) {
     this.root = root;
@@ -73,6 +74,10 @@ export class PhiStore {
     this.db.run("PRAGMA busy_timeout = 5000;");
     migrate(this.db);
     this.seedDefaults();
+  }
+
+  get rootPath(): string {
+    return this.root;
   }
 
   private seedDefaults(): void {
@@ -341,6 +346,12 @@ export class PhiStore {
 
   private emit(change: StoreChange): void {
     this.onChange?.(change);
+    for (const listener of this.listeners) listener(change);
+  }
+
+  subscribe(listener: (change: StoreChange) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   close(): void {

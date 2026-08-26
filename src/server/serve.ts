@@ -15,6 +15,7 @@ import {
 } from "@/server/services/agents";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
+import { createMessageSearch } from "@/core/search/message-search";
 
 const DEFAULT_PORT = 3141;
 const CONFIG_CACHE_TTL_MS = 5 * 60_000;
@@ -48,7 +49,9 @@ export function startServer(): void {
   ensureWorkspace(workspace.rootPath);
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
   const mcpTokens = new McpTokenRegistry();
-  const mcpHandler = createMcpHandler(store, mcpTokens);
+  const messageSearch = createMessageSearch(store, store.rootPath);
+  messageSearch.start();
+  const mcpHandler = createMcpHandler(store, mcpTokens, messageSearch);
   const runtime = new AgentRuntime(store, workspace.rootPath, {
     mcpPort: port,
     mcpTokens,
@@ -233,12 +236,18 @@ export function startServer(): void {
   };
 
   // Harness subprocesses do not die with the server; kill them explicitly.
-  const shutdown = () => {
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     runtime.close();
+    await messageSearch.close().catch((error) => {
+      console.error("Failed to close message search", error);
+    });
     process.exit(0);
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", () => void shutdown());
+  process.once("SIGTERM", () => void shutdown());
 
   console.log(`phi serving on http://localhost:${server.port}`);
 }

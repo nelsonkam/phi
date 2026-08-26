@@ -14,3 +14,7 @@ export function dbPath(root: string = phiRoot()): string {
 export function workspaceRoot(root: string = phiRoot()): string {
   return join(root, "workspace");
 }
+
+export function modelCachePath(root: string = phiRoot()): string {
+  return join(root, "models");
+}
