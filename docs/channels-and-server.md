@@ -147,8 +147,9 @@ One Pi session per thread. Rationale:
   volume.
 - Lifecycle alignment: threads settle and archive; sessions do too. Channels
   never end, so channel-bound sessions grow unboundedly by construction.
-- Resumability: reopening an old thread resumes mid-task — durable-harness
-  behavior scoped correctly.
+- Resumability: the harness session id is stored per thread and resumed after
+  a process or server restart. If the harness cannot resume it, Phi replaces
+  the session and seeds bounded context from the durable message log.
 - Finer parallelism: turn locks key on thread id, so two threads in one
   channel turn concurrently.
 
@@ -157,13 +158,12 @@ each new thread's prompt is seeded with a small channel-context header
 (purpose, recent thread titles/summaries). This is also the future seam for a
 real memory service (still deferred).
 
-Implementation site: `SessionManager.continueRecent(...)` in
-`PiCoordinatorRuntime.create` currently pins one global session; replace with
-per-thread session binding. `TurnContext` becomes a map of per-thread locks;
-the drain loop claims an event only if its thread has no turn in flight
-(single-writer process, so an in-process map checked after
-`claimNextEvent()` suffices). Global serial turns remain acceptable as an
-intermediate step since workers already provide real concurrency.
+Implementation: `AgentRuntime` keeps live processes in a map keyed by thread
+id, while `thread_sessions` stores the durable `(harness, session id, agent,
+config)` binding. Turns serialize through a per-thread promise chain. ACP
+`session/resume` is preferred because Phi already owns the message read model;
+`session/load` is used when resume is unavailable, and transcript recovery is
+the final fallback.
 
 ## 6. Workspace layout
 

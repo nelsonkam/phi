@@ -27,6 +27,8 @@ export interface Thread {
   title: string | null;
   status: ThreadStatus;
   lastSeq: number;
+  turnActive: boolean;
+  turnAgent: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,6 +53,12 @@ export interface Message {
   metadata: Record<string, unknown>;
   seq: number;
   createdAt: string;
+}
+
+export interface ThreadTurn {
+  threadId: string;
+  active: boolean;
+  agent: string | null;
 }
 
 // An agent definition, loaded from `.agents/agents/<name>.md` in the
@@ -119,6 +127,12 @@ export type HarnessConfig =
 
 // WebSocket frames, server -> client. `v` is the protocol version.
 export type ServerFrame =
-  | { v: 1; type: "hello"; workspaceId: string }
+  | {
+      v: 1;
+      type: "hello";
+      workspaceId: string;
+      activeTurns: ThreadTurn[];
+    }
   | { v: 1; type: "message.appended"; message: Message }
-  | { v: 1; type: "thread.updated"; thread: Thread };
+  | { v: 1; type: "thread.updated"; thread: Thread }
+  | ({ v: 1; type: "thread.turn" } & ThreadTurn);

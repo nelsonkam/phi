@@ -65,6 +65,83 @@ test("appendMessage allocates monotonic seqs and bumps the thread", () => {
   store.close();
 });
 
+test("persists and emits explicit turn presence", () => {
+  const { store, channel } = chatFixture();
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Work on this",
+  });
+  const turns: Array<{ active: boolean; agent: string | null }> = [];
+  store.onChange = (change) => {
+    if (change.type === "thread.turn") {
+      turns.push({ active: change.active, agent: change.agent });
+    }
+  };
+
+  store.setThreadTurn(thread.id, true, "default");
+  expect(store.getThread(thread.id)).toMatchObject({
+    turnActive: true,
+    turnAgent: "default",
+  });
+  expect(store.listActiveTurns(thread.workspaceId)).toEqual([
+    { threadId: thread.id, active: true, agent: "default" },
+  ]);
+
+  store.setThreadTurn(thread.id, false, null);
+  expect(store.getThread(thread.id)).toMatchObject({
+    turnActive: false,
+    turnAgent: null,
+  });
+  expect(turns).toEqual([
+    { active: true, agent: "default" },
+    { active: false, agent: null },
+  ]);
+  store.close();
+});
+
+test("persists and replaces a thread's harness session binding", () => {
+  const root = tempDir();
+  const store = new PhiStore(root);
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Keep this context",
+  });
+
+  const first = store.saveThreadSession({
+    threadId: thread.id,
+    harnessId: "codex",
+    agentName: "default",
+    sessionId: "session-one",
+    model: "smart",
+    config: { effort: "high", fast: true },
+  });
+  expect(store.getThreadSession(thread.id)).toEqual(first);
+
+  const replacement = store.saveThreadSession({
+    ...first,
+    sessionId: "session-two",
+    model: null,
+    config: {},
+  });
+  expect(replacement.createdAt).toBe(first.createdAt);
+  expect(replacement.sessionId).toBe("session-two");
+  store.close();
+
+  const reopened = new PhiStore(root);
+  expect(reopened.getThreadSession(thread.id)).toMatchObject({
+    harnessId: "codex",
+    agentName: "default",
+    sessionId: "session-two",
+    model: null,
+    config: {},
+  });
+  reopened.close();
+});
+
 test("listThreads orders by activity and counts messages", () => {
   const { store, channel } = chatFixture();
   const a = store.createThread(channel.id, {

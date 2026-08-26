@@ -13,6 +13,8 @@ import {
   setupDefaultAgent,
   updateAgent,
 } from "@/server/services/agents";
+import { createMcpHandler } from "@/server/mcp";
+import { McpTokenRegistry } from "@/server/mcp-token-registry";
 
 const DEFAULT_PORT = 3141;
 const CONFIG_CACHE_TTL_MS = 5 * 60_000;
@@ -44,9 +46,14 @@ export function startServer(): void {
   const store = new PhiStore();
   const workspace = store.defaultWorkspace();
   ensureWorkspace(workspace.rootPath);
-  const runtime = new AgentRuntime(store, workspace.rootPath);
-  runtime.recoverInterruptedTurns();
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
+  const mcpTokens = new McpTokenRegistry();
+  const mcpHandler = createMcpHandler(store, mcpTokens);
+  const runtime = new AgentRuntime(store, workspace.rootPath, {
+    mcpPort: port,
+    mcpTokens,
+  });
+  runtime.recoverInterruptedTurns();
 
   const server = Bun.serve({
     port,
@@ -56,6 +63,11 @@ export function startServer(): void {
     },
     routes: {
       "/*": index,
+      "/mcp": {
+        GET: mcpHandler,
+        POST: mcpHandler,
+        DELETE: mcpHandler,
+      },
       "/api/v1/health": () =>
         Response.json({ ok: true, workspaceId: workspace.id }),
       "/api/v1/channels": () =>
@@ -112,6 +124,34 @@ export function startServer(): void {
           });
           runtime.handleUserMessage(message);
           return Response.json({ message }, { status: 201 });
+        },
+      },
+      // Re-runs the thread's last user message after a failed turn (server
+      // restart, harness crash). The turn machinery treats it like any other
+      // queued turn.
+      "/api/v1/threads/:id/retry": {
+        POST: (req) => {
+          const thread = store.getThread(req.params.id);
+          if (!thread) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          if (thread.turnActive) {
+            return Response.json(
+              { error: "a turn is already running" },
+              { status: 409 },
+            );
+          }
+          const lastUserMessage = store
+            .listMessages(req.params.id)
+            .findLast((message) => message.author === "user");
+          if (!lastUserMessage) {
+            return Response.json(
+              { error: "no user message to retry" },
+              { status: 400 },
+            );
+          }
+          runtime.handleUserMessage(lastUserMessage);
+          return Response.json({ ok: true }, { status: 202 });
         },
       },
       "/api/v1/agents": async () => Response.json(await listAgents(workspace.rootPath)),
@@ -173,6 +213,7 @@ export function startServer(): void {
           v: 1,
           type: "hello",
           workspaceId: workspace.id,
+          activeTurns: store.listActiveTurns(workspace.id),
         };
         ws.send(JSON.stringify(hello));
       },

@@ -1,5 +1,6 @@
 import { PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type {
+  InitializeResponse,
   NewSessionResponse,
   PromptResponse,
   RequestPermissionRequest,
@@ -8,22 +9,42 @@ import type {
 import { connectAcpProcess } from "./acp-process";
 import type { AcpProcess } from "./acp-process";
 import { harnessEntry } from "./harnesses";
-import { loadDefaultAgent } from "./registry";
+import { DEFAULT_AGENT_NAME, loadDefaultAgent } from "./registry";
 import type { AgentDefinition } from "./registry";
 import type { PhiStore } from "@/core/store/store";
+import type { ThreadSessionBinding } from "@/core/store/store";
 import type { Message } from "@/shared/types";
 
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 // JSON-RPC error code ACP agents use for `auth_required`.
 const AUTH_REQUIRED_CODE = -32000;
+// Sent on the first prompt of each fresh harness session only: later turns
+// (and resumed sessions) already carry it in the harness's own history, and
+// the phi MCP server repeats the same guidance in send_message's tool
+// description and server instructions, so the model sees it every turn
+// regardless.
+export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap.`;
 
-// One live harness session bound to one thread (see
-// docs/channels-and-server.md §5). Sessions are in-memory only for now: a
-// server restart starts fresh sessions on the next message.
+const RECOVERY_CONTEXT_MAX_CHARS = 16_000;
+
+type SessionAgent = Pick<
+  AgentDefinition,
+  "name" | "harness" | "model" | "config"
+>;
+
+// One live harness process bound to one thread (see
+// docs/channels-and-server.md §5). The live process is an in-memory cache; the
+// harness session id is durable in PhiStore and can be resumed after restart.
 interface ThreadSession {
   acp: AcpProcess;
   sessionId: string;
   agentName: string;
+  mcpToken: string;
+  closeSupported: boolean;
+  // False until the messaging preamble has reached the harness session, either
+  // by this process sending it or by resuming a session whose history has it.
+  primed: boolean;
+  recoveryContext?: string;
   // ACP may emit multiple logical agent messages during one turn (for example,
   // commentary followed by a final answer). Chunks within a message are deltas
   // and concatenate exactly; distinct messages retain a paragraph boundary.
@@ -34,6 +55,13 @@ export interface AgentRuntimeOptions {
   // Test hook: resolves the ACP launch command for a harness id. Defaults to
   // the harness catalog.
   resolveCommand?: (harnessId: string) => string[] | null;
+  mcpPort: number;
+  mcpTokens: {
+    mint(caller: { threadId: string; agentName: string }): string;
+    revoke(token: string): void;
+    beginTurn(token: string): void;
+    sendCount(token: string): number;
+  };
 }
 
 // Routes stored user messages to agent sessions and writes replies back
@@ -43,18 +71,27 @@ export class AgentRuntime {
   private readonly store: PhiStore;
   private readonly workspaceRoot: string;
   private readonly resolveCommand: (harnessId: string) => string[] | null;
+  private readonly mcpPort: number;
+  private readonly mcpTokens: AgentRuntimeOptions["mcpTokens"];
   private readonly sessions = new Map<string, ThreadSession>();
   // Per-thread promise chain; one turn runs at a time per thread and
   // messages posted mid-turn become the next turn.
   private readonly turns = new Map<string, Promise<void>>();
+  // Turns queued or running per thread. The working flag flips on when the
+  // count leaves zero and off when it returns, so clients see one continuous
+  // working state across chained turns instead of an off/on blink between
+  // them.
+  private readonly pendingTurns = new Map<string, number>();
 
   constructor(
     store: PhiStore,
     workspaceRoot: string,
-    options: AgentRuntimeOptions = {},
+    options: AgentRuntimeOptions,
   ) {
     this.store = store;
     this.workspaceRoot = workspaceRoot;
+    this.mcpPort = options.mcpPort;
+    this.mcpTokens = options.mcpTokens;
     this.resolveCommand =
       options.resolveCommand ??
       ((harnessId) => harnessEntry(harnessId)?.acpCommand?.() ?? null);
@@ -62,10 +99,22 @@ export class AgentRuntime {
 
   handleUserMessage(message: Message): void {
     if (message.author !== "user") return;
-    const prev = this.turns.get(message.threadId) ?? Promise.resolve();
+    const threadId = message.threadId;
+    // Flip the working flag synchronously, before the caller's HTTP response
+    // is sent, so the thread.turn frame can never trail the send round-trip.
+    const pending = (this.pendingTurns.get(threadId) ?? 0) + 1;
+    this.pendingTurns.set(threadId, pending);
+    if (pending === 1) {
+      const agentName =
+        this.sessions.get(threadId)?.agentName ??
+        this.store.getThreadSession(threadId)?.agentName ??
+        DEFAULT_AGENT_NAME;
+      this.store.setThreadTurn(threadId, true, agentName);
+    }
+    const prev = this.turns.get(threadId) ?? Promise.resolve();
     // runTurn reports every failure as a message, so the chain never rejects.
     this.turns.set(
-      message.threadId,
+      threadId,
       prev.then(() => this.runTurn(message)),
     );
   }
@@ -75,22 +124,20 @@ export class AgentRuntime {
     return this.turns.get(threadId) ?? Promise.resolve();
   }
 
-  // Sessions are in-memory, so a restart silently drops any turn that was in
-  // flight — leaving the thread ending on a user message with no reply ever
-  // coming. Called once at server startup: report the interruption so clients
-  // don't render a permanent "agent is working" state.
+  // Sessions are in-memory, so a persisted active flag at startup means the
+  // process died during that turn. Clear the flag and make the interruption
+  // visible instead of leaving a permanent working state.
   recoverInterruptedTurns(): void {
     const workspace = this.store.defaultWorkspace();
-    for (const channel of this.store.listChannels(workspace.id)) {
-      for (const thread of this.store.listThreads(channel.id)) {
-        if (thread.status === "archived") continue;
-        const last = this.store.listMessages(thread.id).at(-1);
-        if (last?.author !== "user") continue;
+    for (const turn of this.store.listActiveTurns(workspace.id)) {
+      const thread = this.store.getThread(turn.threadId);
+      this.store.setThreadTurn(turn.threadId, false, null);
+      if (thread && thread.status !== "archived") {
         this.store.appendMessage(thread.id, {
           author: "system",
           kind: "error",
-          content:
-            "The server restarted before the agent replied. Send another message to retry.",
+          content: "The server restarted before the agent replied.",
+          metadata: { retriable: true },
         });
       }
     }
@@ -102,24 +149,60 @@ export class AgentRuntime {
     }
   }
 
+  // Releases live resources while retaining the durable binding. Archival can
+  // call this; reopening the thread will resume the same harness session.
+  async releaseSession(threadId: string): Promise<void> {
+    const session = this.sessions.get(threadId);
+    if (!session) return;
+    if (session.closeSupported) {
+      await session.acp.connection.agent
+        .request("session/close", { sessionId: session.sessionId })
+        .catch(() => undefined);
+    }
+    this.dropSession(threadId);
+  }
+
   private async runTurn(userMessage: Message): Promise<void> {
     const threadId = userMessage.threadId;
     try {
-      const session = await this.ensureSession(threadId);
+      const session = await this.ensureSession(threadId, userMessage);
+      // handleUserMessage flagged the turn with the best name it had; correct
+      // it once the session pins the actual agent.
+      if (this.store.getThread(threadId)?.turnAgent !== session.agentName) {
+        this.store.setThreadTurn(threadId, true, session.agentName);
+      }
       session.turnText = [];
+      this.mcpTokens.beginTurn(session.mcpToken);
+      const recoveryContext = session.recoveryContext;
       const response = (await session.acp.connection.agent.request(
         "session/prompt",
         {
           sessionId: session.sessionId,
-          prompt: [{ type: "text", text: userMessage.content }],
+          prompt: [
+            {
+              type: "text",
+              text: [
+                session.primed ? undefined : MESSAGING_PREAMBLE,
+                recoveryContext,
+                `User request:\n${userMessage.content}`,
+              ]
+                .filter(Boolean)
+                .join("\n\n"),
+            },
+          ],
         },
       )) as PromptResponse;
+      session.primed = true;
+      session.recoveryContext = undefined;
 
       const text = session.turnText
         .map(({ chunks }) => chunks.join("").trim())
         .filter((message) => message.length > 0)
         .join("\n\n")
         .trim();
+      if (this.mcpTokens.sendCount(session.mcpToken) > 0) {
+        return;
+      }
       if (text.length > 0) {
         this.store.appendMessage(threadId, {
           author: "coordinator",
@@ -128,6 +211,7 @@ export class AgentRuntime {
           metadata: {
             agent: session.agentName,
             stopReason: response.stopReason,
+            via: "turn-text-fallback",
           },
         });
       } else {
@@ -135,6 +219,7 @@ export class AgentRuntime {
           author: "system",
           kind: "error",
           content: `${session.agentName} ended the turn without a reply (${response.stopReason})`,
+          metadata: { retriable: true },
         });
       }
     } catch (error) {
@@ -145,16 +230,31 @@ export class AgentRuntime {
         author: "system",
         kind: "error",
         content: (error as Error).message,
+        metadata: { retriable: true },
       });
+    } finally {
+      const remaining = (this.pendingTurns.get(threadId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.pendingTurns.set(threadId, remaining);
+      } else {
+        this.pendingTurns.delete(threadId);
+        this.store.setThreadTurn(threadId, false, null);
+      }
     }
   }
 
-  private async ensureSession(threadId: string): Promise<ThreadSession> {
+  private async ensureSession(
+    threadId: string,
+    userMessage: Message,
+  ): Promise<ThreadSession> {
     const existing = this.sessions.get(threadId);
     if (existing && existing.acp.proc.exitCode === null) return existing;
     if (existing) this.dropSession(threadId);
 
-    const agent = await loadDefaultAgent(this.workspaceRoot);
+    const binding = this.store.getThreadSession(threadId);
+    const agent = binding
+      ? agentFromBinding(binding)
+      : await loadDefaultAgent(this.workspaceRoot);
     if (!agent) {
       throw new Error("no default agent is configured; finish setup first");
     }
@@ -169,6 +269,9 @@ export class AgentRuntime {
       acp: null as unknown as AcpProcess,
       sessionId: "",
       agentName: agent.name,
+      mcpToken: "",
+      closeSupported: false,
+      primed: false,
       turnText: [],
     };
     session.acp = connectAcpProcess(command, this.workspaceRoot, {
@@ -205,13 +308,8 @@ export class AgentRuntime {
         ),
       HANDSHAKE_TIMEOUT_MS,
     );
-    // Fail fast if the agent binary dies before the session exists.
-    const exited = proc.exited.then(() => {
-      throw new Error(`${agent.harness} exited during session setup`);
-    });
-
     try {
-      await connection.agent.request(
+      const initialized = (await connection.agent.request(
         "initialize",
         {
           protocolVersion: PROTOCOL_VERSION,
@@ -220,21 +318,108 @@ export class AgentRuntime {
           },
         },
         { cancellationSignal: controller.signal },
-      );
-      const created = (await Promise.race([
-        connection.agent.request(
-          "session/new",
-          { cwd: this.workspaceRoot, mcpServers: [] },
-          { cancellationSignal: controller.signal },
-        ),
-        exited,
-      ])) as NewSessionResponse;
-      session.sessionId = created.sessionId;
+      )) as InitializeResponse;
+      if (initialized.agentCapabilities?.mcpCapabilities?.http !== true) {
+        throw new Error(
+          `${agent.harness} does not support HTTP MCP, which phi agents require for send_message`,
+        );
+      }
+      session.mcpToken = this.mcpTokens.mint({
+        threadId,
+        agentName: agent.name,
+      });
+      // Fail fast if the agent binary dies before the session exists. Create
+      // this race only after capability validation so every rejection has a
+      // consumer even when initialization is rejected early.
+      const exited = proc.exited.then(() => {
+        throw new Error(`${agent.harness} exited during session setup`);
+      });
+      session.closeSupported =
+        initialized.agentCapabilities?.sessionCapabilities?.close != null;
+      const mcpServers = this.phiMcpServers(session.mcpToken);
+      let needsNewSession = binding === null;
+      if (binding) {
+        session.sessionId = binding.sessionId;
+        try {
+          if (
+            initialized.agentCapabilities?.sessionCapabilities?.resume != null
+          ) {
+            await Promise.race([
+              connection.agent.request(
+                "session/resume",
+                {
+                  sessionId: binding.sessionId,
+                  cwd: this.workspaceRoot,
+                  mcpServers,
+                },
+                { cancellationSignal: controller.signal },
+              ),
+              exited,
+            ]);
+          } else if (initialized.agentCapabilities?.loadSession === true) {
+            await Promise.race([
+              connection.agent.request(
+                "session/load",
+                {
+                  sessionId: binding.sessionId,
+                  cwd: this.workspaceRoot,
+                  mcpServers,
+                },
+                { cancellationSignal: controller.signal },
+              ),
+              exited,
+            ]);
+          } else {
+            needsNewSession = true;
+          }
+        } catch (error) {
+          if (!isUnavailableSession(error)) throw error;
+          needsNewSession = true;
+        }
+      }
+      // A resumed session's own history already opens with the preamble.
+      session.primed = !needsNewSession;
 
-      await this.applyAgentConfig(session, agent, created);
+      if (needsNewSession) {
+        const created = (await Promise.race([
+          connection.agent.request(
+            "session/new",
+            { cwd: this.workspaceRoot, mcpServers },
+            { cancellationSignal: controller.signal },
+          ),
+          exited,
+        ])) as NewSessionResponse;
+        session.sessionId = created.sessionId;
+        await this.applyAgentConfig(session, agent, created);
+        this.store.saveThreadSession({
+          threadId,
+          harnessId: agent.harness,
+          agentName: agent.name,
+          sessionId: created.sessionId,
+          model: agent.model,
+          config: agent.config,
+        });
+        if (binding) {
+          session.recoveryContext = this.recoveryContext(
+            threadId,
+            userMessage.seq,
+          );
+        }
+      }
+
+      // session/load replays history as updates. Phi already has a durable
+      // message read model, so discard those updates before the live turn.
+      session.turnText = [];
       this.sessions.set(threadId, session);
+      void proc.exited.then(() => {
+        if (this.sessions.get(threadId) !== session) return;
+        this.sessions.delete(threadId);
+        this.mcpTokens.revoke(session.mcpToken);
+        connection.close();
+      });
       return session;
     } catch (error) {
+      if (session.mcpToken) this.mcpTokens.revoke(session.mcpToken);
       connection.close();
       proc.kill();
       if (error instanceof RequestError && error.code === AUTH_REQUIRED_CODE) {
@@ -254,7 +439,7 @@ export class AgentRuntime {
   // Failures degrade to harness defaults rather than blocking the turn.
   private async applyAgentConfig(
     session: ThreadSession,
-    agent: AgentDefinition,
+    agent: SessionAgent,
     created: NewSessionResponse,
   ): Promise<void> {
     const values = new Map<string, string | boolean>(
@@ -289,13 +474,59 @@ export class AgentRuntime {
     }
   }
 
+  private phiMcpServers(token: string) {
+    return [
+      {
+        type: "http" as const,
+        name: "phi",
+        url: `http://localhost:${this.mcpPort}/mcp`,
+        headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+      },
+    ];
+  }
+
+  private recoveryContext(threadId: string, beforeSeq: number): string {
+    const transcript = this.store
+      .listMessages(threadId)
+      .filter((message) => message.seq < beforeSeq)
+      .filter(
+        (message) => message.author !== "system" || message.kind !== "error",
+      )
+      .map((message) => `${message.author}: ${message.content}`)
+      .join("\n\n");
+    if (!transcript) return "";
+    const bounded = transcript.slice(-RECOVERY_CONTEXT_MAX_CHARS);
+    return [
+      "Recovered context from Phi's durable thread log follows. Treat it as prior conversation, do not answer it independently, and continue with the new user request.",
+      bounded,
+    ].join("\n\n");
+  }
+
   private dropSession(threadId: string): void {
     const session = this.sessions.get(threadId);
     if (!session) return;
     this.sessions.delete(threadId);
+    this.mcpTokens.revoke(session.mcpToken);
     session.acp.connection.close();
     session.acp.proc.kill();
   }
+}
+
+function agentFromBinding(binding: ThreadSessionBinding): SessionAgent {
+  return {
+    name: binding.agentName,
+    harness: binding.harnessId,
+    model: binding.model,
+    config: binding.config,
+  };
+}
+
+function isUnavailableSession(error: unknown): boolean {
+  if (error instanceof RequestError && error.code === -32601) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:session|thread).*(?:not found|unknown|does not exist)/i.test(
+    message,
+  );
 }
 
 // Agents run unattended against phi's own workspace, so tool calls are

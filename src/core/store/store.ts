@@ -8,6 +8,7 @@ import type {
   MessageAuthor,
   Thread,
   ThreadSummary,
+  ThreadTurn,
   Workspace,
 } from "@/shared/types";
 
@@ -20,7 +21,8 @@ const THREAD_TITLE_MAX = 60;
 // the agent runtime) subscribes; the store itself never talks transport.
 export type StoreChange =
   | { type: "message.appended"; message: Message }
-  | { type: "thread.updated"; thread: Thread };
+  | { type: "thread.updated"; thread: Thread }
+  | ({ type: "thread.turn" } & ThreadTurn);
 
 export interface AppendMessageInput {
   author: MessageAuthor;
@@ -28,6 +30,22 @@ export interface AppendMessageInput {
   content: string;
   metadata?: Record<string, unknown>;
 }
+
+export interface ThreadSessionBinding {
+  threadId: string;
+  harnessId: string;
+  agentName: string;
+  sessionId: string;
+  model: string | null;
+  config: Record<string, string | boolean>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SaveThreadSessionBinding = Omit<
+  ThreadSessionBinding,
+  "createdAt" | "updatedAt"
+>;
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -146,6 +164,76 @@ export class PhiStore {
       )
       .all(threadId)
       .map(messageFromRow);
+  }
+
+  getThreadSession(threadId: string): ThreadSessionBinding | null {
+    const row = this.db
+      .query<ThreadSessionRow, [string]>(
+        "SELECT * FROM thread_sessions WHERE thread_id = ?",
+      )
+      .get(threadId);
+    return row ? threadSessionFromRow(row) : null;
+  }
+
+  saveThreadSession(input: SaveThreadSessionBinding): ThreadSessionBinding {
+    if (!this.getThread(input.threadId)) {
+      throw new Error(`no thread "${input.threadId}"`);
+    }
+    const existing = this.getThreadSession(input.threadId);
+    const now = new Date().toISOString();
+    this.db
+      .query(
+        `INSERT INTO thread_sessions
+           (thread_id, harness_id, agent_name, session_id, model, config_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(thread_id) DO UPDATE SET
+           harness_id = excluded.harness_id,
+           agent_name = excluded.agent_name,
+           session_id = excluded.session_id,
+           model = excluded.model,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.threadId,
+        input.harnessId,
+        input.agentName,
+        input.sessionId,
+        input.model,
+        JSON.stringify(input.config),
+        existing?.createdAt ?? now,
+        now,
+      );
+    return this.getThreadSession(input.threadId)!;
+  }
+
+  listActiveTurns(workspaceId: string): ThreadTurn[] {
+    return this.db
+      .query<Pick<ThreadRow, "id" | "turn_agent">, [string]>(
+        `SELECT id, turn_agent FROM threads
+         WHERE workspace_id = ? AND turn_active = 1`,
+      )
+      .all(workspaceId)
+      .map((row) => ({
+        threadId: row.id,
+        active: true,
+        agent: row.turn_agent,
+      }));
+  }
+
+  setThreadTurn(
+    threadId: string,
+    active: boolean,
+    agent: string | null,
+  ): ThreadTurn {
+    if (!this.getThread(threadId)) throw new Error(`no thread "${threadId}"`);
+    const activeAgent = active ? agent : null;
+    this.db
+      .query("UPDATE threads SET turn_active = ?, turn_agent = ? WHERE id = ?")
+      .run(active ? 1 : 0, activeAgent, threadId);
+    const turn = { threadId, active, agent: activeAgent };
+    this.emit({ type: "thread.turn", ...turn });
+    return turn;
   }
 
   // Creates a thread with its first message in one transaction.
@@ -294,6 +382,8 @@ interface ThreadRow {
   title: string | null;
   status: string;
   last_seq: number;
+  turn_active: number;
+  turn_agent: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -311,6 +401,17 @@ interface MessageRow {
   created_at: string;
 }
 
+interface ThreadSessionRow {
+  thread_id: string;
+  harness_id: string;
+  agent_name: string;
+  session_id: string;
+  model: string | null;
+  config_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
 function threadFromRow(row: ThreadRow): Thread {
   return {
     id: row.id,
@@ -319,6 +420,8 @@ function threadFromRow(row: ThreadRow): Thread {
     title: row.title,
     status: row.status as Thread["status"],
     lastSeq: row.last_seq,
+    turnActive: row.turn_active === 1,
+    turnAgent: row.turn_agent,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -336,6 +439,19 @@ function messageFromRow(row: MessageRow): Message {
     metadata: JSON.parse(row.metadata_json) as Record<string, unknown>,
     seq: row.seq,
     createdAt: row.created_at,
+  };
+}
+
+function threadSessionFromRow(row: ThreadSessionRow): ThreadSessionBinding {
+  return {
+    threadId: row.thread_id,
+    harnessId: row.harness_id,
+    agentName: row.agent_name,
+    sessionId: row.session_id,
+    model: row.model,
+    config: JSON.parse(row.config_json) as Record<string, string | boolean>,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
