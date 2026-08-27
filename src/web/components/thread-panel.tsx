@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { RotateCcw, Square, X } from "lucide-react";
+import { LoaderCircle, RotateCcw, Square, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
@@ -15,6 +15,7 @@ import {
 } from "@/web/lib/queries";
 import { latestCommittedMessageId } from "@/web/lib/activity";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
+import { formatTurnElapsed } from "@/web/lib/time";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { cn } from "@/web/lib/utils";
 
@@ -48,17 +49,56 @@ export function ThreadPanel({
   const isAgentWorking = send.isPending || activeAgent !== null;
   const workingAgent = activeAgent ?? turnAgent ?? "agent";
   // The cancel POST returns before the harness actually stops, so keep a
-  // local "interrupting" latch until the working flag clears.
-  const [interrupting, setInterrupting] = useState(false);
-  const interruptBusy = cancel.isPending || interrupting;
+  // local "stopping" latch until the working flag clears.
+  const [stopping, setStopping] = useState(false);
+  const stopBusy = cancel.isPending || stopping;
   const workingRef = useRef(isAgentWorking);
   workingRef.current = isAgentWorking;
+  const [now, setNow] = useState(() => Date.now());
+  const startedAtRef = useRef<number | null>(null);
+
+  function requestStop() {
+    if (stopBusy) return;
+    cancel.mutate(undefined, {
+      onSuccess: () => {
+        if (workingRef.current) setStopping(true);
+      },
+    });
+  }
 
   // Reset on any working-state or thread change so a late cancel 202 cannot
-  // latch "Interrupting…" onto the next turn (presence can beat the POST).
+  // latch "Stopping…" onto the next turn (presence can beat the POST).
   useEffect(() => {
-    setInterrupting(false);
+    setStopping(false);
   }, [threadId, isAgentWorking]);
+
+  useEffect(() => {
+    startedAtRef.current = isAgentWorking ? Date.now() : null;
+    setNow(Date.now());
+    if (!isAgentWorking) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isAgentWorking, threadId]);
+
+  useEffect(() => {
+    if (!isAgentWorking || stopBusy) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (event.defaultPrevented) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("[role='dialog']")) {
+        return;
+      }
+      event.preventDefault();
+      requestStop();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isAgentWorking, stopBusy]);
+
+  const elapsed = formatTurnElapsed(
+    startedAtRef.current === null ? 0 : now - startedAtRef.current,
+  );
 
   const { scrollProps, contentRef, pinned, hasNew, scrollToBottom } =
     useStickToBottom(messages.length, threadId);
@@ -137,23 +177,23 @@ export function ThreadPanel({
                 <div className="px-4 pb-4">
                   <AgentWorkingMessage
                     agent={workingAgent}
-                    interrupting={interrupting}
+                    stopping={stopping}
+                    elapsed={elapsed}
                     action={
                       isAgentWorking ? (
                         <button
                           type="button"
-                          onClick={() =>
-                            cancel.mutate(undefined, {
-                              onSuccess: () => {
-                                if (workingRef.current) setInterrupting(true);
-                              },
-                            })
-                          }
-                          disabled={interruptBusy}
-                          className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                          title="Stop (Esc)"
+                          onClick={requestStop}
+                          disabled={stopBusy}
+                          className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-100 disabled:pointer-events-none"
                         >
-                          <Square className="size-3 fill-current" />
-                          {interrupting ? "Interrupting…" : "Interrupt"}
+                          {stopping ? (
+                            <LoaderCircle className="size-3 animate-spin" />
+                          ) : (
+                            <Square className="size-3 fill-current" />
+                          )}
+                          {stopping ? "Stopping…" : "Stop"}
                         </button>
                       ) : undefined
                     }
@@ -175,7 +215,7 @@ export function ThreadPanel({
       )}
       {cancel.isError && (
         <p className="px-4 pb-1 text-xs text-destructive">
-          Interrupt failed: {cancel.error.message}
+          Stop failed: {cancel.error.message}
         </p>
       )}
       <Composer

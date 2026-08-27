@@ -64,11 +64,13 @@ export function authorLabel(
 
 export function AgentWorkingMessage({
   agent,
-  interrupting = false,
+  stopping = false,
+  elapsed,
   action,
 }: {
   agent: string;
-  interrupting?: boolean;
+  stopping?: boolean;
+  elapsed?: string | null;
   action?: React.ReactNode;
 }) {
   return (
@@ -80,8 +82,11 @@ export function AgentWorkingMessage({
       >
         <span className="font-medium text-foreground">{agent}</span>
         <span className="working-shimmer">
-          {interrupting ? "is interrupting..." : "is working..."}
+          {stopping ? "is stopping..." : "is working..."}
         </span>
+        {elapsed && (
+          <span aria-hidden="true">· {elapsed}</span>
+        )}
       </p>
       {action}
     </div>
