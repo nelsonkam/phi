@@ -130,9 +130,9 @@ function ActivityRow({
         open();
       }}
       className={cn(
-        "group flex cursor-pointer gap-3 rounded-lg px-4 py-2.5 transition-colors focus-visible:outline-none",
+        "group flex cursor-pointer gap-3 px-4 py-2.5 transition-colors focus-visible:outline-none",
         selected
-          ? "bg-accent/60"
+          ? "bg-foreground/10"
           : "hover:bg-accent/40 focus-visible:bg-accent/40",
       )}
     >

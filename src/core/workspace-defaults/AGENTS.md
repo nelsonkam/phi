@@ -22,9 +22,9 @@ by workspace-relative path.
 - Channels are database-backed. To create one or attach external working
   folders, follow `.agents/skills/manage-channels/SKILL.md`; do not create a
   directory as a substitute for the tool call.
-- `channels/<name>/` — scratch space for each channel's work. Do file
-  work under the channel your thread belongs to and keep the workspace
-  root clean.
+- `channels/<name>/` — scratch space for each channel's work. Create the
+  folder if it's missing. Do file work under the channel your thread
+  belongs to and keep the workspace root clean.
 
 ## Messages vs. files
 

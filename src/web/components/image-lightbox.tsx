@@ -92,7 +92,7 @@ export function ExpandableImage({
         <DialogContent
           showCloseButton={false}
           overlayClassName="bg-black/50 supports-backdrop-filter:backdrop-blur-sm"
-          className="flex w-auto max-w-[min(96vw,72rem)] max-h-[92svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(96vw,72rem)]"
+          className="flex w-auto max-w-[98vw] max-h-[96svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[98vw]"
           aria-describedby={undefined}
         >
           <DialogHeader className="shrink-0 border-b px-4 py-2.5">
@@ -118,7 +118,7 @@ export function ExpandableImage({
             <img
               src={src}
               alt={alt ?? ""}
-              className="max-h-[min(80svh,calc(92svh-3.5rem))] max-w-full rounded-md object-contain"
+              className="max-h-[calc(96svh-3.5rem)] max-w-full rounded-md object-contain"
             />
           </div>
         </DialogContent>

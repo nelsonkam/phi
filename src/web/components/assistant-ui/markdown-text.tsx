@@ -228,7 +228,10 @@ const defaultComponents = memoizeMarkdownComponents({
       ? workspaceFileUrl(workspacePath, {
           channelId: scope.channelId,
           root: scope.root,
-          fragment: parseWorkspaceHref(src)?.fragment,
+          fragment:
+            typeof src === "string"
+              ? parseWorkspaceHref(src)?.fragment
+              : undefined,
         })
       : src;
     return (
