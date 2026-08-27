@@ -186,12 +186,22 @@ async function handle(line: string): Promise<void> {
       const nudge = promptText.includes("staying silent is a normal outcome")
         ? "[nudge] "
         : "";
+      // Surfaces the since-then block so tests can assert which turns saw
+      // messages that landed after their trigger.
+      const since = promptText.includes(
+        "already moved past the message this turn responds to",
+      )
+        ? "[since] "
+        : "";
       const roots =
         mode === "roots"
           ? `[roots=${session.additionalDirectories.join(",")}] `
           : "";
       if (mode === "tool") {
-        await callSendMessage(session, `${nudge}tool#${session.turn}: ${text}`);
+        await callSendMessage(
+          session,
+          `${since}${nudge}tool#${session.turn}: ${text}`,
+        );
         send({
           method: "session/update",
           params: {
@@ -210,7 +220,7 @@ async function handle(line: string): Promise<void> {
         break;
       }
       for (const chunk of [
-        `${model}${intro}${catchup}${nudge}${roots}echo#${session.turn}: `,
+        `${model}${intro}${catchup}${since}${nudge}${roots}echo#${session.turn}: `,
         text,
       ]) {
         send({

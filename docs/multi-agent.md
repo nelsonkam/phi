@@ -191,16 +191,38 @@ log into a fresh session, bounded and framed. Multi-agent generalizes it:
   `RECOVERY_CONTEXT_MAX_CHARS` cap (most recent suffix wins).
 - The framing text mirrors the recovery preamble: prior conversation, do not
   answer it independently, continue with the routed message.
+- **Wake-time visibility**: turns serialize, so a queued turn can start well
+  after the thread has moved past its trigger — a speculative wake queued
+  behind the primary always does. Messages that landed *after* the trigger,
+  before the turn began, are appended as a "since then" block ("already in
+  the thread — do not repeat or re-answer what they cover"), and the seen
+  cursor advances over everything shown. Without this, an agent answers a
+  thread that no longer exists (asking for a plan that is already one
+  message up).
+- **Turn coalescing**: a queued turn is skipped when the agent already saw
+  its trigger in an earlier turn's context *and* has posted a message since
+  — it had the trigger in view and took its chance to respond. A trigger
+  merely seen (a speculative wake that chose silence) still gets its turn,
+  so a deliberate request cannot be swallowed by an earlier quiet pass.
+  Coalesced turns consume no hop budget. Side effect: two quick user
+  messages to one agent become one turn that answers both.
+
+A deliberate trade: recipients of a multi-recipient `to` are not
+informationally independent — the second sees the first's reply in its
+since-then block. They were already sequential in time; pretending they were
+independent is what produced crossed-wire threads (an agent asking for a
+plan that had already been posted, triggering a redundant second round).
 
 For the single-agent thread this is a no-op — the delta is empty because the
 agent sees every message as it arrives — so the current fast path is
 untouched. Crash recovery becomes a special case of catch-up rather than a
 separate mechanism.
 
-Agents are told, in the messaging preamble, that other agents' messages are
-peers' contributions in a shared thread: address them by handle, do not
-impersonate them, and do not assume their tool results without reading the
-log.
+The messaging preamble opens by telling each agent its own handle — an agent
+that does not know it *is* @default will draft plans that delegate work to
+"@default" and strand them — and that other agents' messages are peers'
+contributions in a shared thread: address them by handle, do not impersonate
+them, and do not assume their tool results without reading the log.
 
 ## 7. Loop prevention: the hop budget
 
@@ -211,16 +233,19 @@ one genuinely new safety rule this design introduces:
 
 - A **hop** is a turn triggered by an agent message. The per-thread hop
   counter increments on each hop and resets to zero on any user message.
-- When a routed turn would exceed the budget (default **8**), it is not
+- When a routed turn would exceed the budget (default **20**), it is not
   enqueued. Phi posts a system message instead: the exchange is paused and
   names everyone who was still next — a multi-recipient `to` can drop
   several recipients at once — so the user can continue it with one message.
 - An agent cannot enqueue its own next turn. A `to` that names the author
-  is ignored.
+  is dropped, and the `send_message` result says so — the author still has
+  the live turn in which to do that work itself, so the drop must not be
+  silent (an agent that plans "then @me reviews" would otherwise strand
+  half its plan).
 - The budget is a host-enforced invariant, not a prompt instruction.
 
-Eight hops covers real collaboration shapes (draft, review, revise,
-re-review, approve — each recipient turn counts as a hop, so a
+Twenty hops covers longer collaboration chains (draft, review, revise,
+re-review, plus speculative wakes — each recipient turn counts as a hop, so a
 multi-recipient `to` spends several at once) while keeping runaway loops
 structurally impossible. The `PHI_HOP_BUDGET` environment variable overrides
 the default per server.

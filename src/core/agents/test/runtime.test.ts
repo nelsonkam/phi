@@ -406,6 +406,7 @@ test("turns in one thread serialize and reuse one session", async () => {
     content: "first",
   });
   runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
   runtime.handleUserMessage(
     store.appendMessage(thread.id, {
       author: "user",
@@ -426,6 +427,71 @@ test("turns in one thread serialize and reuse one session", async () => {
     "[model=smart] [intro] echo#1: first",
     "[model=smart] echo#2: second",
   ]);
+  done();
+});
+
+test("a turn sees messages that landed after its trigger; the covered turn coalesces", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "first",
+  });
+  // Both messages are committed before the first turn starts, so the first
+  // turn's prompt carries the second message as since-then context.
+  runtime.handleUserMessage(message);
+  runtime.handleUserMessage(
+    store.appendMessage(thread.id, {
+      author: "user",
+      kind: "message",
+      content: "second",
+    }),
+  );
+  await runtime.settled(thread.id);
+
+  const replies = store
+    .listMessages(thread.id)
+    .filter((m) => m.author === "agent")
+    .map((m) => m.content);
+  // One reply, not two: the first turn saw both messages ("[since]"), so the
+  // queued turn for "second" — already seen and already answered — is
+  // skipped instead of prompting a stale re-answer.
+  expect(replies).toEqual(["[model=smart] [intro] [since] echo#1: first"]);
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  done();
+});
+
+test("a silent speculative pass does not swallow a later deliberate turn", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the request.",
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "start work, maybe ask @reviewer",
+  });
+  const handoff = store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "please review",
+    metadata: { agent: "default" },
+  });
+  // Queue order: default's primary turn, reviewer's speculative turn (which
+  // sees the handoff as since-then context but stays silent — echo turn text
+  // is discarded), then the deliberate turn for the handoff. The coalescing
+  // guard must not skip that last turn: reviewer saw the handoff but never
+  // spoke.
+  runtime.handleUserMessage(root.message);
+  runtime.handleAgentMessage(handoff, ["reviewer"]);
+  await runtime.settled(root.thread.id);
+
+  const reviewerReplies = store
+    .listMessages(root.thread.id)
+    .filter((m) => m.author === "agent" && m.metadata.agent === "reviewer");
+  expect(reviewerReplies).toHaveLength(1);
+  expect(reviewerReplies[0]!.content).toContain("echo#2: please review");
   done();
 });
 
@@ -936,9 +1002,10 @@ test("a speculative agent that contributes replies through send_message", async 
     "default",
     "reviewer",
   ]);
-  // Only the speculative turn carried the stay-silent note.
+  // Only the speculative turn carried the stay-silent note, and its prompt
+  // included the primary's reply as since-then context.
   expect(agentMessages[0]!.content).toBe(`tool#1: ${content}`);
-  expect(agentMessages[1]!.content).toBe(`[nudge] tool#1: ${content}`);
+  expect(agentMessages[1]!.content).toBe(`[since] [nudge] tool#1: ${content}`);
   done();
 });
 

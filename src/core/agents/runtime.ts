@@ -143,7 +143,7 @@ export class AgentRuntime {
     this.workspaceRoot = workspaceRoot;
     this.mcpPort = options.mcpPort;
     this.mcpTokens = options.mcpTokens;
-    this.hopBudget = options.hopBudget ?? 8;
+    this.hopBudget = options.hopBudget ?? 20;
     this.sessionIdleMs = options.sessionIdleMs ?? 10 * 60_000;
     this.hostIdleMs = options.hostIdleMs ?? 30_000;
     this.routeUserContentFn = options.routeUserContent ?? routeUserContent;
@@ -245,6 +245,10 @@ export class AgentRuntime {
 
       const speculative = new Set(routing.speculative ?? []);
       for (const [index, agentName] of routing.routedTo.entries()) {
+        // Skipped before hop accounting: a coalesced turn consumes no budget.
+        if (this.turnAlreadyCovered(threadId, agentName, message.seq)) {
+          continue;
+        }
         if (message.author === "agent") {
           const nextHop = (this.agentHops.get(threadId) ?? 0) + 1;
           if (nextHop > this.hopBudget) {
@@ -392,6 +396,9 @@ export class AgentRuntime {
     const controller = new AbortController();
     this.turnAborts.set(threadId, controller);
     let session: ThreadSession | null = null;
+    // The highest seq shown to the agent this turn; the seen cursor starts
+    // here so messages that arrive mid-turn are never marked seen.
+    let shownUpToSeq = message.seq;
     try {
       session = await this.ensureSession(threadId, agentName);
       if (this.wasCancelled(threadId, epoch) || controller.signal.aborted) {
@@ -409,6 +416,11 @@ export class AgentRuntime {
         session.lastSeenSeq,
         message.seq,
       );
+      const sinceThen = this.sinceThenContext(
+        threadId,
+        Math.max(message.seq, session.lastSeenSeq),
+      );
+      shownUpToSeq = Math.max(shownUpToSeq, sinceThen.upToSeq);
       const response = (await session.host.acp.connection.agent.request(
         "session/prompt",
         {
@@ -419,11 +431,12 @@ export class AgentRuntime {
               text: [
                 session.primed ? undefined : messagingPreamble(session.agentName),
                 catchUpContext,
+                sinceThen.text,
                 speculative ? SPECULATIVE_WAKE_NOTE : undefined,
                 routedPrompt(
                   message,
                   session.agentName,
-                  catchUpContext.length > 0,
+                  catchUpContext.length > 0 || sinceThen.text.length > 0,
                 ),
               ]
                 .filter(Boolean)
@@ -504,7 +517,7 @@ export class AgentRuntime {
       if (session && this.sessions.get(key) === session) {
         const lastSeenSeq = this.seenCursorAfterTurn(
           threadId,
-          message.seq,
+          shownUpToSeq,
           agentName,
         );
         session.lastSeenSeq = Math.max(session.lastSeenSeq, lastSeenSeq);
@@ -867,6 +880,60 @@ export class AgentRuntime {
     ];
   }
 
+  // Messages that landed after the turn's trigger (or the agent's seen
+  // cursor, whichever is later) before the turn began. Turns serialize, so a
+  // queued turn can start well after the thread moved past its trigger — a
+  // speculative wake queued behind the primary always does — and an agent
+  // blind to that drift answers a thread that no longer exists (asking for a
+  // plan that is already one message up, for example).
+  private sinceThenContext(
+    threadId: string,
+    afterSeq: number,
+  ): { text: string; upToSeq: number } {
+    const rows = this.store
+      .listMessages(threadId)
+      .filter((message) => message.seq > afterSeq);
+    if (rows.length === 0) return { text: "", upToSeq: afterSeq };
+    const upToSeq = rows.at(-1)!.seq;
+    const transcript = rows
+      .filter(
+        (message) => message.author !== "system" || message.kind !== "error",
+      )
+      .map((message) => `${messageLabel(message)}: ${message.content}`)
+      .join("\n");
+    if (!transcript) return { text: "", upToSeq };
+    const bounded = transcript.slice(-RECOVERY_CONTEXT_MAX_CHARS);
+    return {
+      text: [
+        "The thread has already moved past the message this turn responds to (shown last). These later messages are already in the thread — take them into account and do not repeat or re-answer what they cover:",
+        bounded,
+      ].join("\n\n"),
+      upToSeq,
+    };
+  }
+
+  // A queued turn is redundant when the agent already saw its trigger in an
+  // earlier turn's context AND has spoken since: it had the trigger in view
+  // and took its chance to respond. A trigger merely seen — a speculative
+  // wake that chose silence — still gets its turn, so a deliberate request
+  // cannot be swallowed by an earlier quiet pass over the same message.
+  private turnAlreadyCovered(
+    threadId: string,
+    agentName: string,
+    triggerSeq: number,
+  ): boolean {
+    const binding = this.store.getThreadSession(threadId, agentName);
+    if (!binding || binding.lastSeenSeq < triggerSeq) return false;
+    return this.store
+      .listMessages(threadId)
+      .some(
+        (message) =>
+          message.seq > triggerSeq &&
+          message.author === "agent" &&
+          message.metadata.agent === agentName,
+      );
+  }
+
   private catchUpContext(
     threadId: string,
     lastSeenSeq: number,
@@ -975,7 +1042,7 @@ function messageLabel(message: Message): string {
 // An ACP prompt is definitionally the user's channel, so a plain user message
 // needs no label. Framing appears only where the channel would otherwise lie:
 // a peer agent's message, or a live message that must be set apart from the
-// catch-up block preceding it.
+// catch-up or since-then blocks preceding it.
 //
 // Only user messages get their leading mention stripped: that text performed
 // the routing, so it is addressing scaffold, not content (the durable log
@@ -984,13 +1051,13 @@ function messageLabel(message: Message): string {
 function routedPrompt(
   message: Message,
   recipient: string,
-  hasCatchUp: boolean,
+  hasContext: boolean,
 ): string {
   if (message.author !== "user") {
     return `Message from @${String(message.metadata.agent)}:\n${message.content}`;
   }
   const content = stripLeadingMention(message.content, recipient);
-  return hasCatchUp ? `New message from the user:\n${content}` : content;
+  return hasContext ? `New message from the user:\n${content}` : content;
 }
 
 function agentFromBinding(binding: ThreadSessionBinding): SessionAgent {
