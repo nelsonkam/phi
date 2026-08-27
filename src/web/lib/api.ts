@@ -75,6 +75,10 @@ export function retryTurn(threadId: string): Promise<{ ok: boolean }> {
   return post(`/threads/${threadId}/retry`, {});
 }
 
+export function cancelTurn(threadId: string): Promise<{ ok: boolean }> {
+  return post(`/threads/${threadId}/cancel`, {});
+}
+
 export function markThreadRead(threadId: string): Promise<{ ok: boolean }> {
   return post(`/threads/${threadId}/read`, {});
 }

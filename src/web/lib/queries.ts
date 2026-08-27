@@ -15,6 +15,7 @@ import {
   fetchThreads,
   markThreadRead,
   retryTurn,
+  cancelTurn,
   sendMessage,
   updateAgent,
 } from "./api";
@@ -61,9 +62,15 @@ export function useActivity() {
 // spinners, and a failure just leaves the row unread.
 export function useMarkThreadRead() {
   return useMutation({
-    mutationFn: (threadId: string) => markThreadRead(threadId),
-    onSuccess: () => {
+    mutationFn: ({ threadId }: { threadId: string; channelId: string }) =>
+      markThreadRead(threadId),
+    onSuccess: (_data, { channelId }) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
+      // Channel rows gate the waiting dot on unreadCount, so that channel's
+      // thread list must refetch too.
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.channelThreads(channelId),
+      });
     },
   });
 }
@@ -75,6 +82,9 @@ export function useMarkAllRead() {
     mutationFn: () => markAllRead(),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
+      // Touches every thread, so every channel's list (keyed under
+      // ["channels", id, "threads"]) may have dots to clear.
+      void queryClient.invalidateQueries({ queryKey: ["channels"] });
     },
   });
 }
@@ -221,6 +231,10 @@ export function useSendMessage(threadId: string) {
 // socket like any other turn's.
 export function useRetryTurn(threadId: string) {
   return useMutation({ mutationFn: () => retryTurn(threadId) });
+}
+
+export function useCancelTurn(threadId: string) {
+  return useMutation({ mutationFn: () => cancelTurn(threadId) });
 }
 
 export function useCreateDefaultAgent() {

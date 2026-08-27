@@ -15,6 +15,9 @@ interface FakeSession {
 }
 
 const sessions = new Map<string, FakeSession>();
+// session/prompt ids waiting on session/cancel in `slow` mode. Stored so the
+// stdin loop can keep reading the cancel notification.
+const pendingPrompts = new Map<string, number>();
 
 function send(message: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -133,6 +136,15 @@ async function handle(line: string): Promise<void> {
       send({ id: msg.id, result: {} });
       break;
     }
+    case "session/cancel": {
+      const sessionId = String(msg.params?.sessionId ?? "");
+      const pendingId = pendingPrompts.get(sessionId);
+      if (pendingId !== undefined) {
+        pendingPrompts.delete(sessionId);
+        send({ id: pendingId, result: { stopReason: "cancelled" } });
+      }
+      break;
+    }
     case "session/prompt": {
       const params = msg.params as {
         sessionId: string;
@@ -140,6 +152,10 @@ async function handle(line: string): Promise<void> {
       };
       const session = sessions.get(params.sessionId)!;
       session.turn += 1;
+      if (mode === "slow") {
+        pendingPrompts.set(params.sessionId, msg.id!);
+        break;
+      }
       const promptText = params.prompt
         .map((block) => block.text ?? "")
         .join("");
@@ -154,8 +170,12 @@ async function handle(line: string): Promise<void> {
         ? `[model=${session.config.model}] `
         : "";
       // Surfaces the once-per-session messaging preamble so tests can assert
-      // exactly which prompts carried it.
-      const intro = promptText.includes("Use phi's send_message tool")
+      // exactly which prompts carried it. Keyed on the leading identity
+      // sentence, so every "[intro]" assertion also proves the agent was told
+      // its own handle.
+      const intro = /^You are @[a-z0-9-]+ — that handle is your own name/.test(
+        promptText,
+      )
         ? "[intro] "
         : "";
       const catchup = promptText.includes("Prior conversation from Phi")

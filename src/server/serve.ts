@@ -171,6 +171,18 @@ export function startServer(): void {
           return Response.json({ ok: true }, { status: 202 });
         },
       },
+      // Cancels the running turn (ACP session/cancel) and drops work already
+      // queued behind it. Idempotent when the thread is idle.
+      "/api/v1/threads/:id/cancel": {
+        POST: (req) => {
+          const thread = store.getThread(req.params.id);
+          if (!thread) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          runtime.cancelTurn(req.params.id);
+          return Response.json({ ok: true }, { status: 202 });
+        },
+      },
       "/api/v1/threads/:id/read": {
         POST: (req) => {
           if (!store.markThreadRead(req.params.id)) {

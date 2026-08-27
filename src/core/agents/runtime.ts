@@ -28,8 +28,11 @@ const AUTH_REQUIRED_CODE = -32000;
 // (and resumed sessions) already carry it in the harness's own history, and
 // the phi MCP server repeats the same guidance in send_message's tool
 // description and server instructions, so the model sees it every turn
-// regardless.
-export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
+// regardless. The identity sentence leads so an agent never mistakes its own
+// handle for a peer it could delegate to.
+export function messagingPreamble(agentName: string): string {
+  return `You are @${agentName} — that handle is your own name in this thread, so work you would assign to @${agentName} is yours to do in the current turn, not a handoff. Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
+}
 
 // Framing for a turn triggered by a non-leading mention in a user message:
 // the agent was woken because it was named, not addressed, so silence is a
@@ -92,6 +95,9 @@ export interface AgentRuntimeOptions {
   hopBudget?: number;
   sessionIdleMs?: number;
   hostIdleMs?: number;
+  // Test hooks: delay or reject routing so cancel races can be asserted.
+  routeUserContent?: typeof routeUserContent;
+  routeAgentContent?: typeof routeAgentContent;
 }
 
 // Routes stored user messages to agent sessions and writes replies back
@@ -109,6 +115,8 @@ export class AgentRuntime {
   private readonly hopBudget: number;
   private readonly sessionIdleMs: number;
   private readonly hostIdleMs: number;
+  private readonly routeUserContentFn: typeof routeUserContent;
+  private readonly routeAgentContentFn: typeof routeAgentContent;
   private readonly sessions = new Map<string, ThreadSession>();
   private readonly hosts = new Map<string, AcpHost>();
   private readonly startingHosts = new Map<string, Promise<AcpHost>>();
@@ -121,6 +129,9 @@ export class AgentRuntime {
   // them.
   private readonly pendingTurns = new Map<string, number>();
   private readonly agentHops = new Map<string, number>();
+  // Bumped by cancelTurn; queued work enqueued at an older epoch is skipped.
+  private readonly cancelEpoch = new Map<string, number>();
+  private readonly turnAborts = new Map<string, AbortController>();
   private closed = false;
 
   constructor(
@@ -135,6 +146,8 @@ export class AgentRuntime {
     this.hopBudget = options.hopBudget ?? 8;
     this.sessionIdleMs = options.sessionIdleMs ?? 10 * 60_000;
     this.hostIdleMs = options.hostIdleMs ?? 30_000;
+    this.routeUserContentFn = options.routeUserContent ?? routeUserContent;
+    this.routeAgentContentFn = options.routeAgentContent ?? routeAgentContent;
     this.resolveCommand =
       options.resolveCommand ??
       ((harnessId, additionalDirectories) =>
@@ -147,7 +160,7 @@ export class AgentRuntime {
     content: string,
     threadId?: string,
   ): Promise<MessageRouting> {
-    return routeUserContent(
+    return this.routeUserContentFn(
       this.workspaceRoot,
       content,
       threadId ? this.threadFallbackAgent(threadId) : undefined,
@@ -174,10 +187,35 @@ export class AgentRuntime {
     this.enqueueMessage(message, routedTo);
   }
 
+  // Stops the running turn and drops work already queued behind it. New
+  // messages after this call start a fresh epoch and run normally. Idle
+  // threads return false so the HTTP handler can stay idempotent.
+  cancelTurn(threadId: string): boolean {
+    if ((this.pendingTurns.get(threadId) ?? 0) === 0) return false;
+    this.cancelEpoch.set(threadId, (this.cancelEpoch.get(threadId) ?? 0) + 1);
+    this.turnAborts.get(threadId)?.abort();
+    for (const [key, session] of this.sessions) {
+      if (!key.startsWith(`${threadId}\0`) || !session.sessionId) continue;
+      void session.host.acp.connection.agent
+        .notify("session/cancel", { sessionId: session.sessionId })
+        .catch(() => undefined);
+    }
+    return true;
+  }
+
+  private currentEpoch(threadId: string): number {
+    return this.cancelEpoch.get(threadId) ?? 0;
+  }
+
+  private wasCancelled(threadId: string, epoch: number): boolean {
+    return epoch < this.currentEpoch(threadId);
+  }
+
   private enqueueMessage(message: Message, routedTo?: string[]): void {
     const threadId = message.threadId;
     // Flip the working flag synchronously, before the caller's HTTP response
     // is sent, so the thread.turn frame can never trail the send round-trip.
+    const epoch = this.currentEpoch(threadId);
     const pending = (this.pendingTurns.get(threadId) ?? 0) + 1;
     this.pendingTurns.set(threadId, pending);
     if (pending === 1) {
@@ -188,16 +226,18 @@ export class AgentRuntime {
     // runTurn reports every failure as a message, so the chain never rejects.
     this.turns.set(
       threadId,
-      prev.then(() => this.processMessage(message, routedTo)),
+      prev.then(() => this.processMessage(message, routedTo, epoch)),
     );
   }
 
   private async processMessage(
     message: Message,
-    routedTo?: string[],
+    routedTo: string[] | undefined,
+    epoch: number,
   ): Promise<void> {
     const threadId = message.threadId;
     try {
+      if (this.wasCancelled(threadId, epoch)) return;
       const routing = await this.resolveRouting(message, routedTo);
       const metadata = { ...message.metadata, ...routing };
       message.metadata = metadata;
@@ -226,9 +266,11 @@ export class AgentRuntime {
           }
           this.agentHops.set(threadId, nextHop);
         }
-        await this.runTurn(message, agentName, speculative.has(agentName));
+        if (this.wasCancelled(threadId, epoch)) return;
+        await this.runTurn(message, agentName, speculative.has(agentName), epoch);
       }
     } catch (error) {
+      if (this.wasCancelled(threadId, epoch)) return;
       this.store.appendMessage(threadId, {
         author: "system",
         kind: "error",
@@ -264,14 +306,14 @@ export class AgentRuntime {
       };
     }
     if (message.author === "user") {
-      return routeUserContent(
+      return this.routeUserContentFn(
         this.workspaceRoot,
         message.content,
         this.threadFallbackAgent(message.threadId),
       );
     }
     const authorAgent = String(message.metadata.agent ?? "");
-    return routeAgentContent(
+    return this.routeAgentContentFn(
       this.workspaceRoot,
       message.content,
       authorAgent,
@@ -343,12 +385,18 @@ export class AgentRuntime {
     message: Message,
     agentName: string,
     speculative = false,
+    epoch = 0,
   ): Promise<void> {
     const threadId = message.threadId;
     const key = sessionKey(threadId, agentName);
+    const controller = new AbortController();
+    this.turnAborts.set(threadId, controller);
     let session: ThreadSession | null = null;
     try {
       session = await this.ensureSession(threadId, agentName);
+      if (this.wasCancelled(threadId, epoch) || controller.signal.aborted) {
+        return;
+      }
       // handleUserMessage flagged the turn with the best name it had; correct
       // it once the session pins the actual agent.
       if (this.store.getThread(threadId)?.turnAgent !== session.agentName) {
@@ -369,7 +417,7 @@ export class AgentRuntime {
             {
               type: "text",
               text: [
-                session.primed ? undefined : MESSAGING_PREAMBLE,
+                session.primed ? undefined : messagingPreamble(session.agentName),
                 catchUpContext,
                 speculative ? SPECULATIVE_WAKE_NOTE : undefined,
                 routedPrompt(
@@ -383,8 +431,15 @@ export class AgentRuntime {
             },
           ],
         },
+        { cancellationSignal: controller.signal },
       )) as PromptResponse;
       session.primed = true;
+      if (
+        response.stopReason === "cancelled" ||
+        this.wasCancelled(threadId, epoch)
+      ) {
+        return;
+      }
 
       const text = session.turnText
         .map(({ chunks }) => chunks.join("").trim())
@@ -401,11 +456,14 @@ export class AgentRuntime {
         return;
       }
       if (text.length > 0) {
-        const routing = await routeAgentContent(
+        const routing = await this.routeAgentContentFn(
           this.workspaceRoot,
           text,
           session.agentName,
         );
+        if (this.wasCancelled(threadId, epoch) || controller.signal.aborted) {
+          return;
+        }
         const fallback = this.store.appendMessage(threadId, {
           author: "agent",
           kind: "message",
@@ -427,6 +485,9 @@ export class AgentRuntime {
         });
       }
     } catch (error) {
+      if (this.wasCancelled(threadId, epoch) || controller.signal.aborted) {
+        return;
+      }
       // The session may be mid-broken (dead process, protocol error); drop it
       // so the next message starts clean.
       this.dropSessionByKey(key);
@@ -437,6 +498,9 @@ export class AgentRuntime {
         metadata: { retriable: true },
       });
     } finally {
+      if (this.turnAborts.get(threadId) === controller) {
+        this.turnAborts.delete(threadId);
+      }
       if (session && this.sessions.get(key) === session) {
         const lastSeenSeq = this.seenCursorAfterTurn(
           threadId,

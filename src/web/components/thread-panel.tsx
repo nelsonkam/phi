@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { RotateCcw, X } from "lucide-react";
+import { RotateCcw, Square, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
@@ -8,6 +8,7 @@ import {
   useAgents,
   useMarkThreadRead,
   useMessages,
+  useCancelTurn,
   useRetryTurn,
   useSendMessage,
   useThreadTurn,
@@ -37,6 +38,7 @@ export function ThreadPanel({
   const { data } = useMessages(threadId);
   const { data: agentData } = useAgents();
   const send = useSendMessage(threadId);
+  const cancel = useCancelTurn(threadId);
   const messages = data?.messages ?? [];
   const [root, ...replies] = messages;
   const untaggedAgent = threadUntaggedAgent(root, agentData?.agents);
@@ -45,6 +47,18 @@ export function ThreadPanel({
   const activeAgent = liveTurn.ready ? liveTurn.agent : persistedAgent;
   const isAgentWorking = send.isPending || activeAgent !== null;
   const workingAgent = activeAgent ?? turnAgent ?? "agent";
+  // The cancel POST returns before the harness actually stops, so keep a
+  // local "interrupting" latch until the working flag clears.
+  const [interrupting, setInterrupting] = useState(false);
+  const interruptBusy = cancel.isPending || interrupting;
+  const workingRef = useRef(isAgentWorking);
+  workingRef.current = isAgentWorking;
+
+  // Reset on any working-state or thread change so a late cancel 202 cannot
+  // latch "Interrupting…" onto the next turn (presence can beat the POST).
+  useEffect(() => {
+    setInterrupting(false);
+  }, [threadId, isAgentWorking]);
 
   const { scrollProps, contentRef, pinned, hasNew, scrollToBottom } =
     useStickToBottom(messages.length, threadId);
@@ -57,8 +71,8 @@ export function ThreadPanel({
   const markReadMutate = markRead.mutate;
   const committedId = latestCommittedMessageId(messages);
   useEffect(() => {
-    if (committedId !== undefined) markReadMutate(threadId);
-  }, [markReadMutate, threadId, committedId]);
+    if (committedId !== undefined) markReadMutate({ threadId, channelId });
+  }, [markReadMutate, threadId, channelId, committedId]);
 
   return (
     <aside className="flex min-h-0 w-1/2 shrink-0 flex-col overflow-hidden border-l bg-background">
@@ -121,7 +135,29 @@ export function ThreadPanel({
             >
               <div className="working-row-clip">
                 <div className="px-4 pb-4">
-                  <AgentWorkingMessage agent={workingAgent} />
+                  <AgentWorkingMessage
+                    agent={workingAgent}
+                    interrupting={interrupting}
+                    action={
+                      isAgentWorking ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            cancel.mutate(undefined, {
+                              onSuccess: () => {
+                                if (workingRef.current) setInterrupting(true);
+                              },
+                            })
+                          }
+                          disabled={interruptBusy}
+                          className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                        >
+                          <Square className="size-3 fill-current" />
+                          {interrupting ? "Interrupting…" : "Interrupt"}
+                        </button>
+                      ) : undefined
+                    }
+                  />
                 </div>
               </div>
             </div>
@@ -135,6 +171,11 @@ export function ThreadPanel({
       {send.isError && (
         <p className="px-4 pb-1 text-xs text-destructive">
           Sending failed: {send.error.message}
+        </p>
+      )}
+      {cancel.isError && (
+        <p className="px-4 pb-1 text-xs text-destructive">
+          Interrupt failed: {cancel.error.message}
         </p>
       )}
       <Composer

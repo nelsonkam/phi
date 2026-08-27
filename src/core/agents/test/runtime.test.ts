@@ -4,7 +4,8 @@ import { tempDir } from "@/testing/tmpdir";
 import { PhiStore } from "@/core/store/store";
 import { ensureWorkspace } from "@/core/workspace";
 import { writeAgent, writeDefaultAgent } from "@/core/agents/registry";
-import { AgentRuntime } from "@/core/agents/runtime";
+import { AgentRuntime, messagingPreamble } from "@/core/agents/runtime";
+import type { MessageRouting } from "@/core/agents/routing";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import type { Channel } from "@/shared/types";
@@ -28,6 +29,12 @@ async function fixture(options?: {
   sessionIdleMs?: number;
   hostIdleMs?: number;
   hopBudget?: number;
+  routeUserContent?: ConstructorParameters<
+    typeof AgentRuntime
+  >[2]["routeUserContent"];
+  routeAgentContent?: ConstructorParameters<
+    typeof AgentRuntime
+  >[2]["routeAgentContent"];
 }): Promise<Fixture> {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
@@ -51,6 +58,8 @@ async function fixture(options?: {
     sessionIdleMs: options?.sessionIdleMs,
     hostIdleMs: options?.hostIdleMs,
     hopBudget: options?.hopBudget,
+    routeUserContent: options?.routeUserContent,
+    routeAgentContent: options?.routeAgentContent,
     resolveCommand: (harnessId, additionalDirectories) => {
       launches.push({ harnessId, additionalDirectories });
       return [
@@ -76,6 +85,14 @@ async function fixture(options?: {
     done,
   };
 }
+
+test("the messaging preamble opens with the agent's own handle", () => {
+  const preamble = messagingPreamble("reviewer");
+  expect(preamble.startsWith("You are @reviewer — ")).toBe(true);
+  // The fake agent's "[intro]" marker keys on this sentence; every content
+  // assertion carrying "[intro]" also proves the identity reached the prompt.
+  expect(preamble).toContain("that handle is your own name in this thread");
+});
 
 test("a user message gets the agent's reply appended to its thread", async () => {
   const { store, runtime, channel, done } = await fixture();
@@ -204,6 +221,180 @@ test("recovers only threads with a persisted active turn", async () => {
   // Clients key the retry affordance off this flag.
   expect(recovery.metadata.retriable).toBe(true);
   expect(store.listMessages(idle.thread.id)).toHaveLength(1);
+  done();
+});
+
+test("cancelTurn is a no-op when the thread is idle", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "idle",
+  });
+  expect(runtime.cancelTurn(thread.id)).toBe(false);
+  done();
+});
+
+test("cancelTurn skips a turn that has not started and leaves no error", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "stop me",
+  });
+  runtime.handleUserMessage(message);
+  expect(runtime.cancelTurn(thread.id)).toBe(true);
+  await runtime.settled(thread.id);
+
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
+    "user",
+  ]);
+  done();
+});
+
+test("a message after cancel still runs", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "first",
+  });
+  runtime.handleUserMessage(message);
+  expect(runtime.cancelTurn(thread.id)).toBe(true);
+  await runtime.settled(thread.id);
+
+  runtime.handleUserMessage(
+    store.appendMessage(thread.id, {
+      author: "user",
+      kind: "message",
+      content: "second",
+    }),
+  );
+  await runtime.settled(thread.id);
+
+  const replies = store
+    .listMessages(thread.id)
+    .filter((item) => item.author === "agent");
+  expect(replies).toHaveLength(1);
+  expect(replies[0]!.content).toContain("echo#1: second");
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  done();
+});
+
+test("cancelTurn stops an in-flight prompt via session/cancel", async () => {
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["slow"],
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hang",
+  });
+  runtime.handleUserMessage(message);
+  await Bun.sleep(100);
+  expect(store.getThread(thread.id)!.turnActive).toBe(true);
+  expect(runtime.cancelTurn(thread.id)).toBe(true);
+  await runtime.settled(thread.id);
+
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
+    "user",
+  ]);
+  done();
+});
+
+test("cancel during a routing reject does not append a system error", async () => {
+  let rejectRouting!: (error: Error) => void;
+  const blocked = new Promise<MessageRouting>((_resolve, reject) => {
+    rejectRouting = reject;
+  });
+  let started!: () => void;
+  const routingStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const { store, runtime, channel, done } = await fixture({
+    routeUserContent: () => {
+      started();
+      return blocked;
+    },
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "route then fail",
+  });
+  runtime.handleUserMessage(message);
+  await routingStarted;
+  expect(runtime.cancelTurn(thread.id)).toBe(true);
+  rejectRouting(new Error("routing exploded"));
+  await runtime.settled(thread.id);
+
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
+    "user",
+  ]);
+  done();
+});
+
+test("cancel during fallback reply routing does not append the agent reply", async () => {
+  let finishRouting!: (value: MessageRouting) => void;
+  const blocked = new Promise<MessageRouting>((resolve) => {
+    finishRouting = resolve;
+  });
+  let started!: () => void;
+  const routingStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const { store, runtime, channel, done } = await fixture({
+    routeAgentContent: async () => {
+      started();
+      return blocked;
+    },
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "fallback",
+  });
+  runtime.handleUserMessage(message);
+  await routingStarted;
+  expect(runtime.cancelTurn(thread.id)).toBe(true);
+  finishRouting({ mentions: [], routedTo: [] });
+  await runtime.settled(thread.id);
+
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
+    "user",
+  ]);
+  done();
+});
+
+test("cancelTurn drops queued follow-up turns", async () => {
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["slow"],
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "first",
+  });
+  runtime.handleUserMessage(message);
+  runtime.handleUserMessage(
+    store.appendMessage(thread.id, {
+      author: "user",
+      kind: "message",
+      content: "second",
+    }),
+  );
+  await Bun.sleep(100);
+  expect(runtime.cancelTurn(thread.id)).toBe(true);
+  await runtime.settled(thread.id);
+
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  expect(
+    store.listMessages(thread.id).filter((item) => item.author === "agent"),
+  ).toHaveLength(0);
   done();
 });
 

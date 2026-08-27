@@ -62,16 +62,29 @@ export function authorLabel(
   return "system";
 }
 
-export function AgentWorkingMessage({ agent }: { agent: string }) {
+export function AgentWorkingMessage({
+  agent,
+  interrupting = false,
+  action,
+}: {
+  agent: string;
+  interrupting?: boolean;
+  action?: React.ReactNode;
+}) {
   return (
-    <p
-      className="ml-12 flex items-baseline gap-1 text-xs text-muted-foreground"
-      role="status"
-      aria-live="polite"
-    >
-      <span className="font-medium text-foreground">{agent}</span>
-      <span className="working-shimmer">is working...</span>
-    </p>
+    <div className="ml-12 flex items-center gap-3">
+      <p
+        className="flex items-baseline gap-1 text-xs text-muted-foreground"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="font-medium text-foreground">{agent}</span>
+        <span className="working-shimmer">
+          {interrupting ? "is interrupting..." : "is working..."}
+        </span>
+      </p>
+      {action}
+    </div>
   );
 }
 
