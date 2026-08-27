@@ -225,6 +225,9 @@ test("listThreads orders by activity and counts messages", () => {
   expect(threads.map((t) => t.title)).toEqual(["A", "B"]);
   expect(threads[0]!.messageCount).toBe(2);
   expect(threads[1]!.messageCount).toBe(1);
+  expect(threads[0]!.latestMessage?.content).toBe("reply");
+  expect(threads[1]!.latestMessage?.content).toBe("B");
+  expect(threads[1]!.latestMessage?.id).toBe(threads[1]!.rootMessage?.id);
   store.close();
 });
 

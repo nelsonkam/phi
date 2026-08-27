@@ -39,6 +39,8 @@ export interface Thread {
 export interface ThreadSummary extends Thread {
   messageCount: number;
   rootMessage: Message | null;
+  latestMessage: Message | null;
+  unreadCount: number;
 }
 
 export type MessageAuthor = "user" | "agent" | "system";

@@ -1,13 +1,24 @@
 import { useMemo } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { MessageSquareText } from "lucide-react";
+import { LoaderCircle, MessageSquareText } from "lucide-react";
 import type { ThreadSummary } from "@/shared/types";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { MessageItem } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
-import { useAgents, useChannels, useCreateThread, useThreads } from "@/web/lib/queries";
+import {
+  useAgents,
+  useChannels,
+  useCreateThread,
+  useThreadTurn,
+  useThreads,
+} from "@/web/lib/queries";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
+import {
+  isThreadWorking,
+  threadAttention,
+  type ThreadAttention,
+} from "@/web/lib/thread-status";
 import { relativeTime } from "@/web/lib/time";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { EmptyState, Page } from "../app";
@@ -118,6 +129,13 @@ function ThreadRoot({
   active: boolean;
   onOpen: () => void;
 }) {
+  const liveTurn = useThreadTurn(thread.id);
+  const working = isThreadWorking(liveTurn, thread.turnActive);
+  const attention = threadAttention(
+    working,
+    thread.latestMessage?.author ?? thread.rootMessage?.author,
+    thread.unreadCount,
+  );
   const replies = thread.messageCount - 1;
   if (!thread.rootMessage) return null;
 
@@ -130,11 +148,11 @@ function ThreadRoot({
         onOpen();
       }}
       className={`group cursor-pointer px-5 py-2 transition-colors ${
-        active ? "bg-accent/60" : "hover:bg-accent/40"
+        active ? "bg-foreground/10" : "hover:bg-accent/40"
       }`}
     >
       <MessageItem message={thread.rootMessage}>
-        {replies > 0 && (
+        {(replies > 0 || attention) && (
           <button
             type="button"
             onClick={(e) => {
@@ -143,14 +161,46 @@ function ThreadRoot({
             }}
             className="mt-1.5 flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-1 -ml-1.5 text-xs font-medium text-sky-600 transition-colors group-hover:border-border group-hover:bg-background dark:text-sky-400"
           >
-            <MessageSquareText className="size-3.5" />
-            {replies} {replies === 1 ? "reply" : "replies"}
-            <span className="font-normal text-muted-foreground">
-              · last {relativeTime(thread.updatedAt)}
-            </span>
+            {replies > 0 && (
+              <>
+                <MessageSquareText className="size-3.5" />
+                {replies} {replies === 1 ? "reply" : "replies"}
+                <span className="font-normal text-muted-foreground">
+                  · last {relativeTime(thread.updatedAt)}
+                </span>
+              </>
+            )}
+            <ThreadAttentionMark attention={attention} />
+            {replies === 0 && attention === "working" && (
+              <span aria-hidden="true">working</span>
+            )}
           </button>
         )}
       </MessageItem>
     </div>
+  );
+}
+
+function ThreadAttentionMark({ attention }: { attention: ThreadAttention }) {
+  if (!attention) return null;
+  if (attention === "working") {
+    return (
+      <span
+        role="img"
+        aria-label="Working"
+        title="Working"
+        className="inline-flex"
+      >
+        <LoaderCircle className="size-3 shrink-0 animate-spin text-sky-600 dark:text-sky-400" />
+      </span>
+    );
+  }
+  return (
+    <span
+      role="img"
+      aria-label="Waiting for a response"
+      title="Waiting for a response"
+      className="size-2 shrink-0 rounded-full bg-sky-600 dark:bg-sky-400"
+    />
   );
 }

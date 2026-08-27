@@ -173,30 +173,49 @@ export class PhiStore {
 
   listThreads(channelId: string): ThreadSummary[] {
     const rows = this.db
-      .query<ThreadRow & { message_count: number }, [string]>(
-        `SELECT t.*, (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count
+      .query<ThreadRow & { message_count: number; unread_count: number }, [string]>(
+        `SELECT t.*,
+           (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count,
+           (
+             SELECT COUNT(*)
+             FROM messages unread
+             WHERE unread.thread_id = t.id
+               AND unread.seq > COALESCE(r.last_read_seq, 0)
+           ) AS unread_count
          FROM threads t
+         LEFT JOIN thread_reads r ON r.thread_id = t.id
          WHERE t.channel_id = ?
          ORDER BY t.last_seq DESC`,
       )
       .all(channelId);
-    const roots = new Map(
-      this.db
-        .query<MessageRow, [string]>(
-          `SELECT m.* FROM messages m
-           JOIN (
-             SELECT thread_id, MIN(seq) AS root_seq
-             FROM messages WHERE channel_id = ? GROUP BY thread_id
-           ) r ON m.thread_id = r.thread_id AND m.seq = r.root_seq`,
-        )
-        .all(channelId)
-        .map((row) => [row.thread_id, messageFromRow(row)] as const),
-    );
+    const roots = this.messagesAtSeq(channelId, "MIN");
+    const latest = this.messagesAtSeq(channelId, "MAX");
     return rows.map((row) => ({
       ...threadFromRow(row),
       messageCount: row.message_count,
       rootMessage: roots.get(row.id) ?? null,
+      latestMessage: latest.get(row.id) ?? null,
+      unreadCount: row.unread_count,
     }));
+  }
+
+  private messagesAtSeq(
+    channelId: string,
+    which: "MIN" | "MAX",
+  ): Map<string, Message> {
+    const agg = which === "MIN" ? "MIN(seq)" : "MAX(seq)";
+    return new Map(
+      this.db
+        .query<MessageRow, [string]>(
+          `SELECT m.* FROM messages m
+           JOIN (
+             SELECT thread_id, ${agg} AS edge_seq
+             FROM messages WHERE channel_id = ? GROUP BY thread_id
+           ) r ON m.thread_id = r.thread_id AND m.seq = r.edge_seq`,
+        )
+        .all(channelId)
+        .map((row) => [row.thread_id, messageFromRow(row)] as const),
+    );
   }
 
   listMessages(threadId: string): Message[] {
