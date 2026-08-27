@@ -40,10 +40,8 @@ export function ThreadPanel({
   const isAgentWorking = send.isPending || activeAgent !== null;
   const workingAgent = activeAgent ?? turnAgent ?? "agent";
 
-  const { scrollProps, pinned, hasNew, scrollToBottom } = useStickToBottom(
-    messages.length,
-    threadId,
-  );
+  const { scrollProps, contentRef, pinned, hasNew, scrollToBottom } =
+    useStickToBottom(messages.length, threadId);
 
   return (
     <aside className="flex min-h-0 w-1/2 shrink-0 flex-col overflow-hidden border-l bg-background">
@@ -74,37 +72,40 @@ export function ThreadPanel({
 
       <div className="relative min-h-0 flex-1">
         <div {...scrollProps} className="h-full overflow-y-auto">
-          {root && (
-            <div className="px-4 pt-4">
-              <MessageItem message={root} />
+          <div ref={contentRef}>
+            {root && (
+              <div className="px-4 pt-4">
+                <MessageItem message={root} />
+              </div>
+            )}
+            {replies.length > 0 && (
+              <div className="my-3 flex items-center gap-2 px-4">
+                <span className="text-xs text-muted-foreground">
+                  {replies.length} {replies.length === 1 ? "reply" : "replies"}
+                </span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            )}
+            <div className="space-y-4 px-4 pb-4">
+              {replies.map((message, index) => (
+                <MessageItem key={message.id} message={message}>
+                  {index === replies.length - 1 &&
+                    message.metadata.retriable === true &&
+                    !isAgentWorking && <RetryTurnButton threadId={threadId} />}
+                </MessageItem>
+              ))}
             </div>
-          )}
-          {replies.length > 0 && (
-            <div className="my-3 flex items-center gap-2 px-4">
-              <span className="text-xs text-muted-foreground">
-                {replies.length} {replies.length === 1 ? "reply" : "replies"}
-              </span>
-              <span className="h-px flex-1 bg-border" />
-            </div>
-          )}
-          <div className="space-y-4 px-4 pb-4">
-            {replies.map((message, index) => (
-              <MessageItem key={message.id} message={message}>
-                {index === replies.length - 1 &&
-                  message.metadata.retriable === true &&
-                  !isAgentWorking && <RetryTurnButton threadId={threadId} />}
-              </MessageItem>
-            ))}
-          </div>
-          {/* Kept mounted so the working state fades and collapses instead of
-              popping in and out and shifting the layout. */}
-          <div
-            className={cn("working-row", isAgentWorking && "working-row-active")}
-            aria-hidden={!isAgentWorking}
-          >
-            <div className="working-row-clip">
-              <div className="px-4 pb-4">
-                <AgentWorkingMessage agent={workingAgent} />
+            {/* Kept mounted so the working state fades and collapses instead of
+                popping in and out and shifting the layout. Height growth is
+                followed by stick-to-bottom via contentRef. */}
+            <div
+              className={cn("working-row", isAgentWorking && "working-row-active")}
+              aria-hidden={!isAgentWorking}
+            >
+              <div className="working-row-clip">
+                <div className="px-4 pb-4">
+                  <AgentWorkingMessage agent={workingAgent} />
+                </div>
               </div>
             </div>
           </div>

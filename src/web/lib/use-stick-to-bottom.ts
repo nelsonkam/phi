@@ -8,13 +8,27 @@ const PIN_THRESHOLD_PX = 48;
 // (hidden tab, interrupted animation).
 const FOLLOW_WINDOW_MS = 800;
 
+// Growing content (a new message, or the working-row expand) sticks when the
+// reader is pinned and only raises the jump badge when they have scrolled away.
+export function followContentHeight(
+  prevHeight: number,
+  nextHeight: number,
+  pinned: boolean,
+): "stick" | "hasNew" | "ignore" {
+  if (nextHeight <= prevHeight) return "ignore";
+  return pinned ? "stick" : "hasNew";
+}
+
 // Chat-style scroll anchoring: follow new content only while the reader is at
 // the bottom. `itemCount` growing scrolls smoothly when pinned and raises
 // `hasNew` when not; `resetKey` changing (switching thread/channel) jumps to
-// the bottom instantly and re-pins. Spread `scrollProps` onto the scrollable
-// container.
+// the bottom instantly and re-pins. Attach `contentRef` to an inner wrapper
+// so height-only growth (the working-row 0fr→1fr transition) is followed too
+// — `itemCount` does not change when that row expands. Spread `scrollProps`
+// onto the scrollable container.
 export function useStickToBottom(itemCount: number, resetKey: string) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
   // While we drive a smooth autoscroll, intermediate scroll events read as
   // "not at the bottom" and must not unpin; deliberate reader input (wheel,
@@ -54,6 +68,30 @@ export function useStickToBottom(itemCount: number, resetKey: string) {
     }
   }, [itemCount, scrollToBottom]);
 
+  // The working row (and any other in-place growth) changes height without
+  // changing `itemCount`. Snap rather than smooth-scroll so a 200ms CSS
+  // expand is tracked each frame instead of landing on a stale height.
+  useEffect(() => {
+    const content = contentRef.current;
+    const container = containerRef.current;
+    if (!content || !container || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    let lastHeight = content.offsetHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = content.offsetHeight;
+      const action = followContentHeight(lastHeight, nextHeight, pinnedRef.current);
+      lastHeight = nextHeight;
+      if (action === "stick") {
+        container.scrollTop = container.scrollHeight;
+      } else if (action === "hasNew") {
+        setHasNew(true);
+      }
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [resetKey]);
+
   const onScroll = useCallback(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -85,5 +123,5 @@ export function useStickToBottom(itemCount: number, resetKey: string) {
     [onScroll, onReaderInput],
   );
 
-  return { scrollProps, pinned, hasNew, scrollToBottom };
+  return { scrollProps, contentRef, pinned, hasNew, scrollToBottom };
 }
