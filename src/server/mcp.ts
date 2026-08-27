@@ -7,7 +7,10 @@ import {
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import { MESSAGING_PREAMBLE } from "@/core/agents/runtime";
-import { routeAgentContent } from "@/core/agents/routing";
+import {
+  routeAgentContent,
+  unroutedPeerMentions,
+} from "@/core/agents/routing";
 import { HarnessCapabilityService } from "@/core/agents/capabilities";
 import type { AgentHarnessCapabilityList } from "@/core/agents/capabilities";
 import type { MessageSearchApi } from "@/core/search/message-search";
@@ -15,7 +18,7 @@ import type { PhiStore } from "@/core/store/store";
 import type { McpTokenRegistry } from "@/server/mcp-token-registry";
 import type { Message } from "@/shared/types";
 
-export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Use the optional to list for a deliberate handoff to peer agents; without it, only a valid leading @name routes the message. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report.`;
+export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Hand off to peer agents only through the optional to list; message text never routes, and a message that leads with an @agent-handle without to is rejected so an intended handoff cannot silently reach no one. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report.`;
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across your phi workspace using both exact keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace comes from your session; do not ask the user for a thread or channel ID. You may optionally narrow results using a channel name.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
@@ -76,7 +79,7 @@ export function createMcpHandler(
                 uniqueItems: true,
                 items: { type: "string", minLength: 1 },
                 description:
-                  "Optional agent handles to route to, in turn order",
+                  "Agent handles to hand the turn to, in turn order; the only way an agent message routes",
               },
             },
             required: ["content"],
@@ -389,6 +392,7 @@ export function createMcpHandler(
               content,
               caller.agentName,
               explicitRecipients,
+              { requireExplicitHandoff: true },
             );
           } catch (error) {
             return {
@@ -408,11 +412,30 @@ export function createMcpHandler(
           if (routing.routedTo.length > 0) {
             onAgentMessage?.(message, routing.routedTo);
           }
+          // A prose handoff ("done — @reviewer should look") wakes nobody;
+          // warn while the author still has a turn to send a routed follow-up.
+          let note = "";
+          if (routing.routedTo.length === 0) {
+            const unrouted = await unroutedPeerMentions(
+              store.defaultWorkspace().rootPath,
+              content,
+              caller.agentName,
+            );
+            if (unrouted.length > 0) {
+              note = ` Note: it mentions ${unrouted
+                .map((handle) => `@${handle}`)
+                .join(
+                  ", ",
+                )} but has no \`to\`, so no agent was woken — mentions never route. If a handoff was intended, follow up with to: [${unrouted
+                .map((handle) => `"${handle}"`)
+                .join(", ")}].`;
+            }
+          }
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Message sent (${message.id}).`,
+                text: `Message sent (${message.id}).${note}`,
               },
             ],
           };

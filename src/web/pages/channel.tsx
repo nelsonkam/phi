@@ -1,12 +1,11 @@
 import { useMemo } from "react";
-import { useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { MessageSquareText } from "lucide-react";
 import type { ThreadSummary } from "@/shared/types";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { MessageItem } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
-import { UntaggedAgentTag } from "@/web/components/untagged-agent-tag";
 import { useAgents, useChannels, useCreateThread, useThreads } from "@/web/lib/queries";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import { relativeTime } from "@/web/lib/time";
@@ -50,7 +49,15 @@ export function ChannelPage() {
     <Page
       title={channel ? `# ${channel.name}` : "…"}
       titleExtra={
-        untaggedAgent ? <UntaggedAgentTag name={untaggedAgent} /> : null
+        untaggedAgent ? (
+          <Link
+            to={`/agents/${untaggedAgent}`}
+            title="Answers messages that do not start with @name"
+            className="mention shrink-0 text-[11px] leading-5"
+          >
+            @{untaggedAgent}
+          </Link>
+        ) : null
       }
     >
       <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -82,6 +89,7 @@ export function ChannelPage() {
           <Composer
             placeholder={`Message #${channel?.name ?? ""}`}
             disabled={create.isPending}
+            draftKey={`channel:${channelId}`}
             onSend={(content) => void startThread(content)}
           />
         </div>

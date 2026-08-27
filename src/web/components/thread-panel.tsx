@@ -4,7 +4,6 @@ import { RotateCcw, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
-import { UntaggedAgentTag } from "@/web/components/untagged-agent-tag";
 import {
   useAgents,
   useMarkThreadRead,
@@ -47,10 +46,8 @@ export function ThreadPanel({
   const isAgentWorking = send.isPending || activeAgent !== null;
   const workingAgent = activeAgent ?? turnAgent ?? "agent";
 
-  const { scrollProps, pinned, hasNew, scrollToBottom } = useStickToBottom(
-    messages.length,
-    threadId,
-  );
+  const { scrollProps, contentRef, pinned, hasNew, scrollToBottom } =
+    useStickToBottom(messages.length, threadId);
 
   // Viewing the thread reads it: advance the watermark on open and again as
   // messages land while the panel stays open. Keyed on the latest committed
@@ -72,7 +69,15 @@ export function ThreadPanel({
             # {channelName}
           </span>
         )}
-        {untaggedAgent && <UntaggedAgentTag name={untaggedAgent} />}
+        {untaggedAgent && (
+          <Link
+            to={`/agents/${untaggedAgent}`}
+            title="Answers messages that do not start with @name"
+            className="mention shrink-0 text-[11px] leading-5"
+          >
+            @{untaggedAgent}
+          </Link>
+        )}
         <Link
           to={closeTo ?? `/c/${channelId}`}
           aria-label="Close thread"
@@ -84,37 +89,40 @@ export function ThreadPanel({
 
       <div className="relative min-h-0 flex-1">
         <div {...scrollProps} className="h-full overflow-y-auto">
-          {root && (
-            <div className="px-4 pt-4">
-              <MessageItem message={root} />
+          <div ref={contentRef}>
+            {root && (
+              <div className="px-4 pt-4">
+                <MessageItem message={root} />
+              </div>
+            )}
+            {replies.length > 0 && (
+              <div className="my-3 flex items-center gap-2 px-4">
+                <span className="text-xs text-muted-foreground">
+                  {replies.length} {replies.length === 1 ? "reply" : "replies"}
+                </span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            )}
+            <div className="space-y-4 px-4 pb-4">
+              {replies.map((message, index) => (
+                <MessageItem key={message.id} message={message}>
+                  {index === replies.length - 1 &&
+                    message.metadata.retriable === true &&
+                    !isAgentWorking && <RetryTurnButton threadId={threadId} />}
+                </MessageItem>
+              ))}
             </div>
-          )}
-          {replies.length > 0 && (
-            <div className="my-3 flex items-center gap-2 px-4">
-              <span className="text-xs text-muted-foreground">
-                {replies.length} {replies.length === 1 ? "reply" : "replies"}
-              </span>
-              <span className="h-px flex-1 bg-border" />
-            </div>
-          )}
-          <div className="space-y-4 px-4 pb-4">
-            {replies.map((message, index) => (
-              <MessageItem key={message.id} message={message}>
-                {index === replies.length - 1 &&
-                  message.metadata.retriable === true &&
-                  !isAgentWorking && <RetryTurnButton threadId={threadId} />}
-              </MessageItem>
-            ))}
-          </div>
-          {/* Kept mounted so the working state fades and collapses instead of
-              popping in and out and shifting the layout. */}
-          <div
-            className={cn("working-row", isAgentWorking && "working-row-active")}
-            aria-hidden={!isAgentWorking}
-          >
-            <div className="working-row-clip">
-              <div className="px-4 pb-4">
-                <AgentWorkingMessage agent={workingAgent} />
+            {/* Kept mounted so the working state fades and collapses instead of
+                popping in and out and shifting the layout. Height growth is
+                followed by stick-to-bottom via contentRef. */}
+            <div
+              className={cn("working-row", isAgentWorking && "working-row-active")}
+              aria-hidden={!isAgentWorking}
+            >
+              <div className="working-row-clip">
+                <div className="px-4 pb-4">
+                  <AgentWorkingMessage agent={workingAgent} />
+                </div>
               </div>
             </div>
           </div>
@@ -131,6 +139,7 @@ export function ThreadPanel({
       )}
       <Composer
         placeholder="Reply…"
+        draftKey={`thread:${threadId}`}
         onSend={(content) => send.mutate(content)}
         className="px-4 pb-4"
       />

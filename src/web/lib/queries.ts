@@ -226,9 +226,15 @@ export function useRetryTurn(threadId: string) {
 export function useCreateDefaultAgent() {
   return useMutation({
     mutationFn: createDefaultAgent,
-    onSuccess: () => {
+    onSuccess: (result) => {
+      // The mutation resolves with { ok: false } instead of throwing, so this
+      // fires on failures too. Write the cache synchronously on success:
+      // Onboarding navigates to "/" right after the mutation, and an
+      // invalidate-triggered refetch would still be in flight when SetupGate
+      // reads the stale { configured: false } and bounces back to onboarding.
+      if (!result.ok) return;
+      queryClient.setQueryData(queryKeys.setupStatus, { configured: true });
       void queryClient.invalidateQueries({ queryKey: queryKeys.agents });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.setupStatus });
     },
   });
 }

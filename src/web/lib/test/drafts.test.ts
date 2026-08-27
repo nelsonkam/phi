@@ -1,0 +1,54 @@
+import { expect, test } from "bun:test";
+import { readDraft, saveDraft } from "@/web/lib/drafts";
+
+function fakeStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => void map.set(key, value),
+    removeItem: (key: string) => void map.delete(key),
+    clear: () => map.clear(),
+    key: () => null,
+    get length() {
+      return map.size;
+    },
+  };
+}
+
+test("round-trips a draft per key", () => {
+  const storage = fakeStorage();
+  saveDraft("thread:t1", "hello @researcher", storage);
+  saveDraft("channel:c1", "channel note", storage);
+  expect(readDraft("thread:t1", storage)).toBe("hello @researcher");
+  expect(readDraft("channel:c1", storage)).toBe("channel note");
+  expect(readDraft("thread:t2", storage)).toBeNull();
+});
+
+test("saving blank text removes the stored draft", () => {
+  const storage = fakeStorage();
+  saveDraft("thread:t1", "draft", storage);
+  saveDraft("thread:t1", "  \n", storage);
+  expect(readDraft("thread:t1", storage)).toBeNull();
+  expect(storage.length).toBe(0);
+});
+
+test("swallows storage errors", () => {
+  const throwing = {
+    getItem: () => {
+      throw new Error("blocked");
+    },
+    setItem: () => {
+      throw new Error("blocked");
+    },
+    removeItem: () => {
+      throw new Error("blocked");
+    },
+  } as unknown as Storage;
+  expect(() => saveDraft("k", "text", throwing)).not.toThrow();
+  expect(readDraft("k", throwing)).toBeNull();
+});
+
+test("missing storage acts as no drafts", () => {
+  expect(readDraft("k", undefined)).toBeNull();
+  expect(() => saveDraft("k", "text", undefined)).not.toThrow();
+});
