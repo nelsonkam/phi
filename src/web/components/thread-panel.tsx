@@ -15,7 +15,6 @@ import {
 } from "@/web/lib/queries";
 import { latestCommittedMessageId } from "@/web/lib/activity";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
-import { formatTurnElapsed } from "@/web/lib/time";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { cn } from "@/web/lib/utils";
 
@@ -54,8 +53,6 @@ export function ThreadPanel({
   const stopBusy = cancel.isPending || stopping;
   const workingRef = useRef(isAgentWorking);
   workingRef.current = isAgentWorking;
-  const [now, setNow] = useState(() => Date.now());
-  const startedAtRef = useRef<number | null>(null);
 
   function requestStop() {
     if (stopBusy) return;
@@ -73,14 +70,6 @@ export function ThreadPanel({
   }, [threadId, isAgentWorking]);
 
   useEffect(() => {
-    startedAtRef.current = isAgentWorking ? Date.now() : null;
-    setNow(Date.now());
-    if (!isAgentWorking) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [isAgentWorking, threadId]);
-
-  useEffect(() => {
     if (!isAgentWorking || stopBusy) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -95,10 +84,6 @@ export function ThreadPanel({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isAgentWorking, stopBusy]);
-
-  const elapsed = formatTurnElapsed(
-    startedAtRef.current === null ? 0 : now - startedAtRef.current,
-  );
 
   const { scrollProps, contentRef, pinned, hasNew, scrollToBottom } =
     useStickToBottom(messages.length, threadId);
@@ -178,7 +163,6 @@ export function ThreadPanel({
                   <AgentWorkingMessage
                     agent={workingAgent}
                     stopping={stopping}
-                    elapsed={elapsed}
                     action={
                       isAgentWorking ? (
                         <button
