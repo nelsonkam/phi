@@ -42,19 +42,14 @@ export function agentsDir(workspaceRoot: string): string {
   return join(workspaceRoot, ".agents", "agents");
 }
 
-// The default agent (the old coordinator) is the file `default.md`. Setup
-// status is "configured" only when that file exists and parses cleanly.
+// The default agent is whichever definition declares `role: default`. Its
+// filename remains its handle, so workspaces can give the role a useful name.
+// Setup status is "configured" only when such a definition parses cleanly.
 export async function loadDefaultAgent(
   workspaceRoot: string,
 ): Promise<AgentDefinition | null> {
-  const filePath = join(agentsDir(workspaceRoot), `${DEFAULT_AGENT_NAME}.md`);
-  const content = await Bun.file(filePath)
-    .text()
-    .catch(() => null);
-  if (content === null) return null;
-
-  const result = parseAgentFile(DEFAULT_AGENT_NAME, filePath, content);
-  return result.ok && result.agent.role === "default" ? result.agent : null;
+  const { agents } = await loadAgents(workspaceRoot);
+  return agents.find((agent) => agent.role === "default") ?? null;
 }
 
 export async function loadAgent(

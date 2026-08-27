@@ -150,3 +150,17 @@ test("a default.md without role: default does not count as the default agent", a
 
   expect(await loadDefaultAgent(root)).toBeNull();
 });
+
+test("the default role can use a custom agent name", async () => {
+  const root = tempWorkspace();
+  writeAgent(
+    root,
+    "codex.md",
+    "---\nrole: default\nharness: codex\n---\nCoordinate.\n",
+  );
+
+  expect(await loadDefaultAgent(root)).toMatchObject({
+    name: "codex",
+    role: "default",
+  });
+});

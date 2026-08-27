@@ -28,8 +28,8 @@ Review the implementation and report concrete findings.
 - `harness` is required.
 - `description`, `model`, and `config` are optional. Omit `model` or a config
   key to use the harness default.
-- Only `.agents/agents/default.md` may declare `role: default`. Preserve that
-  role when updating the default agent.
+- Exactly one agent definition may declare `role: default`. Preserve that role
+  when updating or renaming the default agent.
 - Put persona and operating instructions in the Markdown body, not in
   frontmatter.
 

@@ -85,7 +85,10 @@ export async function routeUserContent(
   content: string,
   fallbackAgent: string = DEFAULT_AGENT_NAME,
 ): Promise<MessageRouting> {
-  const known = await knownAgentNames(workspaceRoot);
+  const { agents } = await loadAgents(workspaceRoot);
+  const known = new Set(agents.map((agent) => agent.name));
+  const workspaceDefault =
+    agents.find((agent) => agent.role === "default")?.name ?? DEFAULT_AGENT_NAME;
   const mentions = knownBodyMentions(content, known);
   const leading = leadingMention(content);
   const primary =
@@ -93,7 +96,7 @@ export async function routeUserContent(
       ? leading
       : known.has(fallbackAgent)
         ? fallbackAgent
-        : DEFAULT_AGENT_NAME;
+        : workspaceDefault;
   const speculative = mentions.filter((handle) => handle !== primary);
   return {
     mentions,

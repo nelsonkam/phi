@@ -123,6 +123,25 @@ test("unmentioned user messages fall back to the thread's agent", async () => {
   });
 });
 
+test("fallback routing follows a renamed default agent", async () => {
+  const root = tempDir();
+  ensureWorkspace(root);
+  await writeAgent(root, "codex", {
+    role: "default",
+    harness: "codex",
+    instructions: "Coordinate the workspace.",
+  });
+
+  expect(await routeUserContent(root, "take this")).toEqual({
+    mentions: [],
+    routedTo: ["codex"],
+  });
+  expect(await routeUserContent(root, "keep going", "deleted")).toEqual({
+    mentions: [],
+    routedTo: ["codex"],
+  });
+});
+
 test("agent routing validates explicit recipients and ignores self-routing", async () => {
   const root = await workspaceWithAgents();
 
