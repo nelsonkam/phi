@@ -2,13 +2,16 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
 import { Activity, Bot } from "lucide-react";
 import { ThemeToggle } from "@/web/components/theme-toggle";
-import { applyServerFrame, useChannels } from "@/web/lib/queries";
+import { activityWaitingCount } from "@/web/lib/activity";
+import { applyServerFrame, useActivity, useChannels } from "@/web/lib/queries";
 import { connectDeltaSocket, type ConnectionStatus } from "@/web/lib/ws";
 import { cn } from "@/web/lib/utils";
 
 export function App() {
   const { data } = useChannels();
+  const { data: activity } = useActivity();
   const channels = data?.channels ?? [];
+  const waitingCount = activityWaitingCount(activity?.pages);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
 
   useEffect(() => {
@@ -38,6 +41,18 @@ export function App() {
           <SidebarLink to="/" end>
             <Activity className="size-4" />
             Activity
+            {waitingCount > 0 && (
+              <span
+                aria-label={
+                  waitingCount === 1
+                    ? "1 thread waiting"
+                    : `${waitingCount} threads waiting`
+                }
+                className="ml-auto rounded-full bg-sky-600 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-white"
+              >
+                {waitingCount}
+              </span>
+            )}
           </SidebarLink>
           <SidebarLink to="/agents">
             <Bot className="size-4" />

@@ -580,7 +580,7 @@ Durable partial assistant frames and tool-progress checkpoints are deferred. The
 
 - Credentials are resolved from each harness's normal user-home or operating-system login store by default, or from `~/.phi/credentials` in explicit isolated mode.
 - Credentials are never committed to the workspace.
-- `.agents/mcp.json` contains connection configuration, not plaintext secrets.
+- `.agents/mcp.json` uses the Cursor/Claude `mcpServers` shape and contains connection configuration, not plaintext secrets (`${env:NAME}` interpolation).
 - Worker output and external content are treated as untrusted data.
 - Delegating work never grants more authority than the originating user request.
 - External side effects should eventually be divided into read, draft, and commit operations; explicit approval policy is deferred from the initial filesystem-only MVP.

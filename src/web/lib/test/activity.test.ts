@@ -3,6 +3,7 @@ import type { ActivityItem, Message } from "@/shared/types";
 import {
   ACTIVITY_PAGE_SIZE,
   activityNextCursor,
+  activityWaitingCount,
   excerptText,
   latestCommittedMessageId,
 } from "@/web/lib/activity";
@@ -54,6 +55,14 @@ test("excerptText flattens markdown to plain text", () => {
     "before after",
   );
   expect(excerptText("plain text stays")).toBe("plain text stays");
+});
+
+test("activityWaitingCount reads the workspace total from the first page", () => {
+  expect(activityWaitingCount(undefined)).toBe(0);
+  expect(activityWaitingCount([])).toBe(0);
+  expect(
+    activityWaitingCount([{ waitingCount: 3 }, { waitingCount: 3 }]),
+  ).toBe(3);
 });
 
 test("activityNextCursor pages only after a full page", () => {

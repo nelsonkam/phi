@@ -4,7 +4,7 @@ const command = process.argv[2] ?? "serve";
 switch (command) {
   case "serve": {
     const { startServer } = await import("./server/serve");
-    startServer();
+    await startServer();
     break;
   }
   default: {

@@ -14,6 +14,15 @@ export function activityNextCursor(page: {
     : undefined;
 }
 
+// The feed is paginated; the waiting total is not. Every page carries the
+// same workspace-wide count so the sidebar badge stays accurate even when
+// only the first page is loaded.
+export function activityWaitingCount(
+  pages: { waitingCount: number }[] | undefined,
+): number {
+  return pages?.[0]?.waitingCount ?? 0;
+}
+
 // Flattens markdown to plain text for one-line feed excerpts: links and
 // images keep their label, emphasis/code markers and structural prefixes
 // drop, whitespace collapses. Not a parser — just enough that a row never

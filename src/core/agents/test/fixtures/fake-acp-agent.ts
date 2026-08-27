@@ -2,19 +2,23 @@
 // on stdio. Each prompt is echoed back as agent_message_chunk updates with
 // the applied model and a turn counter, so tests can assert config
 // application and session reuse. `bun fake-acp-agent.ts auth` makes
-// session/new fail with the ACP auth_required error instead.
-const mode = process.argv[2] ?? "ok";
+// session/new fail with the ACP auth_required error instead. Extra argv
+// tokens are independent modes (`mcps`, `reject-closed`, …).
+const modes = new Set(process.argv.slice(2));
+const has = (name: string) => modes.has(name);
 
 interface FakeSession {
   config: Record<string, unknown>;
   turn: number;
   additionalDirectories: string[];
+  mcpNames: string[];
   phiMcp:
     | { url: string; headers: Array<{ name: string; value: string }> }
     | undefined;
 }
 
 const sessions = new Map<string, FakeSession>();
+const closedSessions = new Set<string>();
 // session/prompt ids waiting on session/cancel in `slow` mode. Stored so the
 // stdin loop can keep reading the cancel notification.
 const pendingPrompts = new Map<string, number>();
@@ -36,13 +40,16 @@ async function handle(line: string): Promise<void> {
         result: {
           protocolVersion: 1,
           agentCapabilities:
-            mode === "no-http"
+            has("no-http")
               ? {}
               : {
-                  loadSession: mode === "load-only",
-                  mcpCapabilities: { http: true },
+                  loadSession: has("load-only"),
+                  mcpCapabilities: {
+                    http: true,
+                    sse: has("sse"),
+                  },
                   sessionCapabilities:
-                    mode === "no-resume" || mode === "load-only"
+                    has("no-resume") || has("load-only")
                       ? { additionalDirectories: {} }
                       : {
                           resume: {},
@@ -54,7 +61,7 @@ async function handle(line: string): Promise<void> {
       });
       break;
     case "session/new":
-      if (mode === "auth") {
+      if (has("auth")) {
         send({ id: msg.id, error: { code: -32000, message: "auth required" } });
         break;
       }
@@ -63,6 +70,7 @@ async function handle(line: string): Promise<void> {
         config: {},
         turn: 0,
         additionalDirectories: readAdditionalDirectories(msg.params),
+        mcpNames: readMcpNames(msg.params),
         phiMcp: findPhiMcp(msg.params),
       });
       send({
@@ -86,17 +94,28 @@ async function handle(line: string): Promise<void> {
       });
       break;
     case "session/resume":
-      if (mode === "resume-missing") {
-        send({ id: msg.id, error: { code: -32001, message: "session not found" } });
+      if (has("resume-missing")) {
+        send({
+          id: msg.id,
+          error: { code: -32001, message: "session not found" },
+        });
         break;
       }
       const resumedParams = msg.params as { sessionId: string };
+      if (has("reject-closed") && closedSessions.has(resumedParams.sessionId)) {
+        send({
+          id: msg.id,
+          error: { code: -32002, message: "cannot resume a closed session" },
+        });
+        break;
+      }
       // Simulate the one prior turn and its persisted model selection. Runtime
       // tests resume after exactly one prompt.
       sessions.set(resumedParams.sessionId, {
         config: { model: "smart" },
         turn: 1,
         additionalDirectories: readAdditionalDirectories(msg.params),
+        mcpNames: readMcpNames(msg.params),
         phiMcp: findPhiMcp(msg.params),
       });
       send({ id: msg.id, result: {} });
@@ -107,6 +126,7 @@ async function handle(line: string): Promise<void> {
         config: { model: "smart" },
         turn: 1,
         additionalDirectories: readAdditionalDirectories(msg.params),
+        mcpNames: readMcpNames(msg.params),
         phiMcp: findPhiMcp(msg.params),
       });
       send({
@@ -123,7 +143,9 @@ async function handle(line: string): Promise<void> {
       break;
     }
     case "session/close":
-      sessions.delete(String(msg.params?.sessionId ?? ""));
+      const closedId = String(msg.params?.sessionId ?? "");
+      sessions.delete(closedId);
+      closedSessions.add(closedId);
       send({ id: msg.id, result: {} });
       break;
     case "session/set_config_option": {
@@ -152,7 +174,7 @@ async function handle(line: string): Promise<void> {
       };
       const session = sessions.get(params.sessionId)!;
       session.turn += 1;
-      if (mode === "slow") {
+      if (has("slow")) {
         pendingPrompts.set(params.sessionId, msg.id!);
         break;
       }
@@ -194,10 +216,12 @@ async function handle(line: string): Promise<void> {
         ? "[since] "
         : "";
       const roots =
-        mode === "roots"
+        has("roots")
           ? `[roots=${session.additionalDirectories.join(",")}] `
           : "";
-      if (mode === "tool") {
+      const mcps =
+        has("mcps") ? `[mcps=${session.mcpNames.join(",")}] ` : "";
+      if (has("tool")) {
         await callSendMessage(
           session,
           `${since}${nudge}tool#${session.turn}: ${text}`,
@@ -215,12 +239,12 @@ async function handle(line: string): Promise<void> {
         send({ id: msg.id, result: { stopReason: "end_turn" } });
         break;
       }
-      if (mode === "silent") {
+      if (has("silent")) {
         send({ id: msg.id, result: { stopReason: "end_turn" } });
         break;
       }
       for (const chunk of [
-        `${model}${intro}${catchup}${since}${nudge}${roots}echo#${session.turn}: `,
+        `${model}${intro}${catchup}${since}${nudge}${roots}${mcps}echo#${session.turn}: `,
         text,
       ]) {
         send({
@@ -239,7 +263,10 @@ async function handle(line: string): Promise<void> {
     }
     default:
       if (msg.id !== undefined) {
-        send({ id: msg.id, error: { code: -32601, message: "method not found" } });
+        send({
+          id: msg.id,
+          error: { code: -32601, message: "method not found" },
+        });
       }
   }
 }
@@ -254,6 +281,18 @@ function findPhiMcp(params: Record<string, unknown> | undefined) {
       }>;
     }
   ).mcpServers?.find((server) => server.name === "phi");
+}
+
+function readMcpNames(params: Record<string, unknown> | undefined): string[] {
+  const value = params?.mcpServers;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((server) =>
+      typeof server === "object" && server !== null && "name" in server
+        ? String(server.name)
+        : "",
+    )
+    .filter(Boolean);
 }
 
 function readAdditionalDirectories(

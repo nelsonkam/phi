@@ -5,6 +5,8 @@ import { migrate } from "@/db/migrate";
 import type {
   ActivityItem,
   Channel,
+  CheckpointTrigger,
+  GitCheckpoint,
   Message,
   MessageAuthor,
   Thread,
@@ -47,14 +49,15 @@ export interface ThreadSessionBinding {
   model: string | null;
   config: Record<string, string | boolean>;
   lastSeenSeq: number;
+  mcpFingerprint: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export type SaveThreadSessionBinding = Omit<
   ThreadSessionBinding,
-  "createdAt" | "updatedAt"
->;
+  "createdAt" | "updatedAt" | "mcpFingerprint"
+> & { mcpFingerprint?: string };
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -279,6 +282,29 @@ export class PhiStore {
     }));
   }
 
+  // Threads whose latest message is an unread agent reply and nobody is
+  // mid-turn — the same "waiting" gate the sidebar badge and channel dots use.
+  countWaitingThreads(workspaceId: string): number {
+    const row = this.db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n
+         FROM threads t
+         JOIN messages m ON m.thread_id = t.id AND m.seq = t.last_seq
+         LEFT JOIN thread_reads r ON r.thread_id = t.id
+         WHERE t.workspace_id = ?
+           AND t.turn_active = 0
+           AND m.author = 'agent'
+           AND EXISTS (
+             SELECT 1
+             FROM messages unread
+             WHERE unread.thread_id = t.id
+               AND unread.seq > COALESCE(r.last_read_seq, 0)
+           )`,
+      )
+      .get(workspaceId);
+    return row?.n ?? 0;
+  }
+
   markThreadRead(threadId: string): boolean {
     const result = this.db
       .query(
@@ -334,14 +360,15 @@ export class PhiStore {
     this.db
       .query(
         `INSERT INTO thread_agent_sessions
-           (thread_id, harness_id, agent_name, session_id, model, config_json, last_seen_seq, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (thread_id, harness_id, agent_name, session_id, model, config_json, last_seen_seq, mcp_fingerprint, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id, agent_name) DO UPDATE SET
            harness_id = excluded.harness_id,
            session_id = excluded.session_id,
            model = excluded.model,
            config_json = excluded.config_json,
            last_seen_seq = excluded.last_seen_seq,
+           mcp_fingerprint = excluded.mcp_fingerprint,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -352,6 +379,7 @@ export class PhiStore {
         input.model,
         JSON.stringify(input.config),
         input.lastSeenSeq,
+        input.mcpFingerprint ?? "absent",
         existing?.createdAt ?? now,
         now,
       );
@@ -519,6 +547,73 @@ export class PhiStore {
     };
   }
 
+  insertCheckpoint(input: {
+    id: string;
+    workspaceId: string;
+    commitSha: string;
+    trigger: CheckpointTrigger;
+    triggerThreadId?: string | null;
+    createdAt?: string;
+  }): GitCheckpoint {
+    const existing = this.checkpointBySha(input.commitSha);
+    if (existing) return existing;
+    const createdAt = input.createdAt ?? new Date().toISOString();
+    this.db
+      .query(
+        `INSERT INTO git_checkpoints
+           (id, workspace_id, commit_sha, trigger, trigger_thread_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.workspaceId,
+        input.commitSha,
+        input.trigger,
+        input.triggerThreadId ?? null,
+        createdAt,
+      );
+    return this.checkpointBySha(input.commitSha)!;
+  }
+
+  listCheckpoints(workspaceId: string): GitCheckpoint[] {
+    return this.db
+      .query<CheckpointRow, [string]>(
+        `SELECT * FROM git_checkpoints
+         WHERE workspace_id = ?
+         ORDER BY ordinal DESC`,
+      )
+      .all(workspaceId)
+      .map(checkpointFromRow);
+  }
+
+  checkpointById(id: string): GitCheckpoint | null {
+    const row = this.db
+      .query<CheckpointRow, [string]>("SELECT * FROM git_checkpoints WHERE id = ?")
+      .get(id);
+    return row ? checkpointFromRow(row) : null;
+  }
+
+  checkpointBySha(sha: string): GitCheckpoint | null {
+    const row = this.db
+      .query<CheckpointRow, [string]>(
+        "SELECT * FROM git_checkpoints WHERE commit_sha = ?",
+      )
+      .get(sha);
+    return row ? checkpointFromRow(row) : null;
+  }
+
+  latestCheckpoint(workspaceId: string): GitCheckpoint | null {
+    const row = this.db
+      .query<CheckpointRow, [string]>(
+        `SELECT * FROM git_checkpoints
+         WHERE workspace_id = ?
+         ORDER BY ordinal DESC
+         LIMIT 1`,
+      )
+      .get(workspaceId);
+    return row ? checkpointFromRow(row) : null;
+  }
+
   private emit(change: StoreChange): void {
     this.onChange?.(change);
     for (const listener of this.listeners) listener(change);
@@ -607,6 +702,7 @@ interface ThreadSessionRow {
   model: string | null;
   config_json: string;
   last_seen_seq: number;
+  mcp_fingerprint: string;
   created_at: string;
   updated_at: string;
 }
@@ -650,6 +746,7 @@ function threadSessionFromRow(row: ThreadSessionRow): ThreadSessionBinding {
     model: row.model,
     config: JSON.parse(row.config_json) as Record<string, string | boolean>,
     lastSeenSeq: row.last_seen_seq,
+    mcpFingerprint: row.mcp_fingerprint,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -664,5 +761,25 @@ function channelFromRow(row: ChannelRow): Channel {
     folders: JSON.parse(row.folders_json) as string[],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+interface CheckpointRow {
+  id: string;
+  workspace_id: string;
+  commit_sha: string;
+  trigger: string;
+  trigger_thread_id: string | null;
+  created_at: string;
+}
+
+function checkpointFromRow(row: CheckpointRow): GitCheckpoint {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    commitSha: row.commit_sha,
+    trigger: row.trigger as CheckpointTrigger,
+    triggerThreadId: row.trigger_thread_id,
+    createdAt: row.created_at,
   };
 }

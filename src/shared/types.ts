@@ -65,6 +65,35 @@ export interface ActivityItem {
   unreadCount: number;
 }
 
+export interface ActivityPage {
+  activity: ActivityItem[];
+  waitingCount: number;
+}
+
+export type CheckpointTrigger =
+  | "baseline"
+  | "turn"
+  | "startup"
+  | "manual"
+  | "shutdown";
+
+export interface GitCheckpoint {
+  id: string;
+  workspaceId: string;
+  commitSha: string;
+  trigger: CheckpointTrigger;
+  triggerThreadId: string | null;
+  createdAt: string;
+}
+
+export interface CheckpointHealth {
+  status: "ok" | "degraded";
+  error: string | null;
+  lastSha: string | null;
+}
+
+export type RestoreScope = "scratch" | "all";
+
 export interface ThreadTurn {
   threadId: string;
   active: boolean;

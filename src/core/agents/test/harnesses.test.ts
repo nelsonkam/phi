@@ -1,5 +1,10 @@
 import { test, expect } from "bun:test";
-import { detectHarnesses, harnessEntry, KNOWN_HARNESSES } from "../harnesses";
+import {
+  acpClientCapabilities,
+  detectHarnesses,
+  harnessEntry,
+  KNOWN_HARNESSES,
+} from "../harnesses";
 
 test("detects every known harness with an install state and hint", () => {
   const statuses = detectHarnesses();
@@ -20,4 +25,17 @@ test("launches Cursor ACP with repeated additional directory flags", () => {
     "/projects/docs",
     "acp",
   ]);
+});
+
+test("advertises parameterized model picker only for Cursor", () => {
+  expect(acpClientCapabilities("cursor")).toEqual({
+    fs: { readTextFile: false, writeTextFile: false },
+    _meta: { parameterizedModelPicker: true },
+  });
+  expect(acpClientCapabilities("codex")).toEqual({
+    fs: { readTextFile: false, writeTextFile: false },
+  });
+  expect(acpClientCapabilities("claude-code")).toEqual({
+    fs: { readTextFile: false, writeTextFile: false },
+  });
 });

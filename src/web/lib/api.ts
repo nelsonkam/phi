@@ -1,5 +1,5 @@
 import type {
-  ActivityItem,
+  ActivityPage,
   Agent,
   AgentLoadError,
   Channel,
@@ -32,7 +32,7 @@ export function fetchThreads(
 export function fetchActivity(
   before: number | undefined,
   limit: number,
-): Promise<{ activity: ActivityItem[] }> {
+): Promise<ActivityPage> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (before !== undefined) params.set("before", String(before));
   return get(`/activity?${params}`);

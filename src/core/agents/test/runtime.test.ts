@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tempDir } from "@/testing/tmpdir";
 import { PhiStore } from "@/core/store/store";
 import { ensureWorkspace } from "@/core/workspace";
@@ -9,6 +10,7 @@ import type { MessageRouting } from "@/core/agents/routing";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import type { Channel } from "@/shared/types";
+import { CheckpointBusyError, CheckpointService } from "@/core/checkpoints";
 
 const FAKE_AGENT = join(import.meta.dir, "fixtures", "fake-acp-agent.ts");
 
@@ -19,7 +21,8 @@ interface Fixture {
   mcpPort: number;
   mcpTokens: McpTokenRegistry;
   launches: Array<{ harnessId: string; additionalDirectories?: string[] }>;
-  done: () => void;
+  checkpoints: CheckpointService | null;
+  done: () => Promise<void>;
 }
 
 async function fixture(options?: {
@@ -29,6 +32,7 @@ async function fixture(options?: {
   sessionIdleMs?: number;
   hostIdleMs?: number;
   hopBudget?: number;
+  withCheckpoints?: boolean;
   routeUserContent?: ConstructorParameters<
     typeof AgentRuntime
   >[2]["routeUserContent"];
@@ -52,6 +56,10 @@ async function fixture(options?: {
     fetch: (req) => mcpHandler(req),
   });
   const launches: Fixture["launches"] = [];
+  const checkpoints = options?.withCheckpoints
+    ? new CheckpointService(store, workspace.rootPath)
+    : null;
+  if (checkpoints) await checkpoints.initialize();
   const runtime = new AgentRuntime(store, workspace.rootPath, {
     mcpPort: mcpServer.port!,
     mcpTokens,
@@ -60,18 +68,15 @@ async function fixture(options?: {
     hopBudget: options?.hopBudget,
     routeUserContent: options?.routeUserContent,
     routeAgentContent: options?.routeAgentContent,
+    ...(checkpoints ? { checkpoints } : {}),
     resolveCommand: (harnessId, additionalDirectories) => {
       launches.push({ harnessId, additionalDirectories });
-      return [
-        process.execPath,
-        FAKE_AGENT,
-        ...(options?.agentArgs ?? []),
-      ];
+      return [process.execPath, FAKE_AGENT, ...(options?.agentArgs ?? [])];
     },
   });
   const channel = store.listChannels(workspace.id)[0]!;
-  const done = () => {
-    runtime.close();
+  const done = async () => {
+    await runtime.close();
     void mcpServer.stop(true);
     store.close();
   };
@@ -82,6 +87,7 @@ async function fixture(options?: {
     mcpPort: mcpServer.port!,
     mcpTokens,
     launches,
+    checkpoints,
     done,
   };
 }
@@ -120,7 +126,43 @@ test("a user message gets the agent's reply appended to its thread", async () =>
     via: "turn-text-fallback",
   });
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
-  done();
+  await done();
+});
+
+test("a settled workspace captures one checkpoint", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  ensureWorkspace(workspace.rootPath);
+  await writeDefaultAgent(workspace.rootPath, {
+    harness: "claude-code",
+    model: "smart",
+  });
+  const checkpoints = new CheckpointService(store, workspace.rootPath);
+  await checkpoints.initialize();
+  const before = store.listCheckpoints(workspace.id).length;
+  const mcpTokens = new McpTokenRegistry();
+  const mcpHandler = createMcpHandler(store, mcpTokens);
+  const mcpServer = Bun.serve({ port: 0, fetch: (req) => mcpHandler(req) });
+  const runtime = new AgentRuntime(store, workspace.rootPath, {
+    mcpPort: mcpServer.port!,
+    mcpTokens,
+    checkpoints,
+    resolveCommand: () => [process.execPath, FAKE_AGENT],
+  });
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "checkpoint me",
+  });
+  writeFileSync(join(workspace.rootPath, "channels", "t.md"), "hi\n");
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+  await checkpoints.flush();
+  expect(store.listCheckpoints(workspace.id).length).toBeGreaterThan(before);
+  await runtime.close();
+  void mcpServer.stop(true);
+  store.close();
 });
 
 test("send_message is delivered live and suppresses private turn text", async () => {
@@ -157,7 +199,7 @@ test("send_message is delivered live and suppresses private turn text", async ()
   });
   expect(activeWhenDelivered).toBe(true);
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
-  done();
+  await done();
 });
 
 test("a silent turn becomes a system error", async () => {
@@ -176,7 +218,7 @@ test("a silent turn becomes a system error", async () => {
   const reply = store.listMessages(thread.id)[1]!;
   expect(reply.author).toBe("system");
   expect(reply.content).toContain("ended the turn without a reply");
-  done();
+  await done();
 });
 
 test("rejects harnesses without HTTP MCP support", async () => {
@@ -196,7 +238,199 @@ test("rejects harnesses without HTTP MCP support", async () => {
     "does not support HTTP MCP",
   );
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
-  done();
+  await done();
+});
+
+test("announces workspace MCP servers alongside phi", async () => {
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["mcps"],
+  });
+  writeFileSync(
+    join(store.defaultWorkspace().rootPath, ".agents", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        remote: { url: "https://example.com/mcp" },
+      },
+    }),
+  );
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hello",
+  });
+
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+
+  expect(store.listMessages(thread.id)[1]!.content).toContain(
+    "[mcps=remote,phi]",
+  );
+  await done();
+});
+
+test("rejects workspace MCP transports the harness does not advertise", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  writeFileSync(
+    join(store.defaultWorkspace().rootPath, ".agents", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        events: { type: "sse", url: "https://example.com/sse", headers: {} },
+      },
+    }),
+  );
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hello",
+  });
+
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+
+  expect(store.listMessages(thread.id)[1]!.content).toContain(
+    'does not support SSE MCP required by server "events"',
+  );
+  await done();
+});
+
+test("refreshes a live session when workspace MCP configuration changes", async () => {
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["mcps", "reject-closed"],
+  });
+  const configPath = join(
+    store.defaultWorkspace().rootPath,
+    ".agents",
+    "mcp.json",
+  );
+  const writeRemote = (name: string) =>
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          [name]: { type: "http", url: "https://example.com/mcp", headers: {} },
+        },
+      }),
+    );
+  writeRemote("first");
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "one",
+  });
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+  const firstSessionId = store.getThreadSession(thread.id)!.sessionId;
+
+  writeRemote("second");
+  const second = store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "two",
+  });
+  runtime.handleUserMessage(second);
+  await runtime.settled(thread.id);
+
+  const replies = store
+    .listMessages(thread.id)
+    .filter((item) => item.author === "agent")
+    .map((item) => item.content);
+  expect(replies[0]).toContain("[mcps=first,phi]");
+  expect(replies[1]).toContain("[mcps=second,phi]");
+  expect(store.getThreadSession(thread.id)!.sessionId).not.toBe(firstSessionId);
+  expect(store.getThreadSession(thread.id)!.mcpFingerprint).toHaveLength(64);
+  await done();
+});
+
+test("replaces a durable session when MCP config changed while phi was stopped", async () => {
+  const { store, runtime, channel, mcpPort, mcpTokens, done } = await fixture({
+    agentArgs: ["mcps"],
+  });
+  const configPath = join(
+    store.defaultWorkspace().rootPath,
+    ".agents",
+    "mcp.json",
+  );
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      mcpServers: {
+        first: { url: "https://example.com/mcp" },
+      },
+    }),
+  );
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "one",
+  });
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+  const firstSessionId = store.getThreadSession(thread.id)!.sessionId;
+  await runtime.close();
+
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      mcpServers: {
+        second: { url: "https://example.com/mcp" },
+      },
+    }),
+  );
+  const restarted = new AgentRuntime(
+    store,
+    store.defaultWorkspace().rootPath,
+    {
+      mcpPort,
+      mcpTokens,
+      resolveCommand: () => [process.execPath, FAKE_AGENT, "mcps"],
+    },
+  );
+  const second = store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "two",
+  });
+  restarted.handleUserMessage(second);
+  await restarted.settled(thread.id);
+
+  expect(store.getThreadSession(thread.id)!.sessionId).not.toBe(firstSessionId);
+  expect(
+    store
+      .listMessages(thread.id)
+      .filter((item) => item.author === "agent")
+      .at(-1)!.content,
+  ).toContain("[mcps=second,phi]");
+  await restarted.close();
+  await done();
+});
+
+test("surfaces resolved stdio commands when a session starts with workspace MCP", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const envPath = Bun.which("env");
+  expect(envPath).toBeTruthy();
+  writeFileSync(
+    join(store.defaultWorkspace().rootPath, ".agents", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        local: { command: "env", args: ["true"] },
+      },
+    }),
+  );
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hello",
+  });
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+
+  const notice = store
+    .listMessages(thread.id)
+    .find((item) => item.metadata.reason === "workspace-mcp-stdio");
+  expect(notice?.author).toBe("system");
+  expect(notice?.content).toContain('"local"');
+  expect(notice?.content).toContain(`\`${envPath}\``);
+  await done();
 });
 
 test("recovers only threads with a persisted active turn", async () => {
@@ -221,7 +455,7 @@ test("recovers only threads with a persisted active turn", async () => {
   // Clients key the retry affordance off this flag.
   expect(recovery.metadata.retriable).toBe(true);
   expect(store.listMessages(idle.thread.id)).toHaveLength(1);
-  done();
+  await done();
 });
 
 test("cancelTurn is a no-op when the thread is idle", async () => {
@@ -232,7 +466,7 @@ test("cancelTurn is a no-op when the thread is idle", async () => {
     content: "idle",
   });
   expect(runtime.cancelTurn(thread.id)).toBe(false);
-  done();
+  await done();
 });
 
 test("cancelTurn skips a turn that has not started and leaves no error", async () => {
@@ -250,7 +484,7 @@ test("cancelTurn skips a turn that has not started and leaves no error", async (
   expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
     "user",
   ]);
-  done();
+  await done();
 });
 
 test("a message after cancel still runs", async () => {
@@ -279,7 +513,7 @@ test("a message after cancel still runs", async () => {
   expect(replies).toHaveLength(1);
   expect(replies[0]!.content).toContain("echo#1: second");
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
-  done();
+  await done();
 });
 
 test("cancelTurn stops an in-flight prompt via session/cancel", async () => {
@@ -301,7 +535,7 @@ test("cancelTurn stops an in-flight prompt via session/cancel", async () => {
   expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
     "user",
   ]);
-  done();
+  await done();
 });
 
 test("cancel during a routing reject does not append a system error", async () => {
@@ -334,7 +568,7 @@ test("cancel during a routing reject does not append a system error", async () =
   expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
     "user",
   ]);
-  done();
+  await done();
 });
 
 test("cancel during fallback reply routing does not append the agent reply", async () => {
@@ -367,7 +601,7 @@ test("cancel during fallback reply routing does not append the agent reply", asy
   expect(store.listMessages(thread.id).map((item) => item.author)).toEqual([
     "user",
   ]);
-  done();
+  await done();
 });
 
 test("cancelTurn drops queued follow-up turns", async () => {
@@ -395,7 +629,7 @@ test("cancelTurn drops queued follow-up turns", async () => {
   expect(
     store.listMessages(thread.id).filter((item) => item.author === "agent"),
   ).toHaveLength(0);
-  done();
+  await done();
 });
 
 test("turns in one thread serialize and reuse one session", async () => {
@@ -427,7 +661,7 @@ test("turns in one thread serialize and reuse one session", async () => {
     "[model=smart] [intro] echo#1: first",
     "[model=smart] echo#2: second",
   ]);
-  done();
+  await done();
 });
 
 test("a turn sees messages that landed after its trigger; the covered turn coalesces", async () => {
@@ -458,7 +692,7 @@ test("a turn sees messages that landed after its trigger; the covered turn coale
   // skipped instead of prompting a stale re-answer.
   expect(replies).toEqual(["[model=smart] [intro] [since] echo#1: first"]);
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
-  done();
+  await done();
 });
 
 test("a silent speculative pass does not swallow a later deliberate turn", async () => {
@@ -492,7 +726,7 @@ test("a silent speculative pass does not swallow a later deliberate turn", async
     .filter((m) => m.author === "agent" && m.metadata.agent === "reviewer");
   expect(reviewerReplies).toHaveLength(1);
   expect(reviewerReplies[0]!.content).toContain("echo#2: please review");
-  done();
+  await done();
 });
 
 test("threads get separate sessions on one pooled harness process", async () => {
@@ -521,7 +755,7 @@ test("threads get separate sessions on one pooled harness process", async () => 
     "[model=smart] [intro] echo#1: thread two",
   );
   expect(launches).toHaveLength(1);
-  done();
+  await done();
 });
 
 test("passes channel folders as ACP additional directories", async () => {
@@ -550,7 +784,7 @@ test("passes channel folders as ACP additional directories", async () => {
   expect(launches).toEqual([
     { harnessId: "claude-code", additionalDirectories: undefined },
   ]);
-  done();
+  await done();
 });
 
 test("evicts idle sessions and empty pooled hosts", async () => {
@@ -579,11 +813,13 @@ test("evicts idle sessions and empty pooled hosts", async () => {
   expect(store.listMessages(root.thread.id).at(-1)!.content).toBe(
     "[model=smart] echo#2: second",
   );
-  done();
+  await done();
 });
 
 test("pools Cursor by channel folder set and passes launch-time roots", async () => {
-  const { store, runtime, launches, done } = await fixture({ harness: "cursor" });
+  const { store, runtime, launches, done } = await fixture({
+    harness: "cursor",
+  });
   const workspace = store.defaultWorkspace();
   const firstFolders = [tempDir(), tempDir()];
   const secondFolders = [tempDir()];
@@ -620,7 +856,7 @@ test("pools Cursor by channel folder set and passes launch-time roots", async ()
     { harnessId: "cursor", additionalDirectories: firstFolders },
     { harnessId: "cursor", additionalDirectories: secondFolders },
   ]);
-  done();
+  await done();
 });
 
 test("a thread resumes its durable session after the live process closes", async () => {
@@ -666,8 +902,8 @@ test("a thread resumes its durable session after the live process closes", async
   expect(store.listMessages(first.thread.id).at(-1)!.content).toBe(
     "[model=smart] echo#2: second",
   );
-  resumedRuntime.close();
-  done();
+  await resumedRuntime.close();
+  await done();
 });
 
 test("session/load restores context without duplicating replayed messages", async () => {
@@ -682,7 +918,7 @@ test("session/load restores context without duplicating replayed messages", asyn
   runtime.handleUserMessage(first.message);
   await runtime.settled(first.thread.id);
   const binding = store.getThreadSession(first.thread.id)!;
-  runtime.close();
+  await runtime.close();
 
   const loadedRuntime = new AgentRuntime(
     store,
@@ -714,8 +950,8 @@ test("session/load restores context without duplicating replayed messages", asyn
     // No "[intro]" after session/load: the restored history has the preamble.
     "[model=smart] echo#2: second",
   ]);
-  loadedRuntime.close();
-  done();
+  await loadedRuntime.close();
+  await done();
 });
 
 test("a non-resumable harness replaces the session with recovered context", async () => {
@@ -730,7 +966,7 @@ test("a non-resumable harness replaces the session with recovered context", asyn
   runtime.handleUserMessage(first.message);
   await runtime.settled(first.thread.id);
   const originalSessionId = store.getThreadSession(first.thread.id)!.sessionId;
-  runtime.close();
+  await runtime.close();
 
   const replacementRuntime = new AgentRuntime(
     store,
@@ -756,8 +992,8 @@ test("a non-resumable harness replaces the session with recovered context", asyn
   expect(store.listMessages(first.thread.id).at(-1)!.content).toBe(
     "[model=smart] [intro] [catchup] echo#1: second",
   );
-  replacementRuntime.close();
-  done();
+  await replacementRuntime.close();
+  await done();
 });
 
 test("a missing durable harness session is replaced", async () => {
@@ -770,7 +1006,7 @@ test("a missing durable harness session is replaced", async () => {
   runtime.handleUserMessage(first.message);
   await runtime.settled(first.thread.id);
   const originalSessionId = store.getThreadSession(first.thread.id)!.sessionId;
-  runtime.close();
+  await runtime.close();
 
   const replacementRuntime = new AgentRuntime(
     store,
@@ -795,8 +1031,8 @@ test("a missing durable harness session is replaced", async () => {
   expect(store.listMessages(first.thread.id).at(-1)!.content).toBe(
     "[model=smart] [intro] [catchup] echo#1: second",
   );
-  replacementRuntime.close();
-  done();
+  await replacementRuntime.close();
+  await done();
 });
 
 test("a missing default agent becomes a system error message", async () => {
@@ -813,7 +1049,7 @@ test("a missing default agent becomes a system error message", async () => {
   expect(reply.author).toBe("system");
   expect(reply.kind).toBe("error");
   expect(reply.content).toContain("no default agent");
-  done();
+  await done();
 });
 
 test("auth_required surfaces the harness login hint", async () => {
@@ -832,7 +1068,7 @@ test("auth_required surfaces the harness login hint", async () => {
   expect(reply.author).toBe("system");
   expect(reply.content).toContain("not logged in");
   expect(reply.content).toContain("claude /login");
-  done();
+  await done();
 });
 
 test("a leading mention lazily creates a separate agent session with catch-up", async () => {
@@ -874,7 +1110,7 @@ test("a leading mention lazily creates a separate agent session with catch-up", 
     mentions: ["reviewer"],
     routedTo: ["reviewer"],
   });
-  done();
+  await done();
 });
 
 test("unmentioned replies stay with the agent that started the thread", async () => {
@@ -907,7 +1143,7 @@ test("unmentioned replies stay with the agent that started the thread", async ()
   expect(reply.metadata).toEqual({ mentions: [], routedTo: ["reviewer"] });
   // The workspace default was never pulled into the thread.
   expect(store.getThreadSession(root.thread.id, "default")).toBeNull();
-  done();
+  await done();
 });
 
 test("agent messages reach peers verbatim", async () => {
@@ -940,7 +1176,7 @@ test("agent messages reach peers verbatim", async () => {
   expect(reply.content).toBe(
     "[model=smart] [intro] [catchup] echo#1: @reviewer’s pass is clean",
   );
-  done();
+  await done();
 });
 
 test("a mid-body mention wakes the agent speculatively and silence is legal", async () => {
@@ -972,7 +1208,7 @@ test("a mid-body mention wakes the agent speculatively and silence is legal", as
   // The speculative agent joined the thread: its session binding exists and
   // its catch-up cursor advanced past what it was shown.
   expect(store.getThreadSession(root.thread.id, "reviewer")).not.toBeNull();
-  done();
+  await done();
 });
 
 test("a speculative agent that contributes replies through send_message", async () => {
@@ -1006,7 +1242,7 @@ test("a speculative agent that contributes replies through send_message", async 
   // included the primary's reply as since-then context.
   expect(agentMessages[0]!.content).toBe(`tool#1: ${content}`);
   expect(agentMessages[1]!.content).toBe(`[since] [nudge] tool#1: ${content}`);
-  done();
+  await done();
 });
 
 test("the hop budget pauses further agent-triggered turns until a user message", async () => {
@@ -1056,12 +1292,14 @@ test("the hop budget pauses further agent-triggered turns until a user message",
   runtime.handleUserMessage(continuation);
   await runtime.settled(root.thread.id);
   expect(
-    store.listMessages(root.thread.id).filter(
-      (message) =>
-        message.author === "agent" && message.metadata.agent === "reviewer",
-    ),
+    store
+      .listMessages(root.thread.id)
+      .filter(
+        (message) =>
+          message.author === "agent" && message.metadata.agent === "reviewer",
+      ),
   ).toHaveLength(5);
-  done();
+  await done();
 });
 
 test("a budget-tripped multi-recipient handoff names every dropped recipient", async () => {
@@ -1096,7 +1334,7 @@ test("a budget-tripped multi-recipient handoff names every dropped recipient", a
     },
   });
   expect(pause.content).toContain("@reviewer, @implementer were next");
-  done();
+  await done();
 });
 
 test("multiple handoff recipients take serialized turns in list order", async () => {
@@ -1133,5 +1371,210 @@ test("multiple handoff recipients take serialized turns in list order", async ()
       .map((message) => message.metadata.agent),
   ).toEqual(["reviewer", "implementer"]);
   expect(store.getThread(root.thread.id)!.turnActive).toBe(false);
-  done();
+  await done();
+});
+
+test("the start barrier queues new turns and restore ignores pending work", async () => {
+  const { store, runtime, channel, checkpoints, done } = await fixture({
+    withCheckpoints: true,
+  });
+  const workspace = store.defaultWorkspace();
+  mkdirSync(join(workspace.rootPath, "channels"), { recursive: true });
+  const baseline = store.latestCheckpoint(workspace.id)!;
+
+  let enteredExclusive!: () => void;
+  const exclusiveStarted = new Promise<void>((resolve) => {
+    enteredExclusive = resolve;
+  });
+  let releaseExclusive!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    releaseExclusive = resolve;
+  });
+
+  const exclusive = runtime.withIdleExclusive(async () => {
+    enteredExclusive();
+    await hold;
+    return checkpoints!.restore({
+      checkpointId: baseline.id,
+      scope: "scratch",
+    });
+  });
+  await exclusiveStarted;
+
+  const first = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "wait behind restore",
+  });
+  runtime.handleUserMessage(first.message);
+
+  const second = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "also queued",
+  });
+  runtime.handleUserMessage(second.message);
+
+  await Bun.sleep(50);
+  expect(
+    store
+      .listMessages(first.thread.id)
+      .filter((item) => item.author === "agent"),
+  ).toHaveLength(0);
+  expect(
+    store
+      .listMessages(second.thread.id)
+      .filter((item) => item.author === "agent"),
+  ).toHaveLength(0);
+
+  releaseExclusive();
+  const restored = await exclusive;
+  expect(restored.noop).toBe(true);
+
+  await Promise.all([
+    runtime.settled(first.thread.id),
+    runtime.settled(second.thread.id),
+  ]);
+  expect(
+    store
+      .listMessages(first.thread.id)
+      .filter((item) => item.author === "agent"),
+  ).toHaveLength(1);
+  expect(
+    store
+      .listMessages(second.thread.id)
+      .filter((item) => item.author === "agent"),
+  ).toHaveLength(1);
+  await done();
+});
+
+test("restore is busy only for a live turn, not queued-behind-barrier work", async () => {
+  const { store, runtime, channel, checkpoints, done } = await fixture({
+    agentArgs: ["slow"],
+    withCheckpoints: true,
+  });
+  const workspace = store.defaultWorkspace();
+  const baseline = store.latestCheckpoint(workspace.id)!;
+
+  const live = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hang",
+  });
+  runtime.handleUserMessage(live.message);
+  await Bun.sleep(100);
+  expect(runtime.hasActiveWork()).toBe(true);
+  try {
+    await runtime.withIdleExclusive(() =>
+      checkpoints!.restore({ checkpointId: baseline.id, scope: "scratch" }),
+    );
+    throw new Error("expected busy");
+  } catch (error) {
+    expect(error).toBeInstanceOf(CheckpointBusyError);
+  }
+  expect(runtime.cancelTurn(live.thread.id)).toBe(true);
+  await runtime.settled(live.thread.id);
+
+  let enteredExclusive!: () => void;
+  const exclusiveStarted = new Promise<void>((resolve) => {
+    enteredExclusive = resolve;
+  });
+  let releaseExclusive!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    releaseExclusive = resolve;
+  });
+  const exclusive = runtime.withIdleExclusive(async () => {
+    enteredExclusive();
+    await hold;
+    return checkpoints!.restore({
+      checkpointId: baseline.id,
+      scope: "scratch",
+    });
+  });
+  await exclusiveStarted;
+
+  const queued = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "behind the barrier",
+  });
+  runtime.handleUserMessage(queued.message);
+  await Bun.sleep(30);
+  releaseExclusive();
+  await expect(exclusive).resolves.toMatchObject({ noop: true });
+  expect(runtime.cancelTurn(queued.thread.id)).toBe(true);
+  await runtime.settled(queued.thread.id);
+  await done();
+});
+
+test("shutdown with an active and queued turn does not deadlock", async () => {
+  const { store, runtime, channel, checkpoints, done } = await fixture({
+    agentArgs: ["slow"],
+    withCheckpoints: true,
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "active",
+  });
+  runtime.handleUserMessage(message);
+  await Bun.sleep(100);
+  runtime.handleUserMessage(
+    store.appendMessage(thread.id, {
+      author: "user",
+      kind: "message",
+      content: "queued",
+    }),
+  );
+  writeFileSync(
+    join(store.defaultWorkspace().rootPath, "channels", "shutdown.md"),
+    "bye\n",
+  );
+  await runtime.shutdown();
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  const rows = store.listCheckpoints(store.defaultWorkspace().id);
+  expect(rows.some((row) => row.trigger === "shutdown")).toBe(true);
+  expect(checkpoints!.health().status).toBe("ok");
+  await done();
+});
+
+test("two overlapping turns capture once at global idle", async () => {
+  const { store, runtime, channel, checkpoints, done } = await fixture({
+    agentArgs: ["slow"],
+    withCheckpoints: true,
+  });
+  const workspace = store.defaultWorkspace();
+  const before = store.listCheckpoints(workspace.id).length;
+  mkdirSync(join(workspace.rootPath, "channels"), { recursive: true });
+  writeFileSync(join(workspace.rootPath, "channels", "overlap.md"), "both\n");
+
+  const a = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "one",
+  });
+  const b = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "two",
+  });
+  runtime.handleUserMessage(a.message);
+  runtime.handleUserMessage(b.message);
+  await Bun.sleep(100);
+  expect(store.getThread(a.thread.id)!.turnActive).toBe(true);
+  expect(store.getThread(b.thread.id)!.turnActive).toBe(true);
+
+  expect(runtime.cancelTurn(a.thread.id)).toBe(true);
+  expect(runtime.cancelTurn(b.thread.id)).toBe(true);
+  await Promise.all([
+    runtime.settled(a.thread.id),
+    runtime.settled(b.thread.id),
+  ]);
+  await checkpoints!.flush();
+  const turnRows = store
+    .listCheckpoints(workspace.id)
+    .filter((row) => row.trigger === "turn");
+  expect(store.listCheckpoints(workspace.id).length).toBe(before + 1);
+  expect(turnRows).toHaveLength(1);
+  await done();
 });

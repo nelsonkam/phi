@@ -82,6 +82,21 @@ export function harnessEntry(id: string): HarnessCatalogEntry | null {
   return CATALOG.find((entry) => entry.id === id) ?? null;
 }
 
+// Cursor-only ACP extension. Without it, Cursor advertises exploded variant
+// IDs such as `grok-4.6[effort=high,fast=true]` and omits the non-fast
+// choice. With it, model stays a base ID and `fast` / `effort` become
+// separate config options.
+const PARAMETERIZED_MODEL_PICKER_META_KEY = "parameterizedModelPicker";
+
+export function acpClientCapabilities(harnessId: string) {
+  return {
+    fs: { readTextFile: false as const, writeTextFile: false as const },
+    ...(harnessId === "cursor"
+      ? { _meta: { [PARAMETERIZED_MODEL_PICKER_META_KEY]: true } }
+      : {}),
+  };
+}
+
 // Availability is a live fact about the machine, so it is probed on demand
 // and never stored.
 export function detectHarnesses(): HarnessStatus[] {

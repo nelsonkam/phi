@@ -55,16 +55,20 @@ implemented by the harnesses phi launches. Not worth building on yet.
 
 ## 3. Announcement and capability gating
 
-`AgentRuntime.ensureSession` passes the following in `session/new` and again
-with a freshly minted token in `session/resume` or `session/load`:
+`AgentRuntime.ensureSession` passes workspace servers from `.agents/mcp.json`
+(see [workspace-mcp.md](./workspace-mcp.md)) followed by Phi's internal server
+in `session/new`, `session/resume`, and `session/load`:
 
 ```ts
-mcpServers: [{
-  type: "http",
-  name: "phi",
-  url: `http://localhost:${port}/mcp`,
-  headers: [{ name: "Authorization", value: `Bearer ${token}` }],
-}]
+mcpServers: [
+  ...workspaceServers,
+  {
+    type: "http",
+    name: "phi",
+    url: `http://localhost:${port}/mcp`,
+    headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+  },
+]
 ```
 
 ACP obligates the harness (the MCP client) to attach these headers to every

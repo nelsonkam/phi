@@ -4,6 +4,12 @@ import { detectHarnesses } from "@/core/agents/harnesses";
 import { HarnessCapabilityService } from "@/core/agents/capabilities";
 import { AgentRuntime } from "@/core/agents/runtime";
 import { ensureWorkspace } from "@/core/workspace";
+import {
+  CheckpointBusyError,
+  CheckpointHttpError,
+  CheckpointService,
+} from "@/core/checkpoints";
+import { parseRestoreScope } from "@/core/restore-scope";
 import type { ServerFrame } from "@/shared/types";
 import {
   getAgent,
@@ -19,10 +25,12 @@ import { createMessageSearch } from "@/core/search/message-search";
 
 const DEFAULT_PORT = 3141;
 
-export function startServer(): void {
+export async function startServer(): Promise<void> {
   const store = new PhiStore();
   const workspace = store.defaultWorkspace();
   ensureWorkspace(workspace.rootPath);
+  const checkpoints = new CheckpointService(store, workspace.rootPath);
+  await checkpoints.initialize();
   const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
   const mcpTokens = new McpTokenRegistry();
   const harnessCapabilities = new HarnessCapabilityService(workspace.rootPath);
@@ -34,6 +42,7 @@ export function startServer(): void {
   const runtime = new AgentRuntime(store, workspace.rootPath, {
     mcpPort: port,
     mcpTokens,
+    checkpoints,
     ...(Number.isInteger(hopBudget) && hopBudget >= 0 ? { hopBudget } : {}),
   });
   const fileHandler = createFileHandler(workspace.rootPath, store);
@@ -46,13 +55,14 @@ export function startServer(): void {
   );
   runtime.recoverInterruptedTurns();
 
+  let shuttingDown = false;
   const server = Bun.serve({
     port,
     development: process.env.NODE_ENV !== "production" && {
       hmr: true,
       console: true,
     },
-    routes: {
+    routes: haltRoutes({
       "/*": index,
       "/mcp": {
         GET: mcpHandler,
@@ -60,7 +70,55 @@ export function startServer(): void {
         DELETE: mcpHandler,
       },
       "/api/v1/health": () =>
-        Response.json({ ok: true, workspaceId: workspace.id }),
+        Response.json({
+          ok: checkpoints.health().status === "ok",
+          workspaceId: workspace.id,
+          checkpoints: checkpoints.health(),
+        }),
+      "/api/v1/checkpoints": {
+        GET: (req, server) => {
+          if (!isLoopback(req, server)) {
+            return Response.json({ error: "loopback only" }, { status: 403 });
+          }
+          return Response.json({ checkpoints: checkpoints.list() });
+        },
+      },
+      "/api/v1/checkpoints/:id/restore": {
+        POST: async (req, server) => {
+          if (!isLoopback(req, server)) {
+            return Response.json({ error: "loopback only" }, { status: 403 });
+          }
+          const body = (await req.json().catch(() => null)) as {
+            scope?: unknown;
+            confirm?: unknown;
+          } | null;
+          const scope = parseRestoreScope(body?.scope);
+          if (!scope) {
+            return Response.json(
+              { error: "scope must be scratch or all" },
+              { status: 400 },
+            );
+          }
+          try {
+            const result = await runtime.withIdleExclusive(() =>
+              checkpoints.restore({
+                checkpointId: req.params.id,
+                scope,
+                confirm: body?.confirm === true,
+              }),
+            );
+            return Response.json(result);
+          } catch (error) {
+            if (error instanceof CheckpointBusyError) {
+              return Response.json({ error: error.message }, { status: 409 });
+            }
+            if (error instanceof CheckpointHttpError) {
+              return Response.json({ error: error.message }, { status: error.status });
+            }
+            throw error;
+          }
+        },
+      },
       "/api/v1/channels": () =>
         Response.json({ channels: store.listChannels(workspace.id) }),
       "/api/v1/activity": {
@@ -73,6 +131,7 @@ export function startServer(): void {
               before,
               limit: Math.min(limit, 100),
             }),
+            waitingCount: store.countWaitingThreads(workspace.id),
           });
         },
       },
@@ -237,8 +296,11 @@ export function startServer(): void {
           return Response.json(result);
         },
       },
-    },
+    }, () => shuttingDown),
     fetch(req, server) {
+      if (shuttingDown) {
+        return Response.json({ error: "shutting down" }, { status: 503 });
+      }
       const url = new URL(req.url);
       if (url.pathname === "/ws") {
         if (server.upgrade(req)) return;
@@ -273,14 +335,15 @@ export function startServer(): void {
   };
 
   // Harness subprocesses do not die with the server; kill them explicitly.
-  let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    runtime.close();
+    await server.stop();
+    await runtime.shutdown();
     await messageSearch.close().catch((error) => {
       console.error("Failed to close message search", error);
     });
+    store.close();
     process.exit(0);
   };
   process.once("SIGINT", () => void shutdown());
@@ -297,6 +360,65 @@ async function messageContent(req: Request): Promise<string | null> {
   return typeof content === "string" && content.trim().length > 0
     ? content.trim()
     : null;
+}
+
+const HTTP_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+]);
+
+function haltRoutes<T extends Record<string, unknown>>(
+  routes: T,
+  stopping: () => boolean,
+): T {
+  const halted: Record<string, unknown> = {};
+  const stopped = () =>
+    Response.json({ error: "shutting down" }, { status: 503 });
+  for (const [path, value] of Object.entries(routes)) {
+    if (typeof value === "function") {
+      halted[path] = (...args: unknown[]) =>
+        stopping() ? stopped() : (value as (...args: unknown[]) => unknown)(...args);
+    } else if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      const wrapMethods = entries.some(
+        ([method, fn]) => HTTP_METHODS.has(method) && typeof fn === "function",
+      );
+      if (!wrapMethods) {
+        halted[path] = value;
+        continue;
+      }
+      const methods: Record<string, unknown> = {};
+      for (const [method, fn] of entries) {
+        methods[method] =
+          typeof fn === "function"
+            ? (...args: unknown[]) =>
+                stopping() ? stopped() : (fn as (...args: unknown[]) => unknown)(...args)
+            : fn;
+      }
+      halted[path] = methods;
+    } else {
+      halted[path] = value;
+    }
+  }
+  return halted as T;
+}
+
+function isLoopback(
+  req: Request,
+  server: { requestIP(request: Request): { address: string } | null },
+): boolean {
+  const address = server.requestIP(req)?.address ?? "";
+  return (
+    address === "127.0.0.1" ||
+    address === "::1" ||
+    address === "::ffff:127.0.0.1" ||
+    address === ":ffff:127.0.0.1"
+  );
 }
 
 function positiveInteger(value: string | null): number | undefined {

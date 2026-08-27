@@ -12,6 +12,18 @@
       "runtimeExecutable": "env",
       "runtimeArgs": ["PHI_PORT=3142", "bun", "run", "dev"],
       "port": 3142
+    },
+    {
+      "name": "phi-scratch",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "PHI_PORT=3143",
+        "PHI_ROOT=/private/tmp/claude-501/-Users-nelson-work-phi/7358281e-56c3-4102-aa3a-35ec8e63b168/scratchpad/phi-root",
+        "bun",
+        "run",
+        "dev"
+      ],
+      "port": 3143
     }
   ]
 }

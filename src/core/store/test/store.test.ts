@@ -8,6 +8,9 @@ import m001 from "@/db/migrations/001_init.sql" with { type: "text" };
 import m002 from "@/db/migrations/002_thread_turn_state.sql" with { type: "text" };
 import m003 from "@/db/migrations/003_thread_sessions.sql" with { type: "text" };
 import m004 from "@/db/migrations/004_message_search.sql" with { type: "text" };
+import m005 from "@/db/migrations/005_multi_agent.sql" with { type: "text" };
+import m006 from "@/db/migrations/006_channel_folders.sql" with { type: "text" };
+import m007 from "@/db/migrations/007_thread_reads.sql" with { type: "text" };
 
 test("migrates a fresh database and seeds defaults", () => {
   const root = tempDir();
@@ -292,6 +295,59 @@ test("markThreadRead advances a monotonic watermark and reports unknown threads"
   store.close();
 });
 
+test("countWaitingThreads counts unread agent replies and ignores working or read threads", () => {
+  const { store, channel } = chatFixture();
+  const waiting = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Waiting",
+  });
+  store.appendMessage(waiting.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "Reply",
+    metadata: { agent: "default" },
+  });
+
+  store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "You last",
+  });
+
+  const working = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Working",
+  });
+  store.appendMessage(working.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "Still going",
+    metadata: { agent: "default" },
+  });
+  store.setThreadTurn(working.thread.id, true, "default");
+
+  const read = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Already seen",
+  });
+  store.appendMessage(read.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "Seen reply",
+    metadata: { agent: "default" },
+  });
+  store.markThreadRead(read.thread.id);
+
+  expect(store.countWaitingThreads(waiting.thread.workspaceId)).toBe(1);
+
+  store.markThreadRead(waiting.thread.id);
+  expect(store.countWaitingThreads(waiting.thread.workspaceId)).toBe(0);
+  store.close();
+});
+
 test("markAllThreadsRead clears every thread in the workspace", () => {
   const { store, channel } = chatFixture();
   const first = store.createThread(channel.id, {
@@ -441,4 +497,107 @@ test("multi-agent migration preserves history and re-keys existing sessions", ()
       .get()!.count,
   ).toBe(1);
   migrated.close();
+});
+
+test("checkpoint latest follows insertion order when timestamps and ids disagree", () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  store.insertCheckpoint({
+    id: "cp_zzz",
+    workspaceId: workspace.id,
+    commitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    trigger: "baseline",
+    createdAt,
+  });
+  store.insertCheckpoint({
+    id: "cp_aaa",
+    workspaceId: workspace.id,
+    commitSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    trigger: "turn",
+    createdAt,
+  });
+  expect(store.latestCheckpoint(workspace.id)?.id).toBe("cp_aaa");
+  expect(store.listCheckpoints(workspace.id).map((row) => row.id)).toEqual([
+    "cp_aaa",
+    "cp_zzz",
+  ]);
+  store.close();
+});
+
+test("009 copies legacy 008 rows by rowid, not timestamp or id", () => {
+  const root = tempDir();
+  const db = new Database(join(root, "phi.db"), { create: true });
+  db.run("PRAGMA foreign_keys = ON");
+  for (const sql of [m001, m002, m003, m004, m005, m006, m007]) {
+    db.run(sql);
+  }
+  db.run(`
+    CREATE TABLE git_checkpoints (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+      commit_sha TEXT NOT NULL UNIQUE,
+      trigger TEXT NOT NULL CHECK (trigger IN ('baseline', 'turn', 'startup', 'manual', 'shutdown')),
+      trigger_thread_id TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  db.run(`
+    CREATE INDEX git_checkpoints_workspace_created
+      ON git_checkpoints (workspace_id, created_at, id)
+  `);
+  db.run(
+    "CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+  );
+  for (const id of [
+    "001_init",
+    "002_thread_turn_state",
+    "003_thread_sessions",
+    "004_message_search",
+    "005_multi_agent",
+    "006_channel_folders",
+    "007_thread_reads",
+    "008_git_checkpoints",
+  ]) {
+    db.query(
+      "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+    ).run(id, "2026-01-01T00:00:00.000Z");
+  }
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  db.query(
+    "INSERT INTO workspaces (id, name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+  ).run("ws_default", "default", join(root, "workspace"), createdAt, createdAt);
+  db.query(
+    `INSERT INTO git_checkpoints
+       (id, workspace_id, commit_sha, trigger, trigger_thread_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "cp_zzz",
+    "ws_default",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseline",
+    null,
+    createdAt,
+  );
+  db.query(
+    `INSERT INTO git_checkpoints
+       (id, workspace_id, commit_sha, trigger, trigger_thread_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "cp_aaa",
+    "ws_default",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "turn",
+    null,
+    createdAt,
+  );
+  db.close();
+
+  const store = new PhiStore(root);
+  expect(store.latestCheckpoint("ws_default")?.id).toBe("cp_aaa");
+  expect(store.listCheckpoints("ws_default").map((row) => row.id)).toEqual([
+    "cp_aaa",
+    "cp_zzz",
+  ]);
+  store.close();
 });

@@ -4,7 +4,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type { NewSessionResponse } from "@agentclientprotocol/sdk";
 import { connectAcpProcess } from "./acp-process";
-import { harnessEntry } from "./harnesses";
+import { acpClientCapabilities, harnessEntry } from "./harnesses";
 import type { HarnessConfig, HarnessConfigOption } from "@/shared/types";
 
 const SESSION_TIMEOUT_MS = 20_000;
@@ -48,9 +48,7 @@ export async function listHarnessConfig(
       "initialize",
       {
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-        },
+        clientCapabilities: acpClientCapabilities(harnessId),
       },
       { cancellationSignal: controller.signal },
     );

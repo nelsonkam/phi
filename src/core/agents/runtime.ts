@@ -1,6 +1,7 @@
 import { PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type {
   InitializeResponse,
+  McpServer,
   NewSessionResponse,
   PromptResponse,
   RequestPermissionRequest,
@@ -8,7 +9,7 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { connectAcpProcess } from "./acp-process";
 import type { AcpProcess } from "./acp-process";
-import { harnessEntry } from "./harnesses";
+import { acpClientCapabilities, harnessEntry } from "./harnesses";
 import { DEFAULT_AGENT_NAME, loadAgent } from "./registry";
 import type { AgentDefinition } from "./registry";
 import {
@@ -20,6 +21,9 @@ import type { MessageRouting } from "./routing";
 import type { PhiStore } from "@/core/store/store";
 import type { ThreadSessionBinding } from "@/core/store/store";
 import type { Message } from "@/shared/types";
+import type { CheckpointService } from "@/core/checkpoints";
+import { CheckpointBusyError } from "@/core/checkpoints";
+import { loadWorkspaceMcpConfig } from "./mcp-config";
 
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 // JSON-RPC error code ACP agents use for `auth_required`.
@@ -54,6 +58,7 @@ interface ThreadSession {
   sessionId: string;
   agentName: string;
   mcpToken: string;
+  mcpFingerprint: string;
   // False until the messaging preamble has reached the harness session, either
   // by this process sending it or by resuming a session whose history has it.
   primed: boolean;
@@ -98,6 +103,7 @@ export interface AgentRuntimeOptions {
   // Test hooks: delay or reject routing so cancel races can be asserted.
   routeUserContent?: typeof routeUserContent;
   routeAgentContent?: typeof routeAgentContent;
+  checkpoints?: CheckpointService;
 }
 
 // Routes stored user messages to agent sessions and writes replies back
@@ -132,6 +138,10 @@ export class AgentRuntime {
   // Bumped by cancelTurn; queued work enqueued at an older epoch is skipped.
   private readonly cancelEpoch = new Map<string, number>();
   private readonly turnAborts = new Map<string, AbortController>();
+  private readonly checkpoints: CheckpointService | null;
+  private workspaceActive = 0;
+  private startBarrier: Promise<void> | null = null;
+  private releaseStart: (() => void) | null = null;
   private closed = false;
 
   constructor(
@@ -148,6 +158,7 @@ export class AgentRuntime {
     this.hostIdleMs = options.hostIdleMs ?? 30_000;
     this.routeUserContentFn = options.routeUserContent ?? routeUserContent;
     this.routeAgentContentFn = options.routeAgentContent ?? routeAgentContent;
+    this.checkpoints = options.checkpoints ?? null;
     this.resolveCommand =
       options.resolveCommand ??
       ((harnessId, additionalDirectories) =>
@@ -212,6 +223,7 @@ export class AgentRuntime {
   }
 
   private enqueueMessage(message: Message, routedTo?: string[]): void {
+    if (this.closed) return;
     const threadId = message.threadId;
     // Flip the working flag synchronously, before the caller's HTTP response
     // is sent, so the thread.turn frame can never trail the send round-trip.
@@ -223,11 +235,44 @@ export class AgentRuntime {
       this.store.setThreadTurn(threadId, true, agentName);
     }
     const prev = this.turns.get(threadId) ?? Promise.resolve();
-    // runTurn reports every failure as a message, so the chain never rejects.
     this.turns.set(
       threadId,
-      prev.then(() => this.processMessage(message, routedTo, epoch)),
+      prev.then(() => this.runQueued(message, routedTo, epoch)),
     );
+  }
+
+  private async runQueued(
+    message: Message,
+    routedTo: string[] | undefined,
+    epoch: number,
+  ): Promise<void> {
+    while (true) {
+      if (this.closed || this.wasCancelled(message.threadId, epoch)) {
+        this.dropPending(message.threadId);
+        return;
+      }
+      if (this.startBarrier) {
+        await this.waitForStartBarrier();
+        continue;
+      }
+      break;
+    }
+    this.workspaceActive += 1;
+    try {
+      await this.processMessage(message, routedTo, epoch);
+    } finally {
+      this.workspaceActive -= 1;
+      await this.maybeIdleCheckpoint(message.threadId);
+    }
+  }
+
+  private dropPending(threadId: string): void {
+    const remaining = (this.pendingTurns.get(threadId) ?? 1) - 1;
+    if (remaining > 0) this.pendingTurns.set(threadId, remaining);
+    else {
+      this.pendingTurns.delete(threadId);
+      this.store.setThreadTurn(threadId, false, null);
+    }
   }
 
   private async processMessage(
@@ -271,7 +316,12 @@ export class AgentRuntime {
           this.agentHops.set(threadId, nextHop);
         }
         if (this.wasCancelled(threadId, epoch)) return;
-        await this.runTurn(message, agentName, speculative.has(agentName), epoch);
+        await this.runTurn(
+          message,
+          agentName,
+          speculative.has(agentName),
+          epoch,
+        );
       }
     } catch (error) {
       if (this.wasCancelled(threadId, epoch)) return;
@@ -290,6 +340,70 @@ export class AgentRuntime {
         this.store.setThreadTurn(threadId, false, null);
       }
     }
+  }
+
+  hasActiveWork(): boolean {
+    if (this.closed || this.workspaceActive > 0) return true;
+    for (const count of this.pendingTurns.values()) {
+      if (count > 0) return true;
+    }
+    return false;
+  }
+
+  async withIdleExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    while (true) {
+      if (this.startBarrier) {
+        await this.waitForStartBarrier();
+        continue;
+      }
+      // Queued-behind-barrier work increments pendingTurns; that must not 409
+      // restore. Only a live turn or shutdown is busy.
+      if (this.closed || this.workspaceActive > 0) {
+        throw new CheckpointBusyError();
+      }
+      this.holdStartBarrier();
+      break;
+    }
+    try {
+      return await fn();
+    } finally {
+      this.releaseStartBarrier();
+    }
+  }
+
+  private async maybeIdleCheckpoint(threadId: string): Promise<void> {
+    if (this.closed || !this.checkpoints) return;
+    if (this.startBarrier) {
+      await this.waitForStartBarrier();
+      return;
+    }
+    if (this.workspaceActive > 0) return;
+    this.holdStartBarrier();
+    try {
+      if (this.closed || this.workspaceActive > 0) return;
+      await this.checkpoints.checkpoint({ trigger: "turn", threadId });
+    } catch {
+      // Capture failures degrade health; they must not fail the user turn.
+    } finally {
+      this.releaseStartBarrier();
+    }
+  }
+
+  private holdStartBarrier(): void {
+    if (this.startBarrier) return;
+    this.startBarrier = new Promise((resolve) => {
+      this.releaseStart = resolve;
+    });
+  }
+
+  private releaseStartBarrier(): void {
+    this.releaseStart?.();
+    this.startBarrier = null;
+    this.releaseStart = null;
+  }
+
+  private async waitForStartBarrier(): Promise<void> {
+    while (this.startBarrier) await this.startBarrier;
   }
 
   private async resolveRouting(
@@ -348,8 +462,29 @@ export class AgentRuntime {
     }
   }
 
-  close(): void {
+  close(): Promise<void> {
+    return this.shutdown();
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.closed) {
+      await this.waitForStartBarrier();
+      return;
+    }
     this.closed = true;
+    for (const threadId of [...this.pendingTurns.keys()]) {
+      this.cancelTurn(threadId);
+    }
+    await Promise.all([...this.turns.values()]);
+    // Restore / idle capture may still hold the start barrier; wait it out
+    // so the shutdown snapshot is not mid-restore. Do not hold the barrier
+    // ourselves — queued runQueued already dropped after seeing closed.
+    await this.waitForStartBarrier();
+    if (this.checkpoints) {
+      await this.checkpoints.checkpoint({ trigger: "shutdown" });
+      await this.checkpoints.flush();
+      await this.checkpoints.close();
+    }
     for (const session of this.sessions.values()) {
       if (session.idleTimer) clearTimeout(session.idleTimer);
       this.mcpTokens.revoke(session.mcpToken);
@@ -369,14 +504,16 @@ export class AgentRuntime {
   async releaseSession(threadId: string, agentName?: string): Promise<void> {
     const keys = agentName
       ? [sessionKey(threadId, agentName)]
-      : [...this.sessions.keys()].filter((key) => key.startsWith(`${threadId}\0`));
+      : [...this.sessions.keys()].filter((key) =>
+          key.startsWith(`${threadId}\0`),
+        );
     for (const key of keys) {
       const session = this.sessions.get(key);
       if (!session) continue;
       this.dropSessionByKey(key);
       if (
-        session.host.initialized.agentCapabilities?.sessionCapabilities?.close !=
-        null
+        session.host.initialized.agentCapabilities?.sessionCapabilities
+          ?.close != null
       ) {
         await session.host.acp.connection.agent
           .request("session/close", { sessionId: session.sessionId })
@@ -429,7 +566,9 @@ export class AgentRuntime {
             {
               type: "text",
               text: [
-                session.primed ? undefined : messagingPreamble(session.agentName),
+                session.primed
+                  ? undefined
+                  : messagingPreamble(session.agentName),
                 catchUpContext,
                 sinceThen.text,
                 speculative ? SPECULATIVE_WAKE_NOTE : undefined,
@@ -532,19 +671,43 @@ export class AgentRuntime {
     agentName: string,
   ): Promise<ThreadSession> {
     const key = sessionKey(threadId, agentName);
+    const workspaceMcp = await loadWorkspaceMcpConfig(this.workspaceRoot);
     const existing = this.sessions.get(key);
-    if (existing && existing.host.acp.proc.exitCode === null) {
+    if (
+      existing &&
+      existing.host.acp.proc.exitCode === null &&
+      existing.mcpFingerprint === workspaceMcp.fingerprint
+    ) {
       if (existing.idleTimer) clearTimeout(existing.idleTimer);
       existing.idleTimer = null;
       return existing;
     }
-    if (existing) this.dropSessionByKey(key);
-
     const thread = this.store.getThread(threadId);
     if (!thread) throw new Error(`no thread "${threadId}"`);
     const channel = this.store.getChannel(thread.channelId);
     if (!channel) throw new Error(`no channel "${thread.channelId}"`);
     const binding = this.store.getThreadSession(threadId, agentName);
+    // MCP servers are session-defining. Do not resume a live ACP session
+    // after the resolved config changes; adapters are not required to
+    // hot-swap servers on session/resume.
+    const mcpChanged =
+      existing != null
+        ? existing.mcpFingerprint !== workspaceMcp.fingerprint
+        : binding != null &&
+          binding.mcpFingerprint !== workspaceMcp.fingerprint;
+    if (existing) {
+      if (
+        mcpChanged &&
+        existing.sessionId &&
+        existing.host.initialized.agentCapabilities?.sessionCapabilities
+          ?.close != null
+      ) {
+        await existing.host.acp.connection.agent
+          .request("session/close", { sessionId: existing.sessionId })
+          .catch(() => undefined);
+      }
+      this.dropSessionByKey(key);
+    }
     const agent = binding
       ? agentFromBinding(binding)
       : await loadAgent(this.workspaceRoot, agentName);
@@ -569,12 +732,18 @@ export class AgentRuntime {
         `${agent.harness} does not support additional channel folders over ACP`,
       );
     }
+    validateMcpCapabilities(
+      agent.harness,
+      host.initialized,
+      workspaceMcp.servers,
+    );
 
     const session: ThreadSession = {
       host,
       sessionId: "",
       agentName: agent.name,
       mcpToken: "",
+      mcpFingerprint: workspaceMcp.fingerprint,
       primed: false,
       lastSeenSeq: binding?.lastSeenSeq ?? 0,
       turnText: [],
@@ -603,17 +772,21 @@ export class AgentRuntime {
       const exited = proc.exited.then(() => {
         throw new Error(`${agent.harness} exited during session setup`);
       });
-      const mcpServers = this.phiMcpServers(session.mcpToken);
+      const mcpServers = [
+        ...workspaceMcp.servers,
+        ...this.phiMcpServers(session.mcpToken),
+      ];
       const additionalDirectories = supportsAdditionalDirectories
         ? { additionalDirectories: channel.folders }
         : {};
-      let needsNewSession = binding === null;
-      if (binding) {
+      let needsNewSession = binding === null || mcpChanged;
+      if (binding && !mcpChanged) {
         session.sessionId = binding.sessionId;
         host.sessionsById.set(session.sessionId, session);
         try {
           if (
-            host.initialized.agentCapabilities?.sessionCapabilities?.resume != null
+            host.initialized.agentCapabilities?.sessionCapabilities?.resume !=
+            null
           ) {
             await Promise.race([
               connection.agent.request(
@@ -628,9 +801,7 @@ export class AgentRuntime {
               ),
               exited,
             ]);
-          } else if (
-            host.initialized.agentCapabilities?.loadSession === true
-          ) {
+          } else if (host.initialized.agentCapabilities?.loadSession === true) {
             await Promise.race([
               connection.agent.request(
                 "session/load",
@@ -678,7 +849,21 @@ export class AgentRuntime {
           model: agent.model,
           config: agent.config,
           lastSeenSeq: 0,
+          mcpFingerprint: workspaceMcp.fingerprint,
         });
+        const stdioStarted = workspaceMcp.servers.filter(
+          (server) => !("type" in server),
+        );
+        if (stdioStarted.length > 0) {
+          this.store.appendMessage(threadId, {
+            author: "system",
+            kind: "message",
+            content: `Starting workspace MCP stdio ${stdioStarted.length === 1 ? "server" : "servers"}: ${stdioStarted
+              .map((server) => `"${server.name}" (\`${server.command}\`)`)
+              .join(", ")}.`,
+            metadata: { reason: "workspace-mcp-stdio" },
+          });
+        }
       }
 
       // session/load replays history as updates. Phi already has a durable
@@ -785,9 +970,7 @@ export class AgentRuntime {
           "initialize",
           {
             protocolVersion: PROTOCOL_VERSION,
-            clientCapabilities: {
-              fs: { readTextFile: false, writeTextFile: false },
-            },
+            clientCapabilities: acpClientCapabilities(harnessId),
           },
           { cancellationSignal: controller.signal },
         ),
@@ -941,10 +1124,7 @@ export class AgentRuntime {
   ): string {
     const transcript = this.store
       .listMessages(threadId)
-      .filter(
-        (message) =>
-          message.seq > lastSeenSeq && message.seq < beforeSeq,
-      )
+      .filter((message) => message.seq > lastSeenSeq && message.seq < beforeSeq)
       .filter(
         (message) => message.author !== "system" || message.kind !== "error",
       )
@@ -969,10 +1149,7 @@ export class AgentRuntime {
       // An agent sees the messages it sends during its own turn. Stop at the
       // first other row so a user message committed concurrently cannot be
       // skipped by a later self-authored update.
-      if (
-        message.author !== "agent" ||
-        message.metadata.agent !== agentName
-      ) {
+      if (message.author !== "agent" || message.metadata.agent !== agentName) {
         break;
       }
       cursor = message.seq;
@@ -1013,12 +1190,34 @@ export class AgentRuntime {
     if (host.idleTimer) clearTimeout(host.idleTimer);
     if (this.hostIdleMs < 0) return;
     host.idleTimer = setTimeout(() => {
-      if (host.sessionsById.size > 0 || this.hosts.get(host.key) !== host) return;
+      if (host.sessionsById.size > 0 || this.hosts.get(host.key) !== host)
+        return;
       this.hosts.delete(host.key);
       host.acp.connection.close();
       host.acp.proc.kill();
     }, this.hostIdleMs);
     host.idleTimer.unref?.();
+  }
+}
+
+function validateMcpCapabilities(
+  harnessId: string,
+  initialized: InitializeResponse,
+  servers: McpServer[],
+): void {
+  const capabilities = initialized.agentCapabilities?.mcpCapabilities;
+  for (const server of servers) {
+    if (!("type" in server)) continue; // ACP requires every agent to support stdio.
+    if (server.type === "http" && capabilities?.http !== true) {
+      throw new Error(
+        `${harnessId} does not support HTTP MCP required by server "${server.name}"`,
+      );
+    }
+    if (server.type === "sse" && capabilities?.sse !== true) {
+      throw new Error(
+        `${harnessId} does not support SSE MCP required by server "${server.name}"`,
+      );
+    }
   }
 }
 

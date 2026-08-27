@@ -195,10 +195,20 @@ workspace/
 
 ## 7. Git policy
 
+Implemented for slice 1 as a linear undo log over the **managed workspace only**. Attached channel folders are never inspected.
+
+- One full-tree snapshot on global idle (`git add -A` on an isolated temp index). Phi is the only committer (`Phi <phi@local>`, `--no-verify`).
+- Restore is path-limited: `scratch` leaves `.agents/**` and guide files alone; `all` requires `{ confirm: true }`. Never `reset --hard`.
+- Capture uses a workspace start barrier so snapshots are not mid-turn. Shutdown cancels turns, then takes one `shutdown` checkpoint.
+- Phi-owned repos only (Phi-Checkpoint trailers). Foreign `.git` directories degrade and are not modified.
+- List/restore HTTP is loopback-only until pairing-token auth exists.
+
+Historical notes below (two-stream commits, `reset --hard`) are superseded by that slice.
+
 Git is retained solely as a robust undo/redo log over agent mutations. Since
 Phi owns the repo outright (no user works in it), branches, merges,
 never-discard protections, baseline-commit ceremony, and shadow-ref schemes
-are all unnecessary:
+are all unnecessary.
 
 - Checkpoints form a linear snapshot stream over the workspace.
 - Restore = `git reset --hard <sha>`, optionally path-limited to one
