@@ -3,6 +3,11 @@ import { DEFAULT_AGENT_NAME, loadAgents } from "./registry";
 export interface MessageRouting {
   mentions: string[];
   routedTo: string[];
+  // The subset of routedTo woken by a non-leading mention in a user message.
+  // Speculative recipients are shown the message but may legally end their
+  // turn without replying; absent (or empty) means every recipient is a
+  // deliberate addressee. Only user routing sets this.
+  speculative?: string[];
 }
 
 // Address-shaped only: the handle must be followed by whitespace, `,`, `:`,
@@ -20,6 +25,13 @@ export function leadingMention(content: string): string | null {
 // ("@reviewer's") and emails ("a@b.com") stay prose.
 const BODY_MENTION = /(?:^|[\s([{])@([a-z0-9][a-z0-9-]*)(?=$|[\s,.:;!?)\]}])/g;
 
+// Known handles mentioned anywhere in `content`, deduplicated in order of
+// first appearance.
+function knownBodyMentions(content: string, known: Set<string>): string[] {
+  const handles = [...content.matchAll(BODY_MENTION)].map((match) => match[1]!);
+  return [...new Set(handles)].filter((handle) => known.has(handle));
+}
+
 // Known peer handles mentioned anywhere in `content`, excluding the author.
 // send_message uses this on messages that routed to nobody: a handoff written
 // as prose ("done — @reviewer should look") never wakes anyone, so the send
@@ -30,9 +42,8 @@ export async function unroutedPeerMentions(
   authorAgent: string,
 ): Promise<string[]> {
   const known = await knownAgentNames(workspaceRoot);
-  const handles = [...content.matchAll(BODY_MENTION)].map((match) => match[1]!);
-  return [...new Set(handles)].filter(
-    (handle) => handle !== authorAgent && known.has(handle),
+  return knownBodyMentions(content, known).filter(
+    (handle) => handle !== authorAgent,
   );
 }
 
@@ -63,20 +74,32 @@ export class ExplicitRecipientRequiredError extends Error {
 // routed to — so a thread opened with "@researcher ..." keeps researcher for
 // unmentioned replies. A stale fallback (agent since deleted) degrades to the
 // workspace default rather than failing the message.
+//
+// The primary addressee — the leading mention, else the fallback — is always
+// routedTo[0] and is expected to reply. Any other known handle mentioned
+// anywhere in the body is woken speculatively, Slack-style: the user typed
+// the name, so waking is deterministic and legible, but those agents may
+// judge the mention a mere reference and stay silent.
 export async function routeUserContent(
   workspaceRoot: string,
   content: string,
   fallbackAgent: string = DEFAULT_AGENT_NAME,
 ): Promise<MessageRouting> {
-  const mentioned = leadingMention(content);
   const known = await knownAgentNames(workspaceRoot);
-  if (mentioned && known.has(mentioned)) {
-    return { mentions: [mentioned], routedTo: [mentioned] };
-  }
-  const fallback = known.has(fallbackAgent)
-    ? fallbackAgent
-    : DEFAULT_AGENT_NAME;
-  return { mentions: [], routedTo: [fallback] };
+  const mentions = knownBodyMentions(content, known);
+  const leading = leadingMention(content);
+  const primary =
+    leading && known.has(leading)
+      ? leading
+      : known.has(fallbackAgent)
+        ? fallbackAgent
+        : DEFAULT_AGENT_NAME;
+  const speculative = mentions.filter((handle) => handle !== primary);
+  return {
+    mentions,
+    routedTo: [primary, ...speculative],
+    ...(speculative.length > 0 ? { speculative } : {}),
+  };
 }
 
 // Agent messages route only from the structured `to` list; content never

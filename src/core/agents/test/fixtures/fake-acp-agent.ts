@@ -161,12 +161,17 @@ async function handle(line: string): Promise<void> {
       const catchup = promptText.includes("Prior conversation from Phi")
         ? "[catchup] "
         : "";
+      // Surfaces the speculative-wake note so tests can assert which turns
+      // were told that staying silent is acceptable.
+      const nudge = promptText.includes("staying silent is a normal outcome")
+        ? "[nudge] "
+        : "";
       const roots =
         mode === "roots"
           ? `[roots=${session.additionalDirectories.join(",")}] `
           : "";
       if (mode === "tool") {
-        await callSendMessage(session, `tool#${session.turn}: ${text}`);
+        await callSendMessage(session, `${nudge}tool#${session.turn}: ${text}`);
         send({
           method: "session/update",
           params: {
@@ -185,7 +190,7 @@ async function handle(line: string): Promise<void> {
         break;
       }
       for (const chunk of [
-        `${model}${intro}${catchup}${roots}echo#${session.turn}: `,
+        `${model}${intro}${catchup}${nudge}${roots}echo#${session.turn}: `,
         text,
       ]) {
         send({

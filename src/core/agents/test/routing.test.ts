@@ -21,16 +21,12 @@ async function workspaceWithAgents(): Promise<string> {
   return root;
 }
 
-test("user routing uses only a valid leading mention", async () => {
+test("a leading mention is the primary addressee", async () => {
   const root = await workspaceWithAgents();
 
   expect(await routeUserContent(root, "  @reviewer check this")).toEqual({
     mentions: ["reviewer"],
     routedTo: ["reviewer"],
-  });
-  expect(await routeUserContent(root, "ask @reviewer about this")).toEqual({
-    mentions: [],
-    routedTo: ["default"],
   });
   expect(await routeUserContent(root, "@missing check this")).toEqual({
     mentions: [],
@@ -39,6 +35,40 @@ test("user routing uses only a valid leading mention", async () => {
   expect(await routeUserContent(root, "@reviewer: check this")).toEqual({
     mentions: ["reviewer"],
     routedTo: ["reviewer"],
+  });
+});
+
+test("a mid-body mention wakes that agent speculatively", async () => {
+  const root = await workspaceWithAgents();
+
+  // The primary (fallback) still leads; the mentioned agent rides along.
+  expect(await routeUserContent(root, "ask @reviewer about this")).toEqual({
+    mentions: ["reviewer"],
+    routedTo: ["default", "reviewer"],
+    speculative: ["reviewer"],
+  });
+  // Leading primary plus a mid-body peer, deduplicated.
+  expect(
+    await routeUserContent(
+      root,
+      "@reviewer check this, then loop in @default and @reviewer",
+    ),
+  ).toEqual({
+    mentions: ["reviewer", "default"],
+    routedTo: ["reviewer", "default"],
+    speculative: ["default"],
+  });
+  // A mid-body mention of the primary itself is not speculative.
+  expect(
+    await routeUserContent(root, "keep going, and yes @default I mean you"),
+  ).toEqual({
+    mentions: ["default"],
+    routedTo: ["default"],
+  });
+  // Unknown handles stay inert wherever they appear.
+  expect(await routeUserContent(root, "ask @missing about this")).toEqual({
+    mentions: [],
+    routedTo: ["default"],
   });
 });
 

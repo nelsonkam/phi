@@ -633,7 +633,7 @@ test("unmentioned replies stay with the agent that started the thread", async ()
     content: "@reviewer own this thread",
     metadata: { mentions: ["reviewer"], routedTo: ["reviewer"] },
   });
-  runtime.handleUserMessage(root.message, "reviewer");
+  runtime.handleUserMessage(root.message, ["reviewer"]);
   await runtime.settled(root.thread.id);
 
   const reply = store.appendMessage(root.thread.id, {
@@ -683,6 +683,71 @@ test("agent messages reach peers verbatim", async () => {
   expect(reply.content).toBe(
     "[model=smart] [intro] [catchup] echo#1: @reviewer’s pass is clean",
   );
+  done();
+});
+
+test("a mid-body mention wakes the agent speculatively and silence is legal", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the request.",
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hello, loop in @reviewer if needed",
+  });
+  runtime.handleUserMessage(root.message);
+  await runtime.settled(root.thread.id);
+
+  // The primary replied; the speculative agent's stray turn text was
+  // discarded without an "ended the turn without a reply" error.
+  const messages = store.listMessages(root.thread.id);
+  const agentMessages = messages.filter((m) => m.author === "agent");
+  expect(agentMessages).toHaveLength(1);
+  expect(agentMessages[0]!.metadata.agent).toBe("default");
+  expect(messages.filter((m) => m.kind === "error")).toHaveLength(0);
+  expect(root.message.metadata).toMatchObject({
+    mentions: ["reviewer"],
+    routedTo: ["default", "reviewer"],
+    speculative: ["reviewer"],
+  });
+  // The speculative agent joined the thread: its session binding exists and
+  // its catch-up cursor advanced past what it was shown.
+  expect(store.getThreadSession(root.thread.id, "reviewer")).not.toBeNull();
+  done();
+});
+
+test("a speculative agent that contributes replies through send_message", async () => {
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["tool"],
+  });
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the request.",
+  });
+  // Pre-routed like serve.ts: metadata carries the speculative split.
+  const content = "plan this out and get @reviewer input";
+  const routing = await runtime.routeUserContent(content);
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content,
+    metadata: { ...routing },
+  });
+  runtime.handleUserMessage(root.message, routing.routedTo);
+  await runtime.settled(root.thread.id);
+
+  const agentMessages = store
+    .listMessages(root.thread.id)
+    .filter((m) => m.author === "agent");
+  expect(agentMessages.map((m) => m.metadata.agent)).toEqual([
+    "default",
+    "reviewer",
+  ]);
+  // Only the speculative turn carried the stay-silent note.
+  expect(agentMessages[0]!.content).toBe(`tool#1: ${content}`);
+  expect(agentMessages[1]!.content).toBe(`[nudge] tool#1: ${content}`);
   done();
 });
 

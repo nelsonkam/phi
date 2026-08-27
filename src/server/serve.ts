@@ -88,7 +88,7 @@ export function startServer(): void {
             content,
             metadata: { ...routing },
           });
-          runtime.handleUserMessage(result.message, routing.routedTo[0]);
+          runtime.handleUserMessage(result.message, routing.routedTo);
           return Response.json(result, { status: 201 });
         },
       },
@@ -120,7 +120,7 @@ export function startServer(): void {
             content,
             metadata: { ...routing },
           });
-          runtime.handleUserMessage(message, routing.routedTo[0]);
+          runtime.handleUserMessage(message, routing.routedTo);
           return Response.json({ message }, { status: 201 });
         },
       },

@@ -22,7 +22,7 @@ for the named agent with the transcript it hasn't seen.
 | ----- | -------- |
 | Interaction medium | The durable thread message log; agents never communicate off-log |
 | Session binding | `(thread_id, agent_name)` — one harness session per agent per thread |
-| Routing | User messages: leading `@name` only (else the thread default). Agent handoff: explicit `to` on `send_message`. Mid-message @-names are not recipients |
+| Routing | User messages: the leading `@name` (else the thread default) is the primary addressee; other known handles anywhere in the body wake speculatively and may stay silent. Agent handoff: explicit `to` on `send_message`; @-names in agent messages never route |
 | Turn-taking | One turn at a time per thread, regardless of agent; the existing per-thread promise chain, made agent-aware |
 | Shared context | Per-`(thread, agent)` catch-up: transcript delta since the agent's last turn, prefixed to the prompt (generalizes `recoveryContext`) |
 | Loop prevention | Hop budget on consecutive agent-triggered turns; reset by user messages; an agent cannot enqueue itself |
@@ -95,13 +95,18 @@ their session binding. Mid-body name drops do not join anyone.
 
 A message triggers a turn for the agents it addresses:
 
-- **User messages**: only a leading `@name` (after optional whitespace) is
-  an address, and only when it is address-shaped — followed by whitespace,
-  `,`, `:`, or the end of the message — so "@reviewer's notes" is prose, not
-  routing. If it matches the registry, that agent gets the turn; anything
-  else `@mentioned` later in the body is ordinary text. No leading mention
-  routes to the thread's default agent — the current behavior is the
-  fallback, so single-agent threads work exactly as today.
+- **User messages**: the *primary addressee* — a leading, address-shaped
+  `@name` (followed by whitespace, `,`, `:`, or the end of the message, so
+  "@reviewer's notes" is prose), else the thread's default agent — gets a
+  turn and is expected to reply, exactly as before. In addition, any other
+  known handle mentioned address-shaped *anywhere* in the body wakes that
+  agent **speculatively**, Slack-style: the user typed the name, so waking
+  stays deterministic and legible. A speculative recipient is told the
+  message mentions it rather than addresses it; it replies through
+  `send_message` only if it has something to contribute, and ending its
+  turn silently is a legal outcome — its stray turn text is discarded, not
+  posted. Turn order is primary first, then speculative recipients in order
+  of appearance, on the same per-thread chain.
 - **Agent messages**: routing comes only from `send_message`'s optional
   `to` list (agent names, one turn each in list order). Message text never
   routes an agent message: mentions anywhere in the body are display-only,
@@ -115,12 +120,18 @@ A message triggers a turn for the agents it addresses:
   follow up with a routed message. No `to` means no turn — the message is
   a statement in the log, not a ping.
 - `to` with multiple names enqueues one turn per recipient, in list order,
-  on the same thread chain (§5). A user message still routes to at most one
-  agent (the leading mention, or the default).
+  on the same thread chain (§5). A user message routes to its primary
+  addressee plus any speculatively mentioned agents, recorded in the
+  message's routing metadata (`speculative` marks the subset of `routedTo`
+  that may stay silent).
 
-This is the v1 heuristic: addressing looks like Slack (`@architect draft
-the plan, then have @implementer start` wakes architect only). Waking two
-agents from one user message is out of scope until we need it.
+Addressing looks like Slack: `@architect draft the plan, then have
+@implementer start` makes architect the primary responder and wakes
+implementer speculatively — it sees the plan is coming and can stay silent
+until architect hands off. The host still decides *who wakes*
+deterministically; agent intelligence decides only *whether a speculative
+wake merits a reply*, which is the half of that judgment a model can do
+cheaply and safely.
 
 Parsing is server-side and validates against the registry: an unknown
 `@name` is inert text, never an error — including a leading `@name` that
@@ -200,16 +211,19 @@ one genuinely new safety rule this design introduces:
 
 - A **hop** is a turn triggered by an agent message. The per-thread hop
   counter increments on each hop and resets to zero on any user message.
-- When a routed turn would exceed the budget (default **4**), it is not
+- When a routed turn would exceed the budget (default **8**), it is not
   enqueued. Phi posts a system message instead: the exchange is paused and
-  names who was next, so the user can continue it with one message.
+  names everyone who was still next — a multi-recipient `to` can drop
+  several recipients at once — so the user can continue it with one message.
 - An agent cannot enqueue its own next turn. A `to` that names the author
   is ignored.
 - The budget is a host-enforced invariant, not a prompt instruction.
 
-Four hops covers the useful shapes (hand-off, question, answer, confirmation)
-while making runaway loops structurally impossible. It can become
-configurable per workspace if real usage wants longer chains.
+Eight hops covers real collaboration shapes (draft, review, revise,
+re-review, approve — each recipient turn counts as a hop, so a
+multi-recipient `to` spends several at once) while keeping runaway loops
+structurally impossible. The `PHI_HOP_BUDGET` environment variable overrides
+the default per server.
 
 ## 8. Author model cleanup
 

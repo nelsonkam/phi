@@ -29,7 +29,12 @@ const AUTH_REQUIRED_CODE = -32000;
 // the phi MCP server repeats the same guidance in send_message's tool
 // description and server instructions, so the model sees it every turn
 // regardless.
-export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
+export const MESSAGING_PREAMBLE = `Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
+
+// Framing for a turn triggered by a non-leading mention in a user message:
+// the agent was woken because it was named, not addressed, so silence is a
+// legal outcome and stray turn text is discarded rather than posted.
+export const SPECULATIVE_WAKE_NOTE = `You are seeing this message because it mentions you, not because it is addressed to you. Reply through send_message only if the mention needs something from you; if it is just a reference, end the turn without sending anything — staying silent is a normal outcome here, and text outside send_message is discarded.`;
 
 const RECOVERY_CONTEXT_MAX_CHARS = 16_000;
 
@@ -157,10 +162,10 @@ export class AgentRuntime {
     return typeof agent === "string" ? agent : DEFAULT_AGENT_NAME;
   }
 
-  handleUserMessage(message: Message, routedTo?: string): void {
+  handleUserMessage(message: Message, routedTo?: string[]): void {
     if (message.author !== "user") return;
     this.agentHops.set(message.threadId, 0);
-    this.enqueueMessage(message, routedTo ? [routedTo] : undefined);
+    this.enqueueMessage(message, routedTo);
   }
 
   handleAgentMessage(message: Message, routedTo?: string[]): void {
@@ -198,6 +203,7 @@ export class AgentRuntime {
       message.metadata = metadata;
       this.store.updateMessageMetadata(message.id, metadata);
 
+      const speculative = new Set(routing.speculative ?? []);
       for (const [index, agentName] of routing.routedTo.entries()) {
         if (message.author === "agent") {
           const nextHop = (this.agentHops.get(threadId) ?? 0) + 1;
@@ -220,7 +226,7 @@ export class AgentRuntime {
           }
           this.agentHops.set(threadId, nextHop);
         }
-        await this.runTurn(message, agentName);
+        await this.runTurn(message, agentName, speculative.has(agentName));
       }
     } catch (error) {
       this.store.appendMessage(threadId, {
@@ -250,6 +256,11 @@ export class AgentRuntime {
           ? (message.metadata.mentions as string[])
           : [],
         routedTo,
+        // The caller routed before committing; its speculative split rode in
+        // on the message metadata.
+        ...(Array.isArray(message.metadata.speculative)
+          ? { speculative: message.metadata.speculative as string[] }
+          : {}),
       };
     }
     if (message.author === "user") {
@@ -328,7 +339,11 @@ export class AgentRuntime {
     }
   }
 
-  private async runTurn(message: Message, agentName: string): Promise<void> {
+  private async runTurn(
+    message: Message,
+    agentName: string,
+    speculative = false,
+  ): Promise<void> {
     const threadId = message.threadId;
     const key = sessionKey(threadId, agentName);
     let session: ThreadSession | null = null;
@@ -356,6 +371,7 @@ export class AgentRuntime {
               text: [
                 session.primed ? undefined : MESSAGING_PREAMBLE,
                 catchUpContext,
+                speculative ? SPECULATIVE_WAKE_NOTE : undefined,
                 routedPrompt(
                   message,
                   session.agentName,
@@ -376,6 +392,12 @@ export class AgentRuntime {
         .join("\n\n")
         .trim();
       if (this.mcpTokens.sendCount(session.mcpToken) > 0) {
+        return;
+      }
+      // A speculative wake may legitimately end in silence: contributing
+      // requires the deliberate act of send_message, so stray turn text
+      // (typically "no action needed" reasoning) is discarded, not posted.
+      if (speculative) {
         return;
       }
       if (text.length > 0) {
