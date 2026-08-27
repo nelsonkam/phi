@@ -3,6 +3,36 @@
 Phi is a small knowledge-work harness: a persistent coordinator, a web UI, and
 delegated workers in a shared workspace.
 
+## Install
+
+Each release publishes standalone macOS binaries — no Bun installation
+required. [scripts/install.sh](./scripts/install.sh) picks the binary for this
+Mac, installs it to `~/.local/bin/phi`, and tells you if that directory is not
+on your `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nelsonkam/phi/main/scripts/install.sh | sh
+```
+
+`PHI_INSTALL_DIR` chooses the install directory, `PHI_VERSION` pins a release
+tag instead of the latest, and `PHI_UPDATE_REPO` installs from another
+repository. A private `PHI_UPDATE_REPO` needs authenticated `gh` (`gh auth
+login`); the installer does not send `GITHUB_TOKEN`. Piping a script into a
+shell runs it unread — `curl -fsSL …` on its own prints exactly what would
+run.
+
+Otherwise, download `phi-darwin-arm64` or `phi-darwin-x64` from GitHub
+Releases, make it executable, and run it.
+
+Start the server and UI:
+
+```bash
+phi serve
+```
+
+`phi` with no command does the same. It listens on http://localhost:3141
+(`PHI_PORT` overrides).
+
 ## Source checkout
 
 ```bash
@@ -24,8 +54,9 @@ phi update
 Restart phi afterward to run the new version. `phi update` only works for the
 compiled binary; it refuses a source checkout before any network call.
 
-Set `PHI_UPDATE_REPO` to an alternate `owner/repository`. Private releases use
-`GITHUB_TOKEN` or the authenticated GitHub CLI.
+Set `PHI_UPDATE_REPO` to an alternate `owner/repository`. `phi update` reads
+private releases with `GITHUB_TOKEN` or authenticated `gh`. The installer
+does not: a private install source needs `gh auth login`.
 
 ## Releasing
 
