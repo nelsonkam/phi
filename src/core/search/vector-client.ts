@@ -28,6 +28,14 @@ type VectorWorkerCommand = VectorWorkerRequest extends infer Request
     : never
   : never;
 
+function workerEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 export class VectorWorkerClient implements VectorIndex {
   readonly model: string;
   readonly dimensions: number;
@@ -42,10 +50,10 @@ export class VectorWorkerClient implements VectorIndex {
   constructor(options: VectorWorkerClientOptions) {
     this.model = options.model;
     this.dimensions = options.dimensions;
-    const workerEntry = import.meta.url.endsWith(".js")
-      ? "./core/search/vector-worker.js"
-      : "./vector-worker.ts";
-    this.worker = new Worker(new URL(workerEntry, import.meta.url));
+    this.worker = new Worker(
+      process.env.PHI_VECTOR_WORKER_URL ?? new URL("./vector-worker.ts", import.meta.url).href,
+      { env: workerEnv() },
+    );
     this.worker.onmessage = (event: MessageEvent<VectorWorkerResponse>) => {
       const response = event.data;
       const pending = this.pending.get(response.id);

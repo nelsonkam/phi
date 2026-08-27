@@ -102,7 +102,7 @@ export async function startServer(): Promise<void> {
           try {
             const result = await runtime.withIdleExclusive(() =>
               checkpoints.restore({
-                checkpointId: req.params.id,
+                checkpointId: req.params.id!,
                 scope,
                 confirm: body?.confirm === true,
               }),
@@ -143,10 +143,10 @@ export async function startServer(): Promise<void> {
       },
       "/api/v1/channels/:id/threads": {
         GET: (req) => {
-          if (!store.getChannel(req.params.id)) {
+          if (!store.getChannel(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
-          return Response.json({ threads: store.listThreads(req.params.id) });
+          return Response.json({ threads: store.listThreads(req.params.id!) });
         },
         POST: async (req) => {
           const content = await messageContent(req);
@@ -156,11 +156,11 @@ export async function startServer(): Promise<void> {
               { status: 400 },
             );
           }
-          if (!store.getChannel(req.params.id)) {
+          if (!store.getChannel(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
           const routing = await runtime.routeUserContent(content);
-          const result = store.createThread(req.params.id, {
+          const result = store.createThread(req.params.id!, {
             author: "user",
             kind: "message",
             content,
@@ -172,10 +172,10 @@ export async function startServer(): Promise<void> {
       },
       "/api/v1/threads/:id/messages": {
         GET: (req) => {
-          if (!store.getThread(req.params.id)) {
+          if (!store.getThread(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
-          return Response.json({ messages: store.listMessages(req.params.id) });
+          return Response.json({ messages: store.listMessages(req.params.id!) });
         },
         POST: async (req) => {
           const content = await messageContent(req);
@@ -185,14 +185,14 @@ export async function startServer(): Promise<void> {
               { status: 400 },
             );
           }
-          if (!store.getThread(req.params.id)) {
+          if (!store.getThread(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
           const routing = await runtime.routeUserContent(
             content,
-            req.params.id,
+            req.params.id!,
           );
-          const message = store.appendMessage(req.params.id, {
+          const message = store.appendMessage(req.params.id!, {
             author: "user",
             kind: "message",
             content,
@@ -207,7 +207,7 @@ export async function startServer(): Promise<void> {
       // queued turn.
       "/api/v1/threads/:id/retry": {
         POST: (req) => {
-          const thread = store.getThread(req.params.id);
+          const thread = store.getThread(req.params.id!);
           if (!thread) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
@@ -218,7 +218,7 @@ export async function startServer(): Promise<void> {
             );
           }
           const lastUserMessage = store
-            .listMessages(req.params.id)
+            .listMessages(req.params.id!)
             .findLast((message) => message.author === "user");
           if (!lastUserMessage) {
             return Response.json(
@@ -234,17 +234,17 @@ export async function startServer(): Promise<void> {
       // queued behind it. Idempotent when the thread is idle.
       "/api/v1/threads/:id/cancel": {
         POST: (req) => {
-          const thread = store.getThread(req.params.id);
+          const thread = store.getThread(req.params.id!);
           if (!thread) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
-          runtime.cancelTurn(req.params.id);
+          runtime.cancelTurn(req.params.id!);
           return Response.json({ ok: true }, { status: 202 });
         },
       },
       "/api/v1/threads/:id/read": {
         POST: (req) => {
-          if (!store.markThreadRead(req.params.id)) {
+          if (!store.markThreadRead(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
           return Response.json({ ok: true });
@@ -260,12 +260,12 @@ export async function startServer(): Promise<void> {
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),
       "/api/v1/harnesses/:id/config": async (req) => {
-        const result = await harnessCapabilities.getConfig(req.params.id);
+        const result = await harnessCapabilities.getConfig(req.params.id!);
         return Response.json(result, { status: result.error ? 502 : 200 });
       },
       "/api/v1/agents/:name": {
         GET: async (req) => {
-          const agent = await getAgent(workspace.rootPath, req.params.name);
+          const agent = await getAgent(workspace.rootPath, req.params.name!);
           if (!agent) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
@@ -275,7 +275,7 @@ export async function startServer(): Promise<void> {
           const body = await req.json().catch(() => null);
           const result = await updateAgent(
             workspace.rootPath,
-            req.params.name,
+            req.params.name!,
             body,
           );
           if (!result.ok) {
@@ -303,7 +303,7 @@ export async function startServer(): Promise<void> {
       }
       const url = new URL(req.url);
       if (url.pathname === "/ws") {
-        if (server.upgrade(req)) return;
+        if (server.upgrade(req, { data: undefined })) return;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
       return new Response("Not found", { status: 404 });
@@ -372,7 +372,7 @@ const HTTP_METHODS = new Set([
   "OPTIONS",
 ]);
 
-function haltRoutes<T extends Record<string, unknown>>(
+function haltRoutes<T extends NonNullable<Parameters<typeof Bun.serve>[0]["routes"]>>(
   routes: T,
   stopping: () => boolean,
 ): T {

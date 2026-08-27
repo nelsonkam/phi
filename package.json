@@ -1,10 +1,14 @@
 {
   "name": "phi",
+  "version": "0.1.0",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "bun --hot src/cli.ts serve",
-    "start": "bun src/cli.ts serve"
+    "start": "bun src/cli.ts serve",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "build:release": "bun run ./scripts/build-release.ts"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.70.0",

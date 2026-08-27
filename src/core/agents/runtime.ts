@@ -852,7 +852,8 @@ export class AgentRuntime {
           mcpFingerprint: workspaceMcp.fingerprint,
         });
         const stdioStarted = workspaceMcp.servers.filter(
-          (server) => !("type" in server),
+          (server): server is McpServer & { command: string } =>
+            "command" in server && typeof server.command === "string",
         );
         if (stdioStarted.length > 0) {
           this.store.appendMessage(threadId, {

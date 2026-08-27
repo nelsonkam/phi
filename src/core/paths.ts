@@ -3,8 +3,8 @@ import { join } from "node:path";
 
 // Everything phi owns lives under one root directory. PHI_ROOT overrides it
 // for development and tests.
-export function phiRoot(): string {
-  return process.env.PHI_ROOT ?? join(homedir(), ".phi");
+export function phiRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PHI_ROOT ?? join(homedir(), ".phi");
 }
 
 export function dbPath(root: string = phiRoot()): string {

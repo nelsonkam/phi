@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The binaries report package.json's version while the release is named
+      # after the tag; a mismatch ships a binary that "phi update" can never
+      # converge on (it re-downloads the same release forever).
+      - name: Verify tag matches package version
+        run: |
+          version="$(jq -r .version package.json)"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version v${version}." >&2
+            exit 1
+          fi
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+
+  # Binaries travel as release assets, never as Actions artifacts: artifact
+  # storage bills against the account quota and a hit quota blocks the whole
+  # pipeline. The release stays a draft until every binary has landed, so
+  # "phi update" can never observe an assetless release.
+  draft-release:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create or reuse draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          flags=()
+          case "$TAG" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+            if [ "$draft" != "true" ]; then
+              echo "Published release $TAG already exists." >&2
+              exit 1
+            fi
+            gh release edit "$TAG" --title "phi ${TAG}" "${flags[@]}"
+          else
+            gh release create "$TAG" \
+              --title "phi ${TAG}" \
+              --generate-notes \
+              --draft \
+              "${flags[@]}"
+          fi
+
+  build-darwin:
+    needs: draft-release
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            target: bun-darwin-arm64
+            asset: phi-darwin-arm64
+          - runner: macos-15-intel
+            target: bun-darwin-x64
+            asset: phi-darwin-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run build:release -- ${{ matrix.target }}
+      - name: Probe native ONNX binding
+        run: PHI_ONNX_PROBE=1 "dist/release/${{ matrix.asset }}"
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" "dist/release/${{ matrix.asset }}" --clobber
+
+  release:
+    needs: build-darwin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          expected='["phi-darwin-arm64","phi-darwin-x64"]'
+
+          payload="$(gh release view "$TAG" --json isDraft,assets)"
+          if [ "$(echo "$payload" | jq -r .isDraft)" != "true" ]; then
+            echo "Release $TAG is not a draft; refusing to publish." >&2
+            exit 1
+          fi
+
+          extras="$(echo "$payload" | jq -r --argjson expected "$expected" '
+            .assets[].name | select(. as $n | ($expected | index($n) | not))
+          ')"
+          if [ -n "$extras" ]; then
+            while IFS= read -r extra; do
+              [ -n "$extra" ] || continue
+              gh release delete-asset "$TAG" "$extra" --yes
+            done <<< "$extras"
+            payload="$(gh release view "$TAG" --json isDraft,assets)"
+          fi
+
+          names="$(echo "$payload" | jq -c '[.assets[].name] | sort')"
+          want="$(echo "$expected" | jq -c 'sort')"
+          if [ "$names" != "$want" ]; then
+            echo "Release assets $names do not equal $want." >&2
+            exit 1
+          fi
+
+          if echo "$payload" | jq -e '.assets[] | select(.size <= 0)' >/dev/null; then
+            echo "A required release asset has size 0." >&2
+            exit 1
+          fi
+
+          gh release edit "$TAG" --draft=false
