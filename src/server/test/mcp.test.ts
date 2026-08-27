@@ -453,6 +453,48 @@ test("send_message validates and routes explicit agent handoffs", async () => {
   store.close();
 });
 
+test("send_message flags a dropped self-route while the turn is still live", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, thread, token, handler, workspace } = fixture(
+    (message, routedTo) => routed.push({ message, routedTo }),
+  );
+  ensureWorkspace(workspace.rootPath);
+  await writeAgent(workspace.rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the work.",
+  });
+
+  // The peer handoff completes; the self-route is dropped with a note.
+  const mixed = await toolCall(handler, token, 61, "Review time", [
+    "reviewer",
+    "default",
+  ]);
+  const mixedBody = (await mixed.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(mixedBody.result.isError).toBeUndefined();
+  const mixedText = mixedBody.result.content[0]!.text;
+  expect(mixedText).toContain("you are @default");
+  expect(mixedText).toContain("naming yourself is ignored");
+  expect(store.listMessages(thread.id).at(-1)!.metadata.routedTo).toEqual([
+    "reviewer",
+  ]);
+  expect(routed).toHaveLength(1);
+
+  // A to naming only the author routes nowhere and still sends, noted.
+  const selfOnly = await toolCall(handler, token, 62, "I'll check later", [
+    "default",
+  ]);
+  const selfBody = (await selfOnly.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(selfBody.result.isError).toBeUndefined();
+  expect(selfBody.result.content[0]!.text).toContain("naming yourself is ignored");
+  expect(store.listMessages(thread.id).at(-1)!.metadata.routedTo).toEqual([]);
+  expect(routed).toHaveLength(1);
+  store.close();
+});
+
 test("send_message warns when a mid-body peer mention routes nowhere", async () => {
   const routed: Array<{ message: Message; routedTo: string[] }> = [];
   const { store, thread, token, handler, workspace } = fixture(

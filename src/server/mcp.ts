@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
-import { MESSAGING_PREAMBLE } from "@/core/agents/runtime";
+import { messagingPreamble } from "@/core/agents/runtime";
 import {
   routeAgentContent,
   unroutedPeerMentions,
@@ -58,7 +58,7 @@ export function createMcpHandler(
     // the first-turn prompt preamble in AgentRuntime covers the rest.
     const server = new Server(
       { name: "phi", version: "1.0.0" },
-      { capabilities: { tools: {} }, instructions: MESSAGING_PREAMBLE },
+      { capabilities: { tools: {} }, instructions: messagingPreamble(caller.agentName) },
     );
     server.setRequestHandler(ListToolsRequestSchema, () => ({
       tools: [
@@ -412,9 +412,17 @@ export function createMcpHandler(
           if (routing.routedTo.length > 0) {
             onAgentMessage?.(message, routing.routedTo);
           }
+          const notes: string[] = [];
+          // A self-route is dropped by design (an agent cannot schedule its
+          // own next turn); say so while the author's turn is still live and
+          // it can do that work itself.
+          if (explicitRecipients?.includes(caller.agentName)) {
+            notes.push(
+              ` Note: you are @${caller.agentName} — a \`to\` naming yourself is ignored and cannot schedule your own turn. Do that work now, before ending this turn, or hand it to a peer.`,
+            );
+          }
           // A prose handoff ("done — @reviewer should look") wakes nobody;
           // warn while the author still has a turn to send a routed follow-up.
-          let note = "";
           if (routing.routedTo.length === 0) {
             const unrouted = await unroutedPeerMentions(
               store.defaultWorkspace().rootPath,
@@ -422,20 +430,22 @@ export function createMcpHandler(
               caller.agentName,
             );
             if (unrouted.length > 0) {
-              note = ` Note: it mentions ${unrouted
-                .map((handle) => `@${handle}`)
-                .join(
-                  ", ",
-                )} but has no \`to\`, so no agent was woken — mentions never route. If a handoff was intended, follow up with to: [${unrouted
-                .map((handle) => `"${handle}"`)
-                .join(", ")}].`;
+              notes.push(
+                ` Note: it mentions ${unrouted
+                  .map((handle) => `@${handle}`)
+                  .join(
+                    ", ",
+                  )} but has no \`to\`, so no agent was woken — mentions never route. If a handoff was intended, follow up with to: [${unrouted
+                  .map((handle) => `"${handle}"`)
+                  .join(", ")}].`,
+              );
             }
           }
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Message sent (${message.id}).${note}`,
+                text: `Message sent (${message.id}).${notes.join("")}`,
               },
             ],
           };
