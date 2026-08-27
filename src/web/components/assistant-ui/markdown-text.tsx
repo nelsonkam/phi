@@ -10,8 +10,10 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { Button } from "@/web/components/ui/button";
 import { FileLink } from "@/web/components/file-link";
+import { ExpandableImage } from "@/web/components/image-lightbox";
 import { useFileLinkScope } from "@/web/lib/file-link-context";
 import {
+  fileBasename,
   isWorkspaceHref,
   parseWorkspaceHref,
   resolveLinkedPath,
@@ -215,26 +217,27 @@ const defaultComponents = memoizeMarkdownComponents({
   },
   img: function MarkdownImage({ className, src, alt, ...props }) {
     const scope = useFileLinkScope();
-    const resolvedSrc =
+    const workspacePath =
       typeof src === "string" && isWorkspaceHref(src)
-        ? workspaceFileUrl(
-            resolveLinkedPath(parseWorkspaceHref(src)?.path ?? src, scope.baseDir),
-            {
-              channelId: scope.channelId,
-              root: scope.root,
-              fragment: parseWorkspaceHref(src)?.fragment,
-            },
+        ? resolveLinkedPath(
+            parseWorkspaceHref(src)?.path ?? src,
+            scope.baseDir,
           )
-        : src;
+        : undefined;
+    const resolvedSrc = workspacePath
+      ? workspaceFileUrl(workspacePath, {
+          channelId: scope.channelId,
+          root: scope.root,
+          fragment: parseWorkspaceHref(src)?.fragment,
+        })
+      : src;
     return (
-      <img
+      <ExpandableImage
         {...props}
         src={resolvedSrc}
         alt={alt ?? ""}
-        className={cn(
-          "aui-md-img my-3 max-h-96 max-w-full rounded-md border",
-          className,
-        )}
+        fallbackLabel={workspacePath ? fileBasename(workspacePath) : undefined}
+        className={className}
       />
     );
   },
