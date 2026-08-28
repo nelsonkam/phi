@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readDraft, saveDraft } from "@/web/lib/drafts";
+import { readDraft, readComposerDraft, saveDraft, saveComposerDraft } from "@/web/lib/drafts";
 
 function fakeStorage(): Storage {
   const map = new Map<string, string>();
@@ -51,4 +51,38 @@ test("swallows storage errors", () => {
 test("missing storage acts as no drafts", () => {
   expect(readDraft("k", undefined)).toBeNull();
   expect(() => saveDraft("k", "text", undefined)).not.toThrow();
+});
+
+test("persists uploaded attachment ids alongside text", () => {
+  const storage = fakeStorage();
+  const id = `att_${"e".repeat(32)}`;
+  saveComposerDraft(
+    "thread:t1",
+    {
+      text: "see this",
+      attachments: [
+        {
+          id,
+          filename: "shot.png",
+          contentType: "image/png",
+          byteSize: 12,
+        },
+      ],
+    },
+    storage,
+  );
+  expect(readDraft("thread:t1", storage)).toBe("see this");
+  expect(readComposerDraft("thread:t1", storage)).toEqual({
+    text: "see this",
+    attachments: [
+      {
+        id,
+        filename: "shot.png",
+        contentType: "image/png",
+        byteSize: 12,
+      },
+    ],
+  });
+  saveComposerDraft("thread:t1", { text: "", attachments: [] }, storage);
+  expect(readComposerDraft("thread:t1", storage)).toBeNull();
 });

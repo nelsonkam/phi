@@ -1,18 +1,28 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { LoaderCircle, MessageSquareText } from "lucide-react";
+import { FileText, LoaderCircle, MessageSquareText } from "lucide-react";
 import type { ThreadSummary } from "@/shared/types";
 import { Composer } from "@/web/components/composer";
+import { shouldOpenChannelThreadPanel, docCommentDeepLink } from "@/web/components/doc-comments";
+import { FileViewerDialog } from "@/web/components/file-link";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { MessageItem } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/web/components/ui/popover";
+import {
   useAgents,
   useChannels,
   useCreateThread,
+  useDocCommentSummary,
+  useThread,
   useThreadTurn,
   useThreads,
 } from "@/web/lib/queries";
+import { workspaceFileUrl } from "@/web/lib/file-links";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import {
   isThreadWorking,
@@ -26,7 +36,7 @@ import { EmptyState, Page } from "../app";
 // Slack-style channel: a chronological flow of thread root messages, with
 // the thread detail opening in a side panel.
 export function ChannelPage() {
-  const { channelId = "", threadId } = useParams();
+  const { channelId = "", threadId, docThreadId } = useParams();
   const navigate = useNavigate();
   const { data: channelData } = useChannels();
   const { data: agentData } = useAgents();
@@ -35,6 +45,41 @@ export function ChannelPage() {
   const { data, isPending } = useThreads(channelId);
   const create = useCreateThread(channelId);
   const selectedThread = data?.threads.find((thread) => thread.id === threadId);
+  const openPanel = shouldOpenChannelThreadPanel(
+    threadId,
+    data?.threads.map((thread) => thread.id),
+  );
+  const { data: urlThread } = useThread(
+    threadId && !isPending && !selectedThread ? threadId : undefined,
+  );
+  const { data: docThread } = useThread(docThreadId);
+  const deepLink = docCommentDeepLink(
+    channelId,
+    docThreadId ? "doc" : "thread",
+    (docThreadId ? docThread?.thread : urlThread?.thread) ?? null,
+  );
+
+  useEffect(() => {
+    if (deepLink) navigate(deepLink, { replace: true });
+  }, [deepLink, navigate]);
+
+  const [browseFile, setBrowseFile] = useState<{
+    path: string;
+    root: string;
+    commentId?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const thread = docThread?.thread;
+    const anchor = docThread?.anchor;
+    if (!docThreadId || !thread || !anchor) return;
+    if (thread.channelId !== channelId) return;
+    setBrowseFile({
+      path: anchor.path,
+      root: anchor.rootId,
+      commentId: docThreadId,
+    });
+  }, [docThread, docThreadId, channelId]);
 
   // The flow reads oldest-first by root message; replies bump a thread's
   // activity but never move it in the flow.
@@ -51,8 +96,11 @@ export function ChannelPage() {
     channelId,
   );
 
-  async function startThread(content: string) {
-    const { thread } = await create.mutateAsync(content);
+  async function startThread(input: {
+    content: string;
+    attachmentIds?: string[];
+  }) {
+    const { thread } = await create.mutateAsync(input);
     navigate(`/c/${channelId}/t/${thread.id}`);
   }
 
@@ -60,15 +108,21 @@ export function ChannelPage() {
     <Page
       title={channel ? `# ${channel.name}` : "…"}
       titleExtra={
-        untaggedAgent ? (
-          <Link
-            to={`/agents/${untaggedAgent}`}
-            title="Answers messages that do not start with @name"
-            className="mention shrink-0 text-[11px] leading-5"
-          >
-            @{untaggedAgent}
-          </Link>
-        ) : null
+        <span className="flex min-w-0 items-center gap-2">
+          {untaggedAgent ? (
+            <Link
+              to={`/agents/${untaggedAgent}`}
+              title="Answers messages that do not start with @name"
+              className="mention shrink-0 text-[11px] leading-5"
+            >
+              @{untaggedAgent}
+            </Link>
+          ) : null}
+          <CommentedDocsButton
+            channelId={channelId}
+            onOpen={(doc) => setBrowseFile(doc)}
+          />
+        </span>
       }
     >
       <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -101,22 +155,86 @@ export function ChannelPage() {
             placeholder={`Message #${channel?.name ?? ""}`}
             disabled={create.isPending}
             draftKey={`channel:${channelId}`}
-            onSend={(content) => void startThread(content)}
+            onSend={(input) => void startThread(input)}
           />
         </div>
 
-        {threadId && (
+        {openPanel && selectedThread && (
           <ThreadPanel
             key={threadId}
             channelId={channelId}
             channelName={channel?.name}
-            threadId={threadId}
-            turnActive={selectedThread?.turnActive ?? false}
-            turnAgent={selectedThread?.turnAgent ?? null}
+            threadId={threadId!}
+            turnActive={selectedThread.turnActive}
+            turnAgent={selectedThread.turnAgent}
+          />
+        )}
+        {browseFile && (
+          <FileViewerDialog
+            path={browseFile.path}
+            url={workspaceFileUrl(browseFile.path, {
+              channelId,
+              root: browseFile.root,
+            })}
+            channelId={channelId}
+            root={browseFile.root}
+            focusCommentId={browseFile.commentId}
+            onClose={() => {
+              setBrowseFile(null);
+              if (docThreadId) navigate(`/c/${channelId}`);
+            }}
           />
         )}
       </div>
     </Page>
+  );
+}
+
+function CommentedDocsButton({
+  channelId,
+  onOpen,
+}: {
+  channelId: string;
+  onOpen: (doc: { path: string; root: string }) => void;
+}) {
+  const { data } = useDocCommentSummary(channelId);
+  const docs = data?.docs ?? [];
+  const unread = docs.reduce((n, doc) => n + doc.unreadCount, 0);
+  return (
+    <Popover>
+      <PopoverTrigger
+        title="Docs with comments"
+        className="relative flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+      >
+        <FileText className="size-3.5" />
+        {unread > 0 && (
+          <span className="absolute top-1 right-1 size-1.5 rounded-full bg-sky-600" />
+        )}
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 gap-1 p-2">
+        <p className="px-2 py-1 text-xs font-medium">Docs with comments</p>
+        {docs.length === 0 ? (
+          <p className="px-2 py-3 text-xs text-muted-foreground">
+            No comments on files in this channel yet.
+          </p>
+        ) : (
+          docs.map((doc) => (
+            <button
+              key={`${doc.rootId}:${doc.path}`}
+              type="button"
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent"
+              onClick={() => onOpen({ path: doc.path, root: doc.rootId })}
+            >
+              <span className="min-w-0 flex-1 truncate">{doc.path}</span>
+              <span className="text-muted-foreground">{doc.commentCount}</span>
+              {doc.unreadCount > 0 && (
+                <span className="size-1.5 rounded-full bg-sky-600" />
+              )}
+            </button>
+          ))
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 

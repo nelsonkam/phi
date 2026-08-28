@@ -47,11 +47,20 @@ function DialogOverlay({
   )
 }
 
+function isMentionListboxEvent(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest("[data-phi-mention-listbox]"))
+  );
+}
+
 function DialogContent({
   className,
   children,
   showCloseButton = true,
   overlayClassName,
+  onInteractOutside,
+  onPointerDownOutside,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
@@ -67,6 +76,24 @@ function DialogContent({
           className
         )}
         {...props}
+        onInteractOutside={(event) => {
+          onInteractOutside?.(event)
+          if (
+            !event.defaultPrevented &&
+            isMentionListboxEvent(event.target)
+          ) {
+            event.preventDefault()
+          }
+        }}
+        onPointerDownOutside={(event) => {
+          onPointerDownOutside?.(event)
+          if (
+            !event.defaultPrevented &&
+            isMentionListboxEvent(event.target)
+          ) {
+            event.preventDefault()
+          }
+        }}
       >
         {children}
         {showCloseButton && (

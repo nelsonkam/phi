@@ -116,6 +116,24 @@ export function scrollToHeadingFragment(
   return target;
 }
 
+export function scrollToDocCommentAnchor(
+  root: HeadingQueryRoot,
+  options: { threadId: string; headingSlug: string | null },
+): void {
+  const escaped =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(options.threadId)
+      : options.threadId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const mark = root.querySelector(`[data-doc-comment="${escaped}"]`);
+  if (mark) {
+    mark.scrollIntoView({ block: "center", inline: "nearest" });
+    return;
+  }
+  if (options.headingSlug) {
+    scrollToHeadingFragment(root, options.headingSlug);
+  }
+}
+
 function queryById(root: HeadingQueryRoot, id: string): HeadingTarget | null {
   const escaped =
     typeof CSS !== "undefined" && typeof CSS.escape === "function"

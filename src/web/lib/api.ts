@@ -2,7 +2,11 @@ import type {
   ActivityPage,
   Agent,
   AgentLoadError,
+  Attachment,
   Channel,
+  DocCommentAnchor,
+  DocCommentDocSummary,
+  DocCommentThread,
   HarnessConfig,
   HarnessStatus,
   Message,
@@ -13,10 +17,10 @@ import type {
 // The only file (with ws.ts) that knows the transport. Everything else
 // consumes typed results, so a future mobile client mirrors just these two.
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`/api/v1${path}`);
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
-  return res.json() as Promise<T>;
+export async function fetchAuthSession(): Promise<{ ok: true }> {
+  const res = await fetch("/api/v1/auth/session", { credentials: "include" });
+  if (!res.ok) throw new Error(`GET /auth/session failed: ${res.status}`);
+  return res.json() as Promise<{ ok: true }>;
 }
 
 export function fetchChannels(): Promise<{ channels: Channel[] }> {
@@ -44,6 +48,53 @@ export function fetchMessages(
   return get(`/threads/${threadId}/messages`);
 }
 
+export function fetchThread(threadId: string): Promise<{
+  thread: Thread;
+  anchor: DocCommentAnchor | null;
+}> {
+  return get(`/threads/${threadId}`);
+}
+
+export function fetchDocComments(
+  channelId: string,
+  rootId: string,
+  path: string,
+): Promise<{ comments: DocCommentThread[] }> {
+  const params = new URLSearchParams({ root: rootId, path });
+  return get(`/channels/${channelId}/doc-comments?${params}`);
+}
+
+export function fetchDocCommentSummary(
+  channelId: string,
+): Promise<{ docs: DocCommentDocSummary[] }> {
+  return get(`/channels/${channelId}/doc-comments/summary`);
+}
+
+export function createDocComment(
+  channelId: string,
+  input: {
+    content: string;
+    attachmentIds?: string[];
+    rootId: string;
+    path: string;
+    quote: string;
+    prefix: string;
+    suffix: string;
+    headingSlug?: string | null;
+  },
+): Promise<{ thread: Thread; message: Message }> {
+  return post(`/channels/${channelId}/doc-comments`, input);
+}
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(`/api/v1${path}`);
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `GET ${path} failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`/api/v1${path}`, {
     method: "POST",
@@ -59,16 +110,38 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export function createThread(
   channelId: string,
-  content: string,
+  input: { content: string; attachmentIds?: string[] },
 ): Promise<{ thread: Thread; message: Message }> {
-  return post(`/channels/${channelId}/threads`, { content });
+  return post(`/channels/${channelId}/threads`, {
+    content: input.content,
+    attachmentIds: input.attachmentIds,
+  });
 }
 
 export function sendMessage(
   threadId: string,
-  content: string,
+  input: { content: string; attachmentIds?: string[] },
 ): Promise<{ message: Message }> {
-  return post(`/threads/${threadId}/messages`, { content });
+  return post(`/threads/${threadId}/messages`, {
+    content: input.content,
+    attachmentIds: input.attachmentIds,
+  });
+}
+
+export async function uploadAttachment(file: File): Promise<Attachment> {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const res = await fetch("/api/v1/attachments", {
+    method: "POST",
+    body,
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `Upload failed (${res.status})`);
+  }
+  const payload = (await res.json()) as { attachment: Attachment };
+  return payload.attachment;
 }
 
 export function retryTurn(threadId: string): Promise<{ ok: boolean }> {

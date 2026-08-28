@@ -3,7 +3,12 @@ import { Bot } from "lucide-react";
 import type { Message } from "@/shared/types";
 import { AgentAvatar } from "@/web/components/agent-avatar";
 import { MarkdownText } from "@/web/components/assistant-ui/markdown-text";
+import { FileLink } from "@/web/components/file-link";
+import { ExpandableImage } from "@/web/components/image-lightbox";
 import { FileLinkScope } from "@/web/lib/file-link-context";
+import { attachmentsFromMetadata } from "@/shared/attachments";
+import { attachmentApiPath } from "@/web/lib/attachments";
+import { fileKind } from "@/web/lib/file-links";
 import { renderRichText, useKnownAgentNames } from "@/web/lib/mentions";
 import { relativeTime } from "@/web/lib/time";
 import { cn } from "@/web/lib/utils";
@@ -140,7 +145,7 @@ export function MessageItem({
                 <MarkdownText mentionNames={knownAgents} />
               </TextMessagePartProvider>
             </div>
-          ) : (
+          ) : message.content.trim() ? (
             <p
               className={cn(
                 "text-sm leading-relaxed break-words whitespace-pre-wrap",
@@ -149,10 +154,41 @@ export function MessageItem({
             >
               {renderRichText(message.content, knownAgents)}
             </p>
-          )}
+          ) : null}
+          <MessageAttachments metadata={message.metadata} />
         </FileLinkScope>
         {children}
       </div>
+    </div>
+  );
+}
+
+function MessageAttachments({
+  metadata,
+}: {
+  metadata: Record<string, unknown>;
+}) {
+  const attachments = attachmentsFromMetadata(metadata);
+  if (attachments.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {attachments.map((item) =>
+        fileKind(item.filename) === "image" ? (
+          <ExpandableImage
+            key={item.id}
+            src={attachmentApiPath(item.id)}
+            alt={item.filename}
+            fallbackLabel={item.filename}
+            className="max-h-48"
+          />
+        ) : (
+          <FileLink
+            key={item.id}
+            path={`attachment:${item.id}`}
+            label={item.filename}
+          />
+        ),
+      )}
     </div>
   );
 }

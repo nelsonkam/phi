@@ -22,3 +22,15 @@ export function modelCachePath(root: string = phiRoot()): string {
 export function gitRemotePath(root: string = phiRoot()): string {
   return join(root, "git-remote");
 }
+
+// Server-owned upload blobs. Outside the managed workspace so they are not
+// mixed with attached repositories or git checkpoints.
+export function uploadsPath(root: string = phiRoot()): string {
+  return join(root, "uploads");
+}
+
+// Local device bearer for human clients (browser cookie / native Authorization).
+// Distinct from MCP session tokens. 0600 file; hash is what we verify against.
+export function deviceTokenPath(root: string = phiRoot()): string {
+  return join(root, "device-token");
+}

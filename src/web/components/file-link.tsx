@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { TextMessagePartProvider } from "@assistant-ui/react";
 import { Download, FileText, Maximize2, Minimize2, X } from "lucide-react";
 import { MarkdownText } from "@/web/components/assistant-ui/markdown-text";
+import { DocCommentLayer } from "@/web/components/doc-comments";
 import { scrollToHeadingFragment } from "@/web/lib/heading-ids";
 import {
   Dialog,
@@ -21,12 +22,69 @@ import {
   workspaceDirname,
   workspaceFileUrl,
 } from "@/web/lib/file-links";
+import { parseAttachmentHref, attachmentApiPath } from "@/web/lib/attachments";
+import { useDocCommentSummary } from "@/web/lib/queries";
 import { cn } from "@/web/lib/utils";
 
 // A workspace file reference in a message: renders as a chip, opens the file
 // in a viewer dialog. `path` is a workspace-style href (already validated by
 // the caller); the active FileLinkScope supplies channel, root, and base dir.
 export function FileLink({
+  path,
+  fragment,
+  label,
+}: {
+  path: string;
+  fragment?: string;
+  label?: string;
+}) {
+  const attachment = parseAttachmentHref(path);
+  if (attachment) {
+    return (
+      <AttachmentFileLink
+        id={attachment.id}
+        filename={label ?? fileBasename(path) ?? attachment.id}
+      />
+    );
+  }
+  return <WorkspaceFileLink path={path} fragment={fragment} label={label} />;
+}
+
+function AttachmentFileLink({
+  id,
+  filename,
+}: {
+  id: string;
+  filename: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const url = attachmentApiPath(id);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
+        title={filename}
+        className="mention inline-flex max-w-full items-center gap-1 align-[-0.14em] transition-colors hover:bg-sky-400/25 dark:hover:bg-sky-400/20"
+      >
+        <FileText className="size-3 shrink-0 opacity-80" />
+        <span className="truncate leading-tight">{filename}</span>
+      </button>
+      {open && (
+        <FileViewerDialog
+          path={filename}
+          url={url}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+function WorkspaceFileLink({
   path,
   fragment,
   label,
@@ -45,6 +103,12 @@ export function FileLink({
     root: scope.root,
     fragment: hash,
   });
+  const { data: summary } = useDocCommentSummary(scope.channelId);
+  const badge = summary?.docs.find(
+    (doc) =>
+      doc.path === resolved &&
+      (scope.root ? doc.rootId === scope.root : true),
+  );
   return (
     <>
       <button
@@ -60,6 +124,21 @@ export function FileLink({
         <span className="truncate leading-tight">
           {label ?? fileBasename(resolved)}
         </span>
+        {badge && badge.unreadCount > 0 && (
+          <span
+            aria-label={
+              badge.unreadCount === 1
+                ? "1 unread comment"
+                : `${badge.unreadCount} unread comments`
+            }
+            className="size-1.5 shrink-0 rounded-full bg-sky-600"
+          />
+        )}
+        {badge && badge.unreadCount === 0 && badge.commentCount > 0 && (
+          <span className="text-[10px] font-medium leading-none text-sky-700/80 dark:text-sky-400/80">
+            {badge.commentCount}
+          </span>
+        )}
       </button>
       {open && (
         <FileViewerDialog
@@ -78,12 +157,13 @@ export function FileLink({
 const HEADER_ACTION_CLASS =
   "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
 
-function FileViewerDialog({
+export function FileViewerDialog({
   path,
   url,
   fragment,
   channelId,
   root,
+  focusCommentId,
   onClose,
 }: {
   path: string;
@@ -91,10 +171,12 @@ function FileViewerDialog({
   fragment?: string;
   channelId?: string;
   root?: string;
+  focusCommentId?: string;
   onClose: () => void;
 }) {
   const [fullscreen, setFullscreen] = useState(false);
   const kind = fileKind(path);
+  const wide = kind === "markdown" && Boolean(channelId);
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent
@@ -103,7 +185,9 @@ function FileViewerDialog({
           "flex flex-col gap-0 overflow-hidden p-0",
           fullscreen
             ? "top-0 left-0 h-full max-h-none w-full max-w-none translate-x-0 translate-y-0 rounded-none sm:max-w-none"
-            : "max-h-[85svh] sm:max-w-3xl",
+            : wide
+              ? "max-h-[85svh] sm:max-w-5xl"
+              : "max-h-[85svh] sm:max-w-3xl",
         )}
       >
         <DialogHeader className="shrink-0 border-b px-4 py-2.5">
@@ -139,7 +223,7 @@ function FileViewerDialog({
             </span>
           </DialogTitle>
         </DialogHeader>
-        <div className="min-h-24 flex-1 overflow-auto">
+        <div className={cn("min-h-24 flex-1", wide ? "flex overflow-hidden" : "overflow-auto")}>
           <FileViewerBody
             kind={kind}
             path={path}
@@ -148,6 +232,7 @@ function FileViewerDialog({
             channelId={channelId}
             root={root}
             fullscreen={fullscreen}
+            focusCommentId={focusCommentId}
           />
         </div>
       </DialogContent>
@@ -163,6 +248,7 @@ function FileViewerBody({
   channelId,
   root,
   fullscreen,
+  focusCommentId,
 }: {
   kind: ReturnType<typeof fileKind>;
   path: string;
@@ -171,6 +257,7 @@ function FileViewerBody({
   channelId?: string;
   root?: string;
   fullscreen: boolean;
+  focusCommentId?: string;
 }) {
   if (kind === "image") {
     return (
@@ -203,6 +290,7 @@ function FileViewerBody({
       fragment={fragment}
       channelId={channelId}
       root={root}
+      focusCommentId={focusCommentId}
     />
   );
 }
@@ -214,6 +302,7 @@ function TextFileBody({
   fragment,
   channelId,
   root,
+  focusCommentId,
 }: {
   kind: "markdown" | "text";
   path: string;
@@ -221,6 +310,7 @@ function TextFileBody({
   fragment?: string;
   channelId?: string;
   root?: string;
+  focusCommentId?: string;
 }) {
   const { data, isPending, isError, error } = useQuery({
     // Linked files are live references; always show the current bytes.
@@ -229,7 +319,7 @@ function TextFileBody({
     gcTime: 0,
     retry: false,
     queryFn: async () => {
-      const res = await fetch(url);
+      const res = await fetch(url, { credentials: "include" });
       if (res.status === 404) {
         throw new Error("This file no longer exists in the workspace.");
       }
@@ -281,10 +371,12 @@ function TextFileBody({
     return (
       <MarkdownFileView
         text={data.text}
+        path={data.path}
         fragment={fragment}
         channelId={channelId}
         root={data.root}
         baseDir={workspaceDirname(data.path)}
+        focusCommentId={focusCommentId}
       />
     );
   }
@@ -299,33 +391,52 @@ function TextFileBody({
 // not just in the fetch URL.
 export function MarkdownFileView({
   text,
+  path,
   fragment,
   channelId,
   root,
   baseDir,
+  focusCommentId,
 }: {
   text: string;
+  path?: string;
   fragment?: string;
   channelId?: string;
   root?: string;
   baseDir?: string;
+  focusCommentId?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (!fragment || !containerRef.current) return;
     scrollToHeadingFragment(containerRef.current, fragment);
   }, [fragment, text]);
+  const commentsEnabled = Boolean(channelId && root && path);
   return (
-    <div
-      ref={containerRef}
-      data-fragment={fragment || undefined}
-      className="p-4 text-sm"
-    >
-      <FileLinkScope channelId={channelId} root={root} baseDir={baseDir}>
-        <TextMessagePartProvider text={text}>
-          <MarkdownText />
-        </TextMessagePartProvider>
-      </FileLinkScope>
+    <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+        <div
+          ref={containerRef}
+          data-fragment={fragment || undefined}
+          className="p-4 text-sm"
+        >
+          <FileLinkScope channelId={channelId} root={root} baseDir={baseDir}>
+            <TextMessagePartProvider text={text}>
+              <MarkdownText />
+            </TextMessagePartProvider>
+          </FileLinkScope>
+        </div>
+      </div>
+      {commentsEnabled && (
+        <DocCommentLayer
+          channelId={channelId!}
+          rootId={root!}
+          path={path!}
+          text={text}
+          containerRef={containerRef}
+          focusThreadId={focusCommentId}
+        />
+      )}
     </div>
   );
 }

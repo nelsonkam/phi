@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MarkdownFileView } from "@/web/components/file-link";
 import {
+  scrollToDocCommentAnchor,
   scrollToHeadingFragment,
   slugifyHeading,
   uniqueHeadingId,
@@ -50,4 +51,41 @@ test("scrollToHeadingFragment calls scrollIntoView on the matching heading", () 
   };
   expect(scrollToHeadingFragment(root, "#Summary")).toBe(target);
   expect(scrolled).toEqual(["summary"]);
+});
+
+test("scrollToDocCommentAnchor prefers the highlight, then heading slug", () => {
+  const scrolled: string[] = [];
+  const mark = {
+    scrollIntoView() {
+      scrolled.push("mark");
+    },
+  };
+  const heading = {
+    id: "summary",
+    scrollIntoView() {
+      scrolled.push("heading");
+    },
+  };
+  const withMark = {
+    querySelector(selector: string) {
+      if (selector.includes("th_1")) return mark;
+      return selector === "#summary" ? heading : null;
+    },
+  };
+  scrollToDocCommentAnchor(withMark, {
+    threadId: "th_1",
+    headingSlug: "summary",
+  });
+  expect(scrolled).toEqual(["mark"]);
+
+  const detached = {
+    querySelector(selector: string) {
+      return selector === "#summary" ? heading : null;
+    },
+  };
+  scrollToDocCommentAnchor(detached, {
+    threadId: "th_1",
+    headingSlug: "summary",
+  });
+  expect(scrolled).toEqual(["mark", "heading"]);
 });

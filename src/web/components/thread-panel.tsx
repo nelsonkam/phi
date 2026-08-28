@@ -205,7 +205,7 @@ export function ThreadPanel({
       <Composer
         placeholder="Reply…"
         draftKey={`thread:${threadId}`}
-        onSend={(content) => send.mutate(content)}
+        onSend={(input) => send.mutate(input)}
         className="px-4 pb-4"
       />
     </aside>
@@ -215,7 +215,7 @@ export function ThreadPanel({
 // Shown under the newest message when it reports a failed turn; re-runs the
 // thread's last user message. The turn frames it triggers hide the button
 // (isAgentWorking) the moment the retry lands.
-function RetryTurnButton({ threadId }: { threadId: string }) {
+export function RetryTurnButton({ threadId }: { threadId: string }) {
   const retry = useRetryTurn(threadId);
   return (
     <button

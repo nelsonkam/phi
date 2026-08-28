@@ -14,6 +14,7 @@ import { DEFAULT_AGENT_NAME, loadAgent } from "./registry";
 import type { AgentDefinition } from "./registry";
 import {
   routeAgentContent,
+  routeDocCommentContent,
   routeUserContent,
   stripLeadingMention,
 } from "./routing";
@@ -24,6 +25,18 @@ import type { Message } from "@/shared/types";
 import type { CheckpointService } from "@/core/checkpoints";
 import { CheckpointBusyError } from "@/core/checkpoints";
 import { loadWorkspaceMcpConfig } from "./mcp-config";
+import {
+  attachmentPromptParts,
+  attachmentsFromMetadata,
+} from "@/server/uploads";
+import {
+  docSourceContext,
+  formatDocCommentContext,
+} from "@/core/doc-comments/source-context";
+import {
+  readWorkspaceFile,
+  resolveMarkdownDoc,
+} from "@/server/doc-comments";
 
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 // JSON-RPC error code ACP agents use for `auth_required`.
@@ -35,7 +48,7 @@ const AUTH_REQUIRED_CODE = -32000;
 // regardless. The identity sentence leads so an agent never mistakes its own
 // handle for a peer it could delegate to.
 export function messagingPreamble(agentName: string): string {
-  return `You are @${agentName} — that handle is your own name in this thread, so work you would assign to @${agentName} is yours to do in the current turn, not a handoff. Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths.`;
+  return `You are @${agentName} — that handle is your own name in this thread, so work you would assign to @${agentName} is yours to do in the current turn, not a handoff. Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap. Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths. A client-uploaded file is an attachment:att_… reference, not a workspace path — never treat a client filesystem path as a server path. Comment-thread turns are discussions on a quoted excerpt of a markdown document; when the prompt includes that excerpt, reply with send_message as usual.`;
 }
 
 // Framing for a turn triggered by a non-leading mention in a user message:
@@ -178,6 +191,10 @@ export class AgentRuntime {
     );
   }
 
+  async routeDocCommentContent(content: string): Promise<MessageRouting> {
+    return routeDocCommentContent(this.workspaceRoot, content);
+  }
+
   // The agent an unmentioned reply falls back to: the last agent that
   // answered in the thread, so a follow-up continues the conversation with
   // whoever just spoke. Before any agent has replied, the thread belongs to
@@ -194,6 +211,7 @@ export class AgentRuntime {
 
   handleUserMessage(message: Message, routedTo?: string[]): void {
     if (message.author !== "user") return;
+    if (routedTo?.length === 0) return;
     this.agentHops.set(message.threadId, 0);
     this.enqueueMessage(message, routedTo);
   }
@@ -430,6 +448,9 @@ export class AgentRuntime {
       };
     }
     if (message.author === "user") {
+      if (this.store.getThread(message.threadId)?.kind === "doc_comment") {
+        return routeDocCommentContent(this.workspaceRoot, message.content);
+      }
       return this.routeUserContentFn(
         this.workspaceRoot,
         message.content,
@@ -564,6 +585,14 @@ export class AgentRuntime {
         Math.max(message.seq, session.lastSeenSeq),
       );
       shownUpToSeq = Math.max(shownUpToSeq, sinceThen.upToSeq);
+      const canSendImages =
+        session.host.initialized.agentCapabilities?.promptCapabilities
+          ?.image === true;
+      const attached = await attachmentPromptParts(
+        this.store.rootPath,
+        attachmentsFromMetadata(message.metadata),
+        canSendImages,
+      );
       const response = (await session.host.acp.connection.agent.request(
         "session/prompt",
         {
@@ -578,15 +607,21 @@ export class AgentRuntime {
                 catchUpContext,
                 sinceThen.text,
                 speculative ? SPECULATIVE_WAKE_NOTE : undefined,
+                attached.note,
+                this.docCommentContext(threadId),
                 routedPrompt(
                   message,
                   session.agentName,
-                  catchUpContext.length > 0 || sinceThen.text.length > 0,
+                  catchUpContext.length > 0 ||
+                    sinceThen.text.length > 0 ||
+                    Boolean(attached.note) ||
+                    this.store.getThread(threadId)?.kind === "doc_comment",
                 ),
               ]
                 .filter(Boolean)
                 .join("\n\n"),
             },
+            ...attached.images,
           ],
         },
         { cancellationSignal: controller.signal },
@@ -1068,6 +1103,44 @@ export class AgentRuntime {
         headers: [{ name: "Authorization", value: `Bearer ${token}` }],
       },
     ];
+  }
+
+  private docCommentContext(threadId: string): string | undefined {
+    const thread = this.store.getThread(threadId);
+    if (thread?.kind !== "doc_comment") return undefined;
+    const anchor = this.store.getDocCommentAnchor(threadId);
+    if (!anchor) return undefined;
+    const resolved = resolveMarkdownDoc(
+      this.store,
+      this.workspaceRoot,
+      thread.channelId,
+      anchor.rootId,
+      anchor.path,
+    );
+    if (!resolved.ok) {
+      return formatDocCommentContext({
+        path: anchor.path,
+        quote: anchor.quote,
+        surrounding: null,
+      });
+    }
+    const source = readWorkspaceFile(resolved.file);
+    if (source === null) {
+      return formatDocCommentContext({
+        path: anchor.path,
+        quote: anchor.quote,
+        surrounding: null,
+      });
+    }
+    return formatDocCommentContext(
+      docSourceContext(
+        source,
+        anchor.path,
+        anchor.quote,
+        anchor.prefix,
+        anchor.suffix,
+      ),
+    );
   }
 
   // Messages that landed after the turn's trigger (or the agent's seen

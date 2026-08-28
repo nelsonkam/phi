@@ -367,11 +367,74 @@ place. The contract is convention, not tooling:
   recorded in message metadata) is deferred; it composes with this design
   without changing the contract.
 
+### 7.1 User uploads
+
+Client paths are never server workspace paths. Browser (and later native)
+clients upload bytes over HTTP; the server stores them under
+`$PHI_ROOT/uploads/<id>` — outside the managed workspace and attached
+repositories, so they are not git-checkpointed and cannot be confused with
+`Read`able workspace files.
+
+- `POST /api/v1/attachments` accepts `multipart/form-data` field `file`
+  (browsers) or a raw body with `Content-Type` plus `X-Phi-Filename` /
+  `Content-Disposition` (native `URLSession`). IDs are server-generated
+  (`att_` + 32 hex). Original filename is sanitized (basename only; no
+  traversal) and stored as metadata with the declared/detected content type
+  and byte size. `PHI_UPLOAD_MAX_BYTES` caps size (default 25 MiB);
+  the body is streamed and aborted when the cap is exceeded. Multipart is
+  written to a bounded temp file before parsing, so a chunked request
+  without `Content-Length` cannot grow without limit.
+- Upload, metadata, and preview/download require a device bearer:
+  `Authorization: Bearer` (native) or the HttpOnly `phi-device` cookie
+  (browser). Loopback `GET /api/v1/auth/session` sets that cookie and
+  never returns the token in JSON. The secret is `$PHI_ROOT/device-token`
+  (`0600`); `PHI_API_TOKEN` is an optional extra accepted value. MCP
+  session tokens are not valid here.
+- `GET /api/v1/attachments/:id` returns the bytes.
+  `GET /api/v1/attachments/:id/meta` returns JSON.
+  HTML responses reuse the file-viewer CSP (`script-src 'none'`). Bytes are
+  never sent on `/ws` — frames carry the message row, whose
+  `metadata.attachments` lists `{ id, filename, contentType, byteSize }`.
+- Messages reference uploads with `attachment:att_…` in markdown (agents)
+  or `metadata.attachments` (the composer). The web UI renders images
+  inline and other files as the existing chip/viewer, pointed at the
+  attachments API — not `/api/v1/files/*`.
+- When a harness advertises ACP `promptCapabilities.image`, image
+  attachments under 4 MiB are embedded as prompt image blocks. Other files
+  are listed in the prompt text; an MCP `read_attachment` tool is a
+  follow-up.
+
+Rejected for this slice: writing uploads into the workspace; treating a
+client filesystem path as a server path; putting bytes on `/ws`; resumable
+chunked uploads; native pickers / Quick Look / Share extensions.
+
 Rejected: an `attach_file` tool / `attachments` parameter (a tool-use
 behavior the model must remember, for marginal gain over links — additive
 later if rich cards are wanted); serving absolute filesystem paths (clients
 must work remote/mobile, and absolute paths leak host layout — the preamble
 tells agents to use workspace-relative paths).
+
+### 7.2 Doc comments
+
+Comment threads on shared markdown are ordinary threads with
+`threads.kind = 'doc_comment'` and a `doc_comment_anchors` row. They stay
+out of `list_threads` / channel flow / Activity. There is no agent-facing
+comment tool in v1 — the user creates comments; agents reply through
+`send_message`.
+
+Routing is mention-only: `@name` in the comment wakes that agent. An
+unmentioned comment files silently with nobody woken, and retry on it is a
+no-op (no default-agent fallback). The messaging preamble states this.
+
+HTTP (device-auth, same as the rest of the app API):
+
+- `GET /api/v1/channels/:id/doc-comments?root=&path=`
+- `POST /api/v1/channels/:id/doc-comments`
+- `GET /api/v1/channels/:id/doc-comments/summary`
+
+`GET /api/v1/threads/:id` includes `anchor` when the thread is a doc
+comment, so clients can canonicalize `/t/:id` and wrong-channel doc URLs
+to `/c/:channelId/doc/:id`.
 
 ## 8. Rejected alternatives
 

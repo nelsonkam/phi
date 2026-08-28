@@ -1,6 +1,11 @@
+import { useEffect } from "react";
 import { useNavigate, useParams } from "react-router";
 import { CheckCheck, LoaderCircle, RotateCcw } from "lucide-react";
 import type { ActivityItem } from "@/shared/types";
+import {
+  docCommentDeepLink,
+  shouldOpenActivityThreadPanel,
+} from "@/web/components/doc-comments";
 import { AuthorAvatar, authorLabel } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
 import { excerptText } from "@/web/lib/activity";
@@ -8,6 +13,7 @@ import {
   useActivity,
   useMarkAllRead,
   useRetryTurn,
+  useThread,
   useThreadTurn,
 } from "@/web/lib/queries";
 import { relativeTime } from "@/web/lib/time";
@@ -20,12 +26,30 @@ import { EmptyState, Page } from "../app";
 // moving between threads never leaves the queue.
 export function ActivityPage() {
   const { threadId } = useParams();
+  const navigate = useNavigate();
   const { data, isPending, fetchNextPage, hasNextPage, isFetchingNextPage } =
     useActivity();
   const markAllRead = useMarkAllRead();
   const items = data?.pages.flatMap((page) => page.activity) ?? [];
   const hasUnread = items.some((item) => item.unreadCount > 0);
   const selected = items.find((item) => item.thread.id === threadId);
+  const { data: urlThread, isFetched } = useThread(
+    threadId && !selected ? threadId : undefined,
+  );
+  const deepLink = docCommentDeepLink(
+    urlThread?.thread.channelId ?? "",
+    "thread",
+    urlThread?.thread,
+  );
+  useEffect(() => {
+    if (deepLink) navigate(deepLink, { replace: true });
+  }, [deepLink, navigate]);
+  const openPanel = shouldOpenActivityThreadPanel(
+    threadId,
+    Boolean(selected),
+    urlThread?.thread.kind,
+    isFetched,
+  );
 
   return (
     <Page
@@ -71,14 +95,22 @@ export function ActivityPage() {
           )}
         </div>
 
-        {threadId && (
+        {openPanel && threadId && (
           <ThreadPanel
             key={threadId}
-            channelId={selected?.thread.channelId ?? ""}
+            channelId={
+              selected?.thread.channelId ?? urlThread?.thread.channelId ?? ""
+            }
             channelName={selected?.channelName}
             threadId={threadId}
-            turnActive={selected?.thread.turnActive ?? false}
-            turnAgent={selected?.thread.turnAgent ?? null}
+            turnActive={
+              selected?.thread.turnActive ??
+              urlThread?.thread.turnActive ??
+              false
+            }
+            turnAgent={
+              selected?.thread.turnAgent ?? urlThread?.thread.turnAgent ?? null
+            }
             closeTo="/"
           />
         )}

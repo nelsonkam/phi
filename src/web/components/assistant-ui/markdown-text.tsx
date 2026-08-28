@@ -19,6 +19,7 @@ import {
   resolveLinkedPath,
   workspaceFileUrl,
 } from "@/web/lib/file-links";
+import { parseAttachmentHref, attachmentApiPath } from "@/web/lib/attachments";
 import { headingIdFromChildren, remarkHeadingIds } from "@/web/lib/heading-ids";
 import { remarkMentions } from "@/web/lib/remark-mentions";
 import { cn } from "@/web/lib/utils";
@@ -58,7 +59,10 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   };
 
   return (
-    <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
+    <div
+      data-comment-ineligible=""
+      className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs"
+    >
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
         {language}
       </span>
@@ -187,17 +191,20 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   a: function MarkdownLink({ className, href, children, ...props }) {
+    const label =
+      typeof children === "string"
+        ? children
+        : Array.isArray(children) &&
+            children.length === 1 &&
+            typeof children[0] === "string"
+          ? children[0]
+          : undefined;
+    if (href && parseAttachmentHref(href)) {
+      return <FileLink path={href} label={label} />;
+    }
     // A relative href is a workspace file (docs/mcp-tools.md §7). FileLink
     // resolves it against the active channel/root/base-dir scope.
     if (href && isWorkspaceHref(href)) {
-      const label =
-        typeof children === "string"
-          ? children
-          : Array.isArray(children) &&
-              children.length === 1 &&
-              typeof children[0] === "string"
-            ? children[0]
-            : undefined;
       return <FileLink path={href} label={label} />;
     }
     return (
@@ -217,29 +224,36 @@ const defaultComponents = memoizeMarkdownComponents({
   },
   img: function MarkdownImage({ className, src, alt, ...props }) {
     const scope = useFileLinkScope();
+    const attachment = typeof src === "string" ? parseAttachmentHref(src) : null;
     const workspacePath =
-      typeof src === "string" && isWorkspaceHref(src)
+      !attachment && typeof src === "string" && isWorkspaceHref(src)
         ? resolveLinkedPath(
             parseWorkspaceHref(src)?.path ?? src,
             scope.baseDir,
           )
         : undefined;
-    const resolvedSrc = workspacePath
-      ? workspaceFileUrl(workspacePath, {
-          channelId: scope.channelId,
-          root: scope.root,
-          fragment:
-            typeof src === "string"
-              ? parseWorkspaceHref(src)?.fragment
-              : undefined,
-        })
-      : src;
+    const resolvedSrc = attachment
+      ? attachmentApiPath(attachment.id)
+      : workspacePath
+        ? workspaceFileUrl(workspacePath, {
+            channelId: scope.channelId,
+            root: scope.root,
+            fragment:
+              typeof src === "string"
+                ? parseWorkspaceHref(src)?.fragment
+                : undefined,
+          })
+        : src;
     return (
       <ExpandableImage
         {...props}
         src={resolvedSrc}
         alt={alt ?? ""}
-        fallbackLabel={workspacePath ? fileBasename(workspacePath) : undefined}
+        fallbackLabel={
+          workspacePath
+            ? fileBasename(workspacePath)
+            : alt?.trim() || undefined
+        }
         className={className}
       />
     );
@@ -278,13 +292,15 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   table: ({ className, ...props }) => (
-    <table
-      className={cn(
-        "aui-md-table my-3 w-full border-separate border-spacing-0 overflow-y-auto",
-        className,
-      )}
-      {...props}
-    />
+    <div className="aui-md-table-wrapper my-3 w-full overflow-x-auto">
+      <table
+        className={cn(
+          "aui-md-table w-full border-separate border-spacing-0",
+          className,
+        )}
+        {...props}
+      />
+    </div>
   ),
   th: ({ className, ...props }) => (
     <th

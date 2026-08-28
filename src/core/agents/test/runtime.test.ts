@@ -98,6 +98,8 @@ test("the messaging preamble opens with the agent's own handle", () => {
   // The fake agent's "[intro]" marker keys on this sentence; every content
   // assertion carrying "[intro]" also proves the identity reached the prompt.
   expect(preamble).toContain("that handle is your own name in this thread");
+  expect(preamble).toContain("attachment:att_");
+  expect(preamble).toContain("Comment-thread turns");
 });
 
 test("a user message gets the agent's reply appended to its thread", async () => {
@@ -126,6 +128,91 @@ test("a user message gets the agent's reply appended to its thread", async () =>
     via: "turn-text-fallback",
   });
   expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  await done();
+});
+
+test("a doc-comment turn includes the anchored excerpt in the prompt", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const workspace = store.defaultWorkspace();
+  mkdirSync(join(workspace.rootPath, "channels", "general"), { recursive: true });
+  writeFileSync(
+    join(workspace.rootPath, "channels", "general", "notes.md"),
+    "# Intro\n\nThe unique quote lives here.\n",
+  );
+  const { thread, message } = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "@default what about this?" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "unique quote",
+      prefix: "The ",
+      suffix: " lives",
+      headingSlug: "intro",
+    },
+  );
+  const routing = await runtime.routeDocCommentContent(message.content);
+  runtime.handleUserMessage(message, routing.routedTo);
+  await runtime.settled(thread.id);
+  const reply = store.listMessages(thread.id).at(-1)!;
+  expect(reply.content).toContain("[doc-comment]");
+  expect(reply.content).toContain("what about this?");
+  await done();
+});
+
+test("an unmentioned doc-comment does not start a turn", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  const { thread, message } = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "looks off" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "unique quote",
+      prefix: "The ",
+      suffix: " lives",
+      headingSlug: "intro",
+    },
+  );
+  const routing = await runtime.routeDocCommentContent(message.content);
+  expect(routing).toEqual({ mentions: [], routedTo: [] });
+  runtime.handleUserMessage(message, routing.routedTo);
+  await runtime.settled(thread.id);
+  expect(store.listMessages(thread.id)).toHaveLength(1);
+  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  await done();
+});
+
+test("user attachments are listed in the prompt and images embed when supported", async () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["images"],
+  });
+  const id = `att_${"d".repeat(32)}`;
+  mkdirSync(join(store.rootPath, "uploads"), { recursive: true });
+  writeFileSync(join(store.rootPath, "uploads", id), png);
+  const attachment = store.createAttachment({
+    id,
+    workspaceId: store.defaultWorkspace().id,
+    filename: "shot.png",
+    contentType: "image/png",
+    byteSize: png.byteLength,
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "what is this",
+    metadata: { attachments: [attachment] },
+  });
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+  const reply = store.listMessages(thread.id)[1]!;
+  expect(reply.content).toContain("[attach]");
+  expect(reply.content).toContain("[image:image/png]");
+  expect(reply.content).toContain("what is this");
   await done();
 });
 

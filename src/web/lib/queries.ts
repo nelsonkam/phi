@@ -2,16 +2,21 @@ import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { queryClient } from "./query-client";
 import {
   createDefaultAgent,
+  createDocComment,
   createThread,
   fetchActivity,
   markAllRead,
   fetchAgent,
   fetchAgents,
+  fetchAuthSession,
   fetchChannels,
+  fetchDocComments,
+  fetchDocCommentSummary,
   fetchHarnessConfig,
   fetchHarnesses,
   fetchMessages,
   fetchSetupStatus,
+  fetchThread,
   fetchThreads,
   markThreadRead,
   retryTurn,
@@ -21,7 +26,12 @@ import {
 } from "./api";
 import type { UpdateAgentInput } from "./api";
 import { ACTIVITY_PAGE_SIZE, activityNextCursor } from "./activity";
-import type { Channel, Message, ServerFrame } from "@/shared/types";
+import type {
+  Channel,
+  Message,
+  ServerFrame,
+  Attachment,
+} from "@/shared/types";
 
 interface TurnPresenceState {
   ready: boolean;
@@ -35,12 +45,18 @@ export const queryKeys = {
   agents: ["agents"] as const,
   harnesses: ["harnesses"] as const,
   setupStatus: ["setup", "status"] as const,
+  authSession: ["auth", "session"] as const,
   harnessConfig: (harnessId: string) => ["harnesses", harnessId, "config"] as const,
   agent: (name: string) => ["agents", name] as const,
   channelThreads: (channelId: string) => ["channels", channelId, "threads"] as const,
   threadMessages: (threadId: string) => ["threads", threadId, "messages"] as const,
   turnPresence: ["threads", "turn-presence"] as const,
   activity: ["activity"] as const,
+  thread: (threadId: string) => ["threads", threadId] as const,
+  docComments: (channelId: string, rootId: string, path: string) =>
+    ["channels", channelId, "doc-comments", rootId, path] as const,
+  docCommentSummary: (channelId: string) =>
+    ["channels", channelId, "doc-comments", "summary"] as const,
 };
 
 // The Activity feed: one row per thread, newest latest-message first,
@@ -71,6 +87,7 @@ export function useMarkThreadRead() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.channelThreads(channelId),
       });
+      invalidateDocComments(channelId);
     },
   });
 }
@@ -103,6 +120,15 @@ export function useHarnesses() {
 
 export function useSetupStatus() {
   return useQuery({ queryKey: queryKeys.setupStatus, queryFn: fetchSetupStatus });
+}
+
+export function useAuthSession() {
+  return useQuery({
+    queryKey: queryKeys.authSession,
+    queryFn: fetchAuthSession,
+    staleTime: Infinity,
+    retry: false,
+  });
 }
 
 // Config listing is a live probe of the harness binary (it spawns a process),
@@ -154,6 +180,46 @@ export function useMessages(threadId: string) {
   });
 }
 
+export function useThread(threadId: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.thread(threadId ?? ""),
+    queryFn: () => fetchThread(threadId!),
+    enabled: Boolean(threadId),
+    retry: false,
+  });
+}
+
+export function useDocComments(
+  channelId: string | undefined,
+  rootId: string | undefined,
+  path: string | undefined,
+) {
+  return useQuery({
+    queryKey: queryKeys.docComments(channelId ?? "", rootId ?? "", path ?? ""),
+    queryFn: () => fetchDocComments(channelId!, rootId!, path!),
+    enabled: Boolean(channelId && rootId && path),
+  });
+}
+
+export function useDocCommentSummary(channelId: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.docCommentSummary(channelId ?? ""),
+    queryFn: () => fetchDocCommentSummary(channelId!),
+    enabled: Boolean(channelId),
+  });
+}
+
+export function useCreateDocComment(channelId: string) {
+  return useMutation({
+    mutationFn: (
+      input: Parameters<typeof createDocComment>[1],
+    ) => createDocComment(channelId, input),
+    onSuccess: () => {
+      invalidateDocComments(channelId);
+    },
+  });
+}
+
 export function useThreadTurn(threadId: string): {
   ready: boolean;
   agent: string | null;
@@ -172,7 +238,8 @@ export function useThreadTurn(threadId: string): {
 
 export function useCreateThread(channelId: string) {
   return useMutation({
-    mutationFn: (content: string) => createThread(channelId, content),
+    mutationFn: (input: { content: string; attachmentIds?: string[] }) =>
+      createThread(channelId, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.channelThreads(channelId),
@@ -183,11 +250,19 @@ export function useCreateThread(channelId: string) {
 
 export function useSendMessage(threadId: string) {
   return useMutation({
-    mutationFn: (content: string) => sendMessage(threadId, content),
+    mutationFn: (input: {
+      content: string;
+      attachmentIds?: string[];
+      attachments?: Attachment[];
+    }) =>
+      sendMessage(threadId, {
+        content: input.content,
+        attachmentIds: input.attachmentIds,
+      }),
     // The user's message appears the moment they hit send; the POST response
     // (or the WebSocket frame, whichever lands first) replaces it with the
     // committed row, and a failure rolls it back.
-    onMutate: async (content) => {
+    onMutate: async (input) => {
       const queryKey = queryKeys.threadMessages(threadId);
       await queryClient.cancelQueries({ queryKey });
       const cached = queryClient.getQueryData<{ messages: Message[] }>(queryKey);
@@ -199,8 +274,13 @@ export function useSendMessage(threadId: string) {
         threadId,
         author: "user",
         kind: "message",
-        content,
-        metadata: { optimistic: true },
+        content: input.content,
+        metadata: {
+          optimistic: true,
+          ...(input.attachments?.length
+            ? { attachments: input.attachments }
+            : {}),
+        },
         seq: (cached.messages.at(-1)?.seq ?? 0) + 1,
         createdAt: new Date().toISOString(),
       };
@@ -209,12 +289,12 @@ export function useSendMessage(threadId: string) {
       });
       return { optimisticId: optimistic.id };
     },
-    onError: (_error, _content, context) => {
+    onError: (_error, _input, context) => {
       if (context?.optimisticId) {
         removeMessageFromCache(threadId, context.optimisticId);
       }
     },
-    onSuccess: ({ message }, _content, context) => {
+    onSuccess: ({ message }, _input, context) => {
       if (context?.optimisticId) {
         removeMessageFromCache(threadId, context.optimisticId);
       }
@@ -298,12 +378,14 @@ export function applyServerFrame(frame: ServerFrame): void {
     case "message.appended":
       appendMessageToCache(frame.message);
       void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
+      invalidateDocComments(frame.message.channelId);
       break;
     case "thread.updated":
       void queryClient.invalidateQueries({
         queryKey: queryKeys.channelThreads(frame.thread.channelId),
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
+      invalidateDocComments(frame.thread.channelId);
       break;
     case "thread.turn":
       queryClient.setQueryData<TurnPresenceState>(
@@ -334,4 +416,10 @@ export function applyServerFrame(frame: ServerFrame): void {
       void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
       break;
   }
+}
+
+function invalidateDocComments(channelId: string): void {
+  void queryClient.invalidateQueries({
+    queryKey: ["channels", channelId, "doc-comments"],
+  });
 }

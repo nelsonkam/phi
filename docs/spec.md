@@ -84,17 +84,19 @@ Worker adapters must load the relevant `.agents/` instructions and translate or 
 │   └── settings.json
 ├── credentials/                 # used only by isolated credential mode
 ├── logs/
-└── tmp/
+├── tmp/
+├── device-token                 # 0600 device bearer for human clients
+└── uploads/                     # client attachments; not a workspace tree
 ```
 
 Permissions:
 
 - `~/.phi/`: `0700`
-- `runtime.db` and isolated credential files: `0600`
+- `runtime.db`, `device-token`, and isolated credential files: `0600`
 
 Credential mode defaults to `native`: Cursor, Claude, Codex, and Pi resolve authentication from their normal environment, user-home files, or operating-system credential stores. `isolated` mode instead relocates SDK configuration/authentication under `~/.phi/credentials` and requires a Phi key file or environment credential. Neither mode copies credentials into the managed workspace. Native SDK homes can also contain user-level harness configuration, so native reuse is not claimed to be a credential-only security boundary.
 
-Workers must not receive the runtime directory as a working directory or input path. Phi-owned tools should reject paths that resolve inside it unless the operation is an internal host operation.
+Workers must not receive the runtime directory as a working directory or input path. Phi-owned tools should reject paths that resolve inside it unless the operation is an internal host operation. Client-uploaded files live under `uploads/` as opaque ids; they are not workspace paths and are not git-checkpointed.
 
 ## 5. Components
 
@@ -605,3 +607,25 @@ Durable partial assistant frames and tool-progress checkpoints are deferred. The
 - Should failed worker changes always receive a WIP commit?
 - How should the coordinator select or roll over Pi session episodes?
 - Which `.agents/` files are injected into each worker harness, and in what order?
+
+## 16. Doc comments
+
+Shared markdown files can host comment threads anchored to a text
+selection. Each comment is a real thread (`threads.kind = 'doc_comment'`)
+plus a `doc_comment_anchors` row (quote, prefix, suffix, `heading_slug`).
+They do not appear in the channel flow or Activity.
+
+The user creates comments from the markdown viewer. Agents are woken only
+when `@mentioned` — there is no default-agent fallback. Retry on an
+unmentioned comment is a no-op.
+
+HTTP:
+
+- `GET /api/v1/channels/:id/doc-comments?root=&path=`
+- `POST /api/v1/channels/:id/doc-comments`
+- `GET /api/v1/channels/:id/doc-comments/summary`
+
+Deep links use `/c/:channelId/doc/:threadId`. `/t/:threadId` for a
+doc-comment thread redirects there. Selecting a comment scrolls its
+highlight into view, or the stored heading if the quote is detached.
+

@@ -48,6 +48,9 @@ async function handle(line: string): Promise<void> {
                     http: true,
                     sse: has("sse"),
                   },
+                  promptCapabilities: has("images")
+                    ? { image: true }
+                    : undefined,
                   sessionCapabilities:
                     has("no-resume") || has("load-only")
                       ? { additionalDirectories: {} }
@@ -170,7 +173,7 @@ async function handle(line: string): Promise<void> {
     case "session/prompt": {
       const params = msg.params as {
         sessionId: string;
-        prompt: Array<{ text?: string }>;
+        prompt: Array<{ type?: string; text?: string; mimeType?: string }>;
       };
       const session = sessions.get(params.sessionId)!;
       session.turn += 1;
@@ -180,6 +183,10 @@ async function handle(line: string): Promise<void> {
       }
       const promptText = params.prompt
         .map((block) => block.text ?? "")
+        .join("");
+      const imageMarks = params.prompt
+        .filter((block) => block.type === "image")
+        .map((block) => `[image:${block.mimeType}] `)
         .join("");
       // The live message is the prompt's last blank-line-separated segment
       // (after the optional preamble and catch-up blocks), labeled only when
@@ -215,6 +222,12 @@ async function handle(line: string): Promise<void> {
       )
         ? "[since] "
         : "";
+      const attach = promptText.includes("server-owned attachments")
+        ? "[attach] "
+        : "";
+      const docComment = promptText.includes("comment thread on a markdown document")
+        ? "[doc-comment] "
+        : "";
       const roots =
         has("roots")
           ? `[roots=${session.additionalDirectories.join(",")}] `
@@ -244,7 +257,7 @@ async function handle(line: string): Promise<void> {
         break;
       }
       for (const chunk of [
-        `${model}${intro}${catchup}${since}${nudge}${roots}${mcps}echo#${session.turn}: `,
+        `${model}${intro}${catchup}${since}${nudge}${roots}${mcps}${attach}${docComment}${imageMarks}echo#${session.turn}: `,
         text,
       ]) {
         send({

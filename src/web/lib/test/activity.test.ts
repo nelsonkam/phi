@@ -32,6 +32,7 @@ function item(seq: number): ActivityItem {
       channelId: "ch",
       title: null,
       status: "open",
+      kind: "chat",
       lastSeq: seq,
       turnActive: false,
       turnAgent: null,

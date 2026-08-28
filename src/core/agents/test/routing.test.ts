@@ -4,6 +4,7 @@ import { writeAgent, writeDefaultAgent } from "@/core/agents/registry";
 import {
   ExplicitRecipientRequiredError,
   routeAgentContent,
+  routeDocCommentContent,
   routeUserContent,
   stripLeadingMention,
   unroutedPeerMentions,
@@ -261,4 +262,29 @@ test("send-path routing rejects a leading handle without `to`", async () => {
       strict,
     ),
   ).toEqual({ mentions: ["reviewer"], routedTo: [] });
+});
+
+test("doc comments route only known mentions and skip the default fallback", async () => {
+  const root = await workspaceWithAgents();
+
+  expect(await routeDocCommentContent(root, "looks off")).toEqual({
+    mentions: [],
+    routedTo: [],
+  });
+  expect(await routeDocCommentContent(root, "@default check this")).toEqual({
+    mentions: ["default"],
+    routedTo: ["default"],
+  });
+  expect(
+    await routeDocCommentContent(root, "@reviewer check this, cc @default"),
+  ).toEqual({
+    mentions: ["reviewer", "default"],
+    routedTo: ["reviewer", "default"],
+    speculative: ["default"],
+  });
+  expect(await routeDocCommentContent(root, "ask @reviewer about this")).toEqual({
+    mentions: ["reviewer"],
+    routedTo: ["reviewer"],
+    speculative: ["reviewer"],
+  });
 });

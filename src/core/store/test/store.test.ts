@@ -48,6 +48,30 @@ test("createThread writes the thread and its first message atomically", () => {
   store.close();
 });
 
+test("createAttachment persists metadata and titles attachment-only threads", () => {
+  const { store, channel } = chatFixture();
+  const id = `att_${"c".repeat(32)}`;
+  const created = store.createAttachment({
+    id,
+    workspaceId: store.defaultWorkspace().id,
+    filename: "screenshot.png",
+    contentType: "image/png",
+    byteSize: 12,
+  });
+  expect(store.getAttachment(id)).toEqual(created);
+  expect(store.getAttachment("att_" + "0".repeat(32))).toBeNull();
+
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "",
+    metadata: { attachments: [created] },
+  });
+  expect(thread.title).toBe("screenshot.png");
+  expect(message.content).toBe("");
+  store.close();
+});
+
 test("creates channels with ordered attached folders", () => {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
@@ -373,6 +397,70 @@ test("markAllThreadsRead clears every thread in the workspace", () => {
     metadata: { agent: "default" },
   });
   expect(store.listActivity(first.thread.workspaceId)[0]!.unreadCount).toBe(1);
+  store.close();
+});
+
+test("doc-comment threads stay out of chat gates and survive mark-all-read", () => {
+  const { store, channel } = chatFixture();
+  const chat = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Chat",
+  });
+  const comment = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "Looks off" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "unique quote",
+      prefix: "before ",
+      suffix: " after",
+      headingSlug: "intro",
+    },
+  );
+  expect(store.getDocCommentAnchor(comment.thread.id)?.quote).toBe("unique quote");
+  expect(
+    store.listDocComments(channel.id, "workspace", "channels/general/notes.md")[0]!
+      .unreadCount,
+  ).toBe(0);
+
+  store.appendMessage(comment.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "Noted",
+    metadata: { agent: "default" },
+  });
+
+  expect(comment.thread.kind).toBe("doc_comment");
+  expect(store.listThreads(channel.id).map((t) => t.id)).toEqual([chat.thread.id]);
+  expect(store.listActivity(chat.thread.workspaceId).map((item) => item.thread.id)).toEqual([
+    chat.thread.id,
+  ]);
+  expect(store.countWaitingThreads(chat.thread.workspaceId)).toBe(0);
+
+  const listed = store.listDocComments(
+    channel.id,
+    "workspace",
+    "channels/general/notes.md",
+  );
+  expect(listed).toHaveLength(1);
+  expect(listed[0]!.unreadCount).toBe(1);
+  expect(store.listDocCommentSummary(channel.id)).toEqual([
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      commentCount: 1,
+      unreadCount: 1,
+    },
+  ]);
+
+  store.markAllThreadsRead(chat.thread.workspaceId);
+  expect(store.listActivity(chat.thread.workspaceId)[0]!.unreadCount).toBe(0);
+  expect(
+    store.listDocComments(channel.id, "workspace", "channels/general/notes.md")[0]!
+      .unreadCount,
+  ).toBe(1);
   store.close();
 });
 

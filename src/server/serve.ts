@@ -19,6 +19,21 @@ import {
   updateAgent,
 } from "@/server/services/agents";
 import { createFileHandler } from "@/server/files";
+import {
+  parseDocCommentBody,
+  resolveMarkdownDoc,
+} from "@/server/doc-comments";
+import {
+  createAttachmentHandlers,
+  parseByteLimit,
+} from "@/server/uploads";
+import { DeviceAuth, requireDeviceAuth, sessionResponse } from "@/server/device-auth";
+import {
+  DEFAULT_UPLOAD_MAX_BYTES,
+  DEFAULT_UPLOAD_MAX_FILES,
+  isAttachmentId,
+} from "@/shared/attachments";
+import type { Attachment } from "@/shared/types";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { createMessageSearch } from "@/core/search/message-search";
@@ -47,6 +62,13 @@ export async function startServer(): Promise<void> {
     ...(Number.isInteger(hopBudget) && hopBudget >= 0 ? { hopBudget } : {}),
   });
   const fileHandler = createFileHandler(workspace.rootPath, store);
+  const deviceAuth = new DeviceAuth(store.rootPath);
+  const attachments = createAttachmentHandlers(store, {
+    maxBytes: parseByteLimit(
+      process.env.PHI_UPLOAD_MAX_BYTES,
+      DEFAULT_UPLOAD_MAX_BYTES,
+    ),
+  });
   const mcpHandler = createMcpHandler(
     store,
     mcpTokens,
@@ -72,6 +94,10 @@ export async function startServer(): Promise<void> {
       },
       "/api/v1/health": () =>
         Response.json(healthPayload(workspace.id, checkpoints)),
+      "/api/v1/auth/session": {
+        GET: (req, server) =>
+          sessionResponse(deviceAuth, req, isLoopback(req, server)),
+      },
       "/api/v1/checkpoints": {
         GET: (req, server) => {
           if (!isLoopback(req, server)) {
@@ -146,22 +172,17 @@ export async function startServer(): Promise<void> {
           return Response.json({ threads: store.listThreads(req.params.id!) });
         },
         POST: async (req) => {
-          const content = await messageContent(req);
-          if (content === null) {
-            return Response.json(
-              { error: "content is required" },
-              { status: 400 },
-            );
-          }
+          const posted = await parseUserPost(req, store);
+          if (!posted.ok) return posted.response;
           if (!store.getChannel(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
-          const routing = await runtime.routeUserContent(content);
+          const routing = await runtime.routeUserContent(posted.content);
           const result = store.createThread(req.params.id!, {
             author: "user",
             kind: "message",
-            content,
-            metadata: { ...routing },
+            content: posted.content,
+            metadata: { ...routing, ...attachmentMeta(posted.attachments) },
           });
           runtime.handleUserMessage(result.message, routing.routedTo);
           return Response.json(result, { status: 201 });
@@ -175,25 +196,21 @@ export async function startServer(): Promise<void> {
           return Response.json({ messages: store.listMessages(req.params.id!) });
         },
         POST: async (req) => {
-          const content = await messageContent(req);
-          if (content === null) {
-            return Response.json(
-              { error: "content is required" },
-              { status: 400 },
-            );
-          }
-          if (!store.getThread(req.params.id!)) {
+          const posted = await parseUserPost(req, store);
+          if (!posted.ok) return posted.response;
+          const thread = store.getThread(req.params.id!);
+          if (!thread) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
-          const routing = await runtime.routeUserContent(
-            content,
-            req.params.id!,
-          );
+          const routing =
+            thread.kind === "doc_comment"
+              ? await runtime.routeDocCommentContent(posted.content)
+              : await runtime.routeUserContent(posted.content, thread.id);
           const message = store.appendMessage(req.params.id!, {
             author: "user",
             kind: "message",
-            content,
-            metadata: { ...routing },
+            content: posted.content,
+            metadata: { ...routing, ...attachmentMeta(posted.attachments) },
           });
           runtime.handleUserMessage(message, routing.routedTo);
           return Response.json({ message }, { status: 201 });
@@ -203,7 +220,7 @@ export async function startServer(): Promise<void> {
       // restart, harness crash). The turn machinery treats it like any other
       // queued turn.
       "/api/v1/threads/:id/retry": {
-        POST: (req) => {
+        POST: async (req) => {
           const thread = store.getThread(req.params.id!);
           if (!thread) {
             return Response.json({ error: "not found" }, { status: 404 });
@@ -223,7 +240,14 @@ export async function startServer(): Promise<void> {
               { status: 400 },
             );
           }
-          runtime.handleUserMessage(lastUserMessage);
+          if (thread.kind === "doc_comment") {
+            const routing = await runtime.routeDocCommentContent(
+              lastUserMessage.content,
+            );
+            runtime.handleUserMessage(lastUserMessage, routing.routedTo);
+          } else {
+            runtime.handleUserMessage(lastUserMessage);
+          }
           return Response.json({ ok: true }, { status: 202 });
         },
       },
@@ -247,12 +271,141 @@ export async function startServer(): Promise<void> {
           return Response.json({ ok: true });
         },
       },
+      "/api/v1/threads/:id": {
+        GET: (req) => {
+          const thread = store.getThread(req.params.id!);
+          if (!thread) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json({
+            thread,
+            anchor:
+              thread.kind === "doc_comment"
+                ? store.getDocCommentAnchor(thread.id)
+                : null,
+          });
+        },
+      },
+      "/api/v1/channels/:id/doc-comments/summary": {
+        GET: (req) => {
+          if (!store.getChannel(req.params.id!)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json({
+            docs: store.listDocCommentSummary(req.params.id!),
+          });
+        },
+      },
+      "/api/v1/channels/:id/doc-comments": {
+        GET: (req) => {
+          const channelId = req.params.id!;
+          if (!store.getChannel(channelId)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          const url = new URL(req.url);
+          const rootId = url.searchParams.get("root") ?? "";
+          const path = url.searchParams.get("path") ?? "";
+          if (!rootId || !path) {
+            return Response.json(
+              { error: "root and path are required" },
+              { status: 400 },
+            );
+          }
+          return Response.json({
+            comments: store.listDocComments(channelId, rootId, path),
+          });
+        },
+        POST: async (req) => {
+          const channelId = req.params.id!;
+          if (!store.getChannel(channelId)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          const body = await req.json().catch(() => null);
+          const parsed = parseDocCommentBody(body);
+          if (!parsed.ok) {
+            return Response.json({ error: parsed.error }, { status: parsed.status });
+          }
+          const resolved = resolveMarkdownDoc(
+            store,
+            workspace.rootPath,
+            channelId,
+            parsed.value.rootId,
+            parsed.value.path,
+          );
+          if (!resolved.ok) {
+            return Response.json({ error: resolved.error }, { status: resolved.status });
+          }
+          const attachments = resolveAttachmentIds(
+            store,
+            body && typeof body === "object" && !Array.isArray(body)
+              ? (body as { attachmentIds?: unknown }).attachmentIds
+              : undefined,
+          );
+          if (!attachments.ok) {
+            return Response.json(
+              { error: attachments.error },
+              { status: attachments.status },
+            );
+          }
+          if (!parsed.value.content && attachments.attachments.length === 0) {
+            return Response.json(
+              { error: "content or an attachment is required" },
+              { status: 400 },
+            );
+          }
+          const routing = await runtime.routeDocCommentContent(
+            parsed.value.content,
+          );
+          const result = store.createDocComment(
+            channelId,
+            {
+              author: "user",
+              kind: "message",
+              content: parsed.value.content,
+              metadata: { ...routing, ...attachmentMeta(attachments.attachments) },
+            },
+            {
+              rootId: parsed.value.rootId,
+              path: parsed.value.path,
+              quote: parsed.value.quote,
+              prefix: parsed.value.prefix,
+              suffix: parsed.value.suffix,
+              headingSlug: parsed.value.headingSlug,
+            },
+          );
+          runtime.handleUserMessage(result.message, routing.routedTo);
+          return Response.json(result, { status: 201 });
+        },
+      },
       // Read-only file serving for message file links. /files is the
       // managed workspace; channel routes search attached folders too
       // and redirect to an unambiguous file-roots URL.
       "/api/v1/files/*": { GET: fileHandler },
       "/api/v1/channels/:id/files/*": { GET: fileHandler },
       "/api/v1/channels/:id/file-roots/:root/*": { GET: fileHandler },
+      // Client uploads. Bytes never go over /ws; ids are server-issued.
+      // Require the device bearer (Authorization or phi-device cookie).
+      "/api/v1/attachments": {
+        POST: async (req) => {
+          const denied = requireDeviceAuth(deviceAuth, req);
+          if (denied) return denied;
+          return attachments.post(req);
+        },
+      },
+      "/api/v1/attachments/:id": {
+        GET: async (req) => {
+          const denied = requireDeviceAuth(deviceAuth, req);
+          if (denied) return denied;
+          return attachments.get(req, { id: req.params.id! });
+        },
+      },
+      "/api/v1/attachments/:id/meta": {
+        GET: async (req) => {
+          const denied = requireDeviceAuth(deviceAuth, req);
+          if (denied) return denied;
+          return attachments.meta(req, { id: req.params.id! });
+        },
+      },
       "/api/v1/agents": async () => Response.json(await listAgents(workspace.rootPath)),
       "/api/v1/harnesses": () =>
         Response.json({ harnesses: detectHarnesses() }),
@@ -349,14 +502,75 @@ export async function startServer(): Promise<void> {
   console.log(`phi serving on http://localhost:${server.port}`);
 }
 
-async function messageContent(req: Request): Promise<string | null> {
+async function parseUserPost(
+  req: Request,
+  store: PhiStore,
+): Promise<
+  | { ok: true; content: string; attachments: Attachment[] }
+  | { ok: false; response: Response }
+> {
   const body = (await req.json().catch(() => null)) as {
     content?: unknown;
+    attachmentIds?: unknown;
   } | null;
-  const content = body?.content;
-  return typeof content === "string" && content.trim().length > 0
-    ? content.trim()
-    : null;
+  const rawContent = body?.content;
+  const content =
+    typeof rawContent === "string" ? rawContent.trim() : "";
+  const resolved = resolveAttachmentIds(store, body?.attachmentIds);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      response: Response.json({ error: resolved.error }, { status: resolved.status }),
+    };
+  }
+  if (!content && resolved.attachments.length === 0) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "content or an attachment is required" },
+        { status: 400 },
+      ),
+    };
+  }
+  return { ok: true, content, attachments: resolved.attachments };
+}
+
+function resolveAttachmentIds(
+  store: PhiStore,
+  raw: unknown,
+):
+  | { ok: true; attachments: Attachment[] }
+  | { ok: false; error: string; status: number } {
+  if (raw === undefined) return { ok: true, attachments: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: "attachmentIds must be an array", status: 400 };
+  }
+  if (raw.length > DEFAULT_UPLOAD_MAX_FILES) {
+    return { ok: false, error: "too many attachments", status: 400 };
+  }
+  const seen = new Set<string>();
+  const attachments: Attachment[] = [];
+  for (const id of raw) {
+    if (typeof id !== "string" || !isAttachmentId(id)) {
+      return { ok: false, error: "invalid attachment id", status: 400 };
+    }
+    if (seen.has(id)) {
+      return { ok: false, error: "duplicate attachment id", status: 400 };
+    }
+    seen.add(id);
+    const attachment = store.getAttachment(id);
+    if (!attachment) {
+      return { ok: false, error: "unknown attachment", status: 400 };
+    }
+    attachments.push(attachment);
+  }
+  return { ok: true, attachments };
+}
+
+function attachmentMeta(
+  attachments: Attachment[],
+): { attachments: Attachment[] } | Record<string, never> {
+  return attachments.length > 0 ? { attachments } : {};
 }
 
 const HTTP_METHODS = new Set([

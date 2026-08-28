@@ -21,17 +21,46 @@ export interface Channel {
 
 export type ThreadStatus = "open" | "settled" | "archived";
 
+export type ThreadKind = "chat" | "doc_comment";
+
 export interface Thread {
   id: string;
   workspaceId: string;
   channelId: string;
   title: string | null;
   status: ThreadStatus;
+  kind: ThreadKind;
   lastSeq: number;
   turnActive: boolean;
   turnAgent: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DocCommentAnchor {
+  threadId: string;
+  rootId: string;
+  path: string;
+  quote: string;
+  prefix: string;
+  suffix: string;
+  headingSlug: string | null;
+}
+
+export interface DocCommentThread {
+  thread: Thread;
+  anchor: DocCommentAnchor;
+  messageCount: number;
+  rootMessage: Message | null;
+  latestMessage: Message | null;
+  unreadCount: number;
+}
+
+export interface DocCommentDocSummary {
+  rootId: string;
+  path: string;
+  commentCount: number;
+  unreadCount: number;
 }
 
 // A thread as rendered in a channel's message flow: the root message plus
@@ -55,6 +84,17 @@ export interface Message {
   content: string;
   metadata: Record<string, unknown>;
   seq: number;
+  createdAt: string;
+}
+
+// A client-uploaded blob stored under $PHI_ROOT/uploads, never a workspace
+// path. Messages reference these by id in metadata.attachments; bytes stay
+// on authenticated HTTP, not /ws.
+export interface Attachment {
+  id: string;
+  filename: string;
+  contentType: string;
+  byteSize: number;
   createdAt: string;
 }
 

@@ -74,6 +74,11 @@ spawned jobs, results, iteration. It is the unit that:
 - Serializes its own coordinator turns (turn lock keyed by thread id).
 - Owns its jobs (`jobs.thread_id`) and messages (`messages.thread_id`).
 
+`threads.kind` is `'chat'` (channel/Activity) or `'doc_comment'` (anchored
+to a shared markdown file; see §3.5). Chat-only store gates keep
+doc-comment threads out of the channel flow, Activity, waiting badge, and
+"mark all read."
+
 Threads settle (single-exchange threads auto-settle so the sidebar does not
 fill) and archive; their sessions archive with them.
 
@@ -87,6 +92,27 @@ same transaction.
 
 The outbox effectively already became this after delivery was dropped;
 `outbox` is superseded by `messages`.
+
+### 3.5 Doc comments
+
+A doc comment is a real thread (`kind = 'doc_comment'`) plus a
+`doc_comment_anchors` row (text-quote selector: quote, prefix, suffix,
+nearest `heading_slug`). The user creates comments from a text selection in
+the markdown viewer; agents reply only when mentioned. Unmentioned comments
+file as threads but wake nobody — there is no default-agent fallback, and
+retry on an unmentioned comment is a no-op.
+
+Endpoints (channel-scoped, same device auth as the rest of the API):
+
+- `GET /api/v1/channels/:id/doc-comments?root=&path=` — comments on one file
+- `POST /api/v1/channels/:id/doc-comments` — create (user-only)
+- `GET /api/v1/channels/:id/doc-comments/summary` — per-doc unread/count
+  for file-chip badges and the "docs with comments" browser
+
+`GET /api/v1/threads/:id` returns `{ thread, anchor }` so `/t/:threadId` and
+wrong-channel `/c/:channelId/doc/:id` can redirect to the canonical
+`/c/:channelId/doc/:id`. Deep links scroll the highlight into view; if the
+quote is detached, `heading_slug` is the scroll fallback.
 
 ## 4. Schema direction (migration 004)
 
@@ -106,6 +132,7 @@ CREATE TABLE threads (
   channel_id TEXT NOT NULL REFERENCES channels(id),
   title TEXT,
   status TEXT NOT NULL DEFAULT 'open',   -- open | settled | archived
+  kind TEXT NOT NULL DEFAULT 'chat' CHECK (kind IN ('chat', 'doc_comment')),
   last_seq INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -300,8 +327,9 @@ authorities, which correlates more with multi-workspace than naming.
   credential-free dev harness.
 - HTTP JSON API for commands and keyset-paginated queries:
   `GET /channels/:id/threads?cursor=`, `GET /threads/:id/messages?before=`,
-  `POST /threads/:id/messages`, `GET /workers`, `POST /jobs/:id/cancel`,
-  persona/worker endpoints.
+  `POST /threads/:id/messages`, `GET /channels/:id/doc-comments`,
+  `POST /channels/:id/doc-comments`, `GET /channels/:id/doc-comments/summary`,
+  `GET /workers`, `POST /jobs/:id/cancel`, persona/worker endpoints.
 - WebSocket deltas fed by a change hook in `PhiStore` (post-commit emit) to
   a broadcast hub: `message.appended`, `thread.updated`,
   `job.status_changed`. Replaces the TUI controller's 100ms poll-and-diff.
@@ -339,9 +367,11 @@ Security posture changes character from filesystem trust to network identity:
 6. Personas: loader, `dispatch_job` parameter, brief composition, doctor
    checks.
 7. Later: multi-space registration (schema already allows multiple
-   workspaces; `app.ts` hardcodes one today), file/image uploads written
-   into the workspace and referenced from message metadata, mobile push
+   workspaces; `app.ts` hardcodes one today), mobile push
    notifications, fair cross-channel job scheduling if starvation appears.
+   Client file uploads land as server-owned attachments under
+   `$PHI_ROOT/uploads` (see [mcp-tools.md](./mcp-tools.md) §7.1), not as
+   workspace files.
 
 Step ordering note: per-thread sessions and channel directories must land
 with or before client work — without them channels are cosmetic, because all

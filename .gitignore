@@ -1,4 +1,5 @@
 /vendor/pi/
+/.worktrees/
 node_modules/
 .phi/
 dist/

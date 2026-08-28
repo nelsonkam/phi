@@ -9,6 +9,8 @@ import m007 from "./migrations/007_thread_reads.sql" with { type: "text" };
 import m008 from "./migrations/008_git_checkpoints.sql" with { type: "text" };
 import m009 from "./migrations/009_git_checkpoint_ordinal.sql" with { type: "text" };
 import m010 from "./migrations/010_mcp_fingerprint.sql" with { type: "text" };
+import m011 from "./migrations/011_attachments.sql" with { type: "text" };
+import m012 from "./migrations/012_doc_comments.sql" with { type: "text" };
 
 // Explicit list keeps migrations ordered and bundle-safe (no directory scan).
 const MIGRATIONS: Array<{ id: string; sql: string }> = [
@@ -22,6 +24,8 @@ const MIGRATIONS: Array<{ id: string; sql: string }> = [
   { id: "008_git_checkpoints", sql: m008 },
   { id: "009_git_checkpoint_ordinal", sql: m009 },
   { id: "010_mcp_fingerprint", sql: m010 },
+  { id: "011_attachments", sql: m011 },
+  { id: "012_doc_comments", sql: m012 },
 ];
 
 export function migrate(db: Database): void {
