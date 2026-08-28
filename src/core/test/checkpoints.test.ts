@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CheckpointHttpError, CheckpointService } from "@/core/checkpoints";
 import { GitWorkspace, runGit } from "@/core/git";
+import { gitRemotePath } from "@/core/paths";
 import { PhiStore } from "@/core/store/store";
 import { ensureWorkspace } from "@/core/workspace";
 import { tempDir } from "@/testing/tmpdir";
@@ -252,5 +253,259 @@ test("recovered trailers stay in Git order when timestamps tie", async () => {
   );
   expect(store.latestCheckpoint(workspace.id)?.commitSha).toBe(head!.commitSha);
   expect(store.listCheckpoints(workspace.id)[0]?.commitSha).toBe(head!.commitSha);
+  store.close();
+});
+
+function gitOf(checkpoints: CheckpointService): GitWorkspace {
+  return (checkpoints as unknown as { git: GitWorkspace }).git;
+}
+
+async function remoteFixture() {
+  const root = tempDir("phi-cp-");
+  const store = new PhiStore(root);
+  const workspace = store.defaultWorkspace();
+  mkdirSync(workspace.rootPath, { recursive: true });
+  ensureWorkspace(workspace.rootPath);
+  const bare = tempDir("phi-bare-");
+  await runGit(bare, ["init", "--bare", "-b", "main"]);
+  writeFileSync(gitRemotePath(root), `file://${bare}\n`);
+  const checkpoints = new CheckpointService(store, workspace.rootPath);
+  return { store, workspace, checkpoints, bare };
+}
+
+test("push after checkpoint updates a file remote", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("ok");
+  expect(checkpoints.health().status).toBe("ok");
+  const head = store.latestCheckpoint(workspace.id)!.commitSha;
+  const remoteHead = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(remoteHead).toBe(head!);
+  store.close();
+});
+
+test("health is pending until the first push settles", async () => {
+  const { store, checkpoints } = await remoteFixture();
+  const git = gitOf(checkpoints);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = git.pushSha.bind(git);
+  git.pushSha = async (sha, options) => {
+    await blocked;
+    return original(sha, options);
+  };
+  await checkpoints.initialize();
+  expect(checkpoints.health().status).toBe("ok");
+  expect(checkpoints.remoteHealth().status).toBe("pending");
+  expect(checkpoints.remoteHealth().configured).toBe(true);
+  expect(checkpoints.remoteHealth().displayUrl).toBeNull();
+  release();
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("ok");
+  store.close();
+});
+
+test("flush does not wait for a delayed push", async () => {
+  const { store, checkpoints } = await remoteFixture();
+  const git = gitOf(checkpoints);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = git.pushSha.bind(git);
+  git.pushSha = async (sha, options) => {
+    await blocked;
+    return original(sha, options);
+  };
+  await checkpoints.initialize();
+  const started = Date.now();
+  await checkpoints.flush();
+  expect(Date.now() - started).toBeLessThan(200);
+  release();
+  await checkpoints.flushRemote();
+  store.close();
+});
+
+test("push failure degrades remote health only and does not hot-loop", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  const other = tempDir("phi-other-");
+  await runGit(other, ["init", "-b", "main"]);
+  writeFileSync(join(other, "x.md"), "x\n");
+  await runGit(other, ["add", "x.md"]);
+  await runGit(other, [
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-m",
+    "n",
+  ]);
+  await runGit(other, ["remote", "add", "origin", `file://${bare}`]);
+  await runGit(other, ["push", "origin", "HEAD:refs/heads/main"]);
+
+  const git = gitOf(checkpoints);
+  let pushes = 0;
+  const original = git.pushSha.bind(git);
+  git.pushSha = async (sha, options) => {
+    pushes += 1;
+    return original(sha, options);
+  };
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  expect(checkpoints.health().status).toBe("ok");
+  expect(checkpoints.remoteHealth().status).toBe("degraded");
+  expect(checkpoints.remoteHealth().error).toBe("push failed");
+  expect(store.listCheckpoints(workspace.id).length).toBeGreaterThan(0);
+  const afterFail = pushes;
+  expect(afterFail).toBeGreaterThanOrEqual(1);
+  await Bun.sleep(250);
+  expect(pushes).toBe(afterFail);
+  store.close();
+});
+
+test("commit-success insert-failure recovery also schedules the recovered HEAD", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  const original = store.insertCheckpoint.bind(store);
+  let failNext = true;
+  store.insertCheckpoint = ((input: Parameters<PhiStore["insertCheckpoint"]>[0]) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("insert failed");
+    }
+    return original(input);
+  }) as PhiStore["insertCheckpoint"];
+
+  writeFileSync(join(workspace.rootPath, "channels", "orphan.md"), "orphan\n");
+  expect(await checkpoints.checkpoint({ trigger: "turn" })).toBeNull();
+  expect(checkpoints.health().status).toBe("degraded");
+
+  const git = new GitWorkspace(workspace.rootPath);
+  const head = await git.head();
+  expect(store.checkpointBySha(head!)).toBeNull();
+
+  expect(await checkpoints.checkpoint({ trigger: "turn" })).toBeNull();
+  expect(checkpoints.health().status).toBe("ok");
+  expect(store.checkpointBySha(head!)).toBeTruthy();
+  await checkpoints.flushRemote();
+  const remoteHead = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(remoteHead).toBe(head!);
+  store.close();
+});
+
+test("flushRemote uses one overall deadline", async () => {
+  const { store, checkpoints } = await remoteFixture();
+  const git = gitOf(checkpoints);
+  const hang = (signal?: AbortSignal) =>
+    new Promise<void>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("hang")), 10_000);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("aborted"));
+        },
+        { once: true },
+      );
+    });
+  git.ensureOrigin = async (_url, options) => hang(options?.signal);
+  git.pushSha = async (_sha, options) => hang(options?.signal);
+  await checkpoints.initialize();
+  const started = Date.now();
+  await checkpoints.flushRemote(400);
+  expect(Date.now() - started).toBeLessThan(400 + 200 + 500 + 750);
+  expect(checkpoints.remoteHealth().status).toBe("degraded");
+  store.close();
+});
+
+test("two coalesced checkpoints push the latest SHA", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  writeFileSync(join(workspace.rootPath, "channels", "a.md"), "one\n");
+  await checkpoints.checkpoint({ trigger: "turn" });
+  writeFileSync(join(workspace.rootPath, "channels", "a.md"), "two\n");
+  const second = await checkpoints.checkpoint({ trigger: "turn" });
+  await checkpoints.flushRemote();
+  const remoteHead = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(remoteHead).toBe(second!.commitSha);
+  store.close();
+});
+
+test("close drains a newer SHA after an older in-flight push fails", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  const git = gitOf(checkpoints);
+  const original = git.pushSha.bind(git);
+  let calls = 0;
+  let failA!: (error: Error) => void;
+  const blockedA = new Promise<void>((_, reject) => {
+    failA = reject;
+  });
+  git.pushSha = async (sha, options) => {
+    calls += 1;
+    if (calls === 1) await blockedA;
+    return original(sha, options);
+  };
+  writeFileSync(join(workspace.rootPath, "channels", "a.md"), "A\n");
+  await checkpoints.checkpoint({ trigger: "turn" });
+  const started = Date.now();
+  while (calls < 1 && Date.now() - started < 2_000) await Bun.sleep(10);
+  expect(calls).toBe(1);
+  writeFileSync(join(workspace.rootPath, "channels", "a.md"), "B\n");
+  const shaB = await checkpoints.checkpoint({ trigger: "turn" });
+  const closing = checkpoints.close();
+  failA(new Error("A failed"));
+  await closing;
+  expect(calls).toBeGreaterThanOrEqual(2);
+  const remoteHead = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(remoteHead).toBe(shaB!.commitSha);
+});
+
+test("worker does not push when ensureOrigin cannot clear a stale pushurl", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  const pushedSha = store.latestCheckpoint(workspace.id)!.commitSha;
+  const git = gitOf(checkpoints);
+  const destB = tempDir("phi-stale-b-");
+  await runGit(destB, ["init", "--bare", "-b", "main"]);
+  await runGit(workspace.rootPath, [
+    "remote",
+    "set-url",
+    "--push",
+    "origin",
+    `file://${destB}`,
+  ]);
+  (
+    git as unknown as { clearOriginPushUrls: () => Promise<void> }
+  ).clearOriginPushUrls = async () => undefined;
+  let pushes = 0;
+  const original = git.pushSha.bind(git);
+  git.pushSha = async (sha, options) => {
+    pushes += 1;
+    return original(sha, options);
+  };
+  writeFileSync(join(workspace.rootPath, "channels", "stale.md"), "nope\n");
+  await checkpoints.checkpoint({ trigger: "turn" });
+  await checkpoints.flushRemote();
+  expect(pushes).toBe(0);
+  expect(checkpoints.health().status).toBe("ok");
+  expect(checkpoints.remoteHealth().status).toBe("degraded");
+  const bHasMain = await runGit(
+    destB,
+    ["rev-parse", "--verify", "-q", "refs/heads/main"],
+    { allowFail: true },
+  );
+  expect(bHasMain.exitCode).not.toBe(0);
+  const stillA = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(stillA).toBe(pushedSha);
+  expect(store.latestCheckpoint(workspace.id)!.commitSha).not.toBe(pushedSha);
   store.close();
 });

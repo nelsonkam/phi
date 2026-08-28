@@ -1,8 +1,21 @@
-import { GitWorkspace, type CheckpointTrigger } from "@/core/git";
+import {
+  GitWorkspace,
+  GIT_DRAIN_MS,
+  GIT_TERM_GRACE_MS,
+  type CheckpointTrigger,
+} from "@/core/git";
+import {
+  GIT_REMOTE_COMMAND_TIMEOUT_MS,
+  GIT_REMOTE_FLUSH_TIMEOUT_MS,
+  classifyRemoteError,
+  readGitRemoteConfig,
+  type GitRemoteConfig,
+} from "@/core/git-remote";
 import type { PhiStore } from "@/core/store/store";
 import type {
   CheckpointHealth,
   GitCheckpoint,
+  RemoteHealth,
   RestoreScope,
 } from "@/shared/types";
 
@@ -29,22 +42,36 @@ function newCheckpointId(): string {
 export class CheckpointService {
   private readonly store: PhiStore;
   private readonly git: GitWorkspace;
+  private readonly remoteConfig: GitRemoteConfig;
   private chain: Promise<unknown> = Promise.resolve();
   private healthState: CheckpointHealth = {
     status: "ok",
     error: null,
     lastSha: null,
   };
+  private remoteState: RemoteHealth;
   private closed = false;
   private phiOwned = false;
+  private desiredSha: string | null = null;
+  private scheduleGen = 0;
+  private remoteInFlight = false;
+  private remoteIdleWaiters: Array<() => void> = [];
+  private remoteAbort = new AbortController();
+  private flushDeadline: number | null = null;
 
   constructor(store: PhiStore, workspaceRoot: string) {
     this.store = store;
     this.git = new GitWorkspace(workspaceRoot);
+    this.remoteConfig = readGitRemoteConfig(store.rootPath);
+    this.remoteState = initialRemoteHealth(this.remoteConfig);
   }
 
   health(): CheckpointHealth {
     return { ...this.healthState };
+  }
+
+  remoteHealth(): RemoteHealth {
+    return { ...this.remoteState };
   }
 
   async initialize(): Promise<void> {
@@ -66,8 +93,8 @@ export class CheckpointService {
     }
     if (inspect.kind === "missing") {
       await this.git.init();
-      await this.captureAndRecord("baseline");
       this.phiOwned = true;
+      await this.captureAndRecord("baseline");
       return;
     }
     if (inspect.kind === "unborn") {
@@ -75,8 +102,8 @@ export class CheckpointService {
         this.degrade("unborn HEAD with a dirty index");
         return;
       }
-      await this.captureAndRecord("baseline");
       this.phiOwned = true;
+      await this.captureAndRecord("baseline");
       return;
     }
 
@@ -100,7 +127,8 @@ export class CheckpointService {
       await this.captureAndRecord("startup");
     } else {
       const head = await this.git.head();
-      if (head) this.healthState = { status: "ok", error: null, lastSha: head };
+      if (head) this.ok(head);
+      if (head) this.schedulePush(head);
     }
   }
 
@@ -187,9 +215,34 @@ export class CheckpointService {
     await this.chain;
   }
 
+  async flushRemote(
+    timeoutMs: number = GIT_REMOTE_FLUSH_TIMEOUT_MS,
+  ): Promise<void> {
+    if (this.remoteConfig.kind !== "ok") return;
+    this.flushDeadline = Date.now() + timeoutMs;
+    const abort = this.remoteAbort;
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
+    try {
+      if (!this.remoteInFlight && this.desiredSha) {
+        this.remoteInFlight = true;
+        void this.runRemoteLoop();
+      }
+      await this.waitRemoteIdle(timeoutMs + GIT_TERM_GRACE_MS + GIT_DRAIN_MS);
+      if (this.remoteInFlight) {
+        abort.abort();
+        await this.waitRemoteIdle(GIT_TERM_GRACE_MS + GIT_DRAIN_MS);
+      }
+    } finally {
+      clearTimeout(timer);
+      this.flushDeadline = null;
+      if (abort.signal.aborted) this.remoteAbort = new AbortController();
+    }
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     await this.flush();
+    await this.flushRemote();
   }
 
   list(): GitCheckpoint[] {
@@ -267,7 +320,10 @@ export class CheckpointService {
     if (!sha) {
       const head = await this.git.head();
       const latest = this.store.latestCheckpoint(this.workspaceId());
-      if (head && latest?.commitSha === head) this.ok(head);
+      if (head && latest?.commitSha === head) {
+        this.ok(head);
+        this.schedulePush(head);
+      }
       return null;
     }
     return this.recordCheckpoint({
@@ -293,6 +349,7 @@ export class CheckpointService {
         triggerThreadId: input.triggerThreadId,
       });
       this.ok(input.commitSha);
+      this.schedulePush(input.commitSha);
       return row;
     } catch (error) {
       this.degrade(error instanceof Error ? error.message : String(error));
@@ -312,6 +369,125 @@ export class CheckpointService {
     this.healthState = { status: "ok", error: null, lastSha: sha };
   }
 
+  private schedulePush(sha: string): void {
+    if (this.closed) return;
+    if (this.remoteConfig.kind !== "ok") return;
+    if (!this.phiOwned) return;
+    if (this.healthState.status === "degraded") return;
+    if (
+      this.remoteState.status === "ok" &&
+      this.remoteState.lastPushedSha === sha
+    ) {
+      return;
+    }
+    this.desiredSha = sha;
+    this.scheduleGen += 1;
+    this.markRemotePending();
+    if (!this.remoteInFlight) {
+      this.remoteInFlight = true;
+      void this.runRemoteLoop();
+    }
+  }
+
+  private markRemotePending(): void {
+    if (
+      this.remoteState.status === "ok" ||
+      this.remoteState.status === "degraded"
+    ) {
+      return;
+    }
+    this.remoteState = {
+      status: "pending",
+      configured: true,
+      displayUrl:
+        this.remoteConfig.kind === "ok" ? this.remoteConfig.displayUrl : null,
+      lastPushedSha: this.remoteState.lastPushedSha,
+      error: null,
+    };
+  }
+
+  private remainingTimeout(): number {
+    if (this.flushDeadline !== null) {
+      return Math.max(0, this.flushDeadline - Date.now());
+    }
+    return GIT_REMOTE_COMMAND_TIMEOUT_MS;
+  }
+
+  private async runRemoteLoop(): Promise<void> {
+    this.remoteInFlight = true;
+    let attemptGen = this.scheduleGen;
+    const url = this.remoteConfig.kind === "ok" ? this.remoteConfig.url : null;
+    if (!url) {
+      this.remoteInFlight = false;
+      this.resolveRemoteIdle();
+      return;
+    }
+    this.markRemotePending();
+    try {
+      while (true) {
+        const sha = this.desiredSha;
+        attemptGen = this.scheduleGen;
+        if (!sha) break;
+        const timeoutMs = this.remainingTimeout();
+        const signal = this.remoteAbort.signal;
+        await this.git.ensureOrigin(url, { timeoutMs, signal });
+        await this.git.pushSha(sha, { timeoutMs, signal });
+        if (this.scheduleGen !== attemptGen) continue;
+        this.desiredSha = null;
+        this.remoteState = {
+          status: "ok",
+          configured: true,
+          displayUrl: this.remoteConfig.kind === "ok"
+            ? this.remoteConfig.displayUrl
+            : null,
+          lastPushedSha: sha,
+          error: null,
+        };
+        break;
+      }
+    } catch (error) {
+      this.remoteState = {
+        status: "degraded",
+        configured: true,
+        displayUrl:
+          this.remoteConfig.kind === "ok" ? this.remoteConfig.displayUrl : null,
+        lastPushedSha: this.remoteState.lastPushedSha,
+        error: this.remoteError(error),
+      };
+    } finally {
+      if (
+        this.scheduleGen !== attemptGen &&
+        this.desiredSha
+      ) {
+        void this.runRemoteLoop();
+      } else {
+        this.remoteInFlight = false;
+        this.resolveRemoteIdle();
+      }
+    }
+  }
+
+  private remoteError(error: unknown): string {
+    return classifyRemoteError(error);
+  }
+
+  private waitRemoteIdle(maxMs: number): Promise<void> {
+    if (!this.remoteInFlight) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, maxMs);
+      this.remoteIdleWaiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  private resolveRemoteIdle(): void {
+    const waiters = this.remoteIdleWaiters;
+    this.remoteIdleWaiters = [];
+    for (const waiter of waiters) waiter();
+  }
+
   private run<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.chain.then(fn, fn);
     this.chain = next.then(
@@ -320,4 +496,32 @@ export class CheckpointService {
     );
     return next;
   }
+}
+
+function initialRemoteHealth(config: GitRemoteConfig): RemoteHealth {
+  if (config.kind === "unset") {
+    return {
+      status: "unset",
+      configured: false,
+      displayUrl: null,
+      lastPushedSha: null,
+      error: null,
+    };
+  }
+  if (config.kind === "invalid") {
+    return {
+      status: "degraded",
+      configured: false,
+      displayUrl: null,
+      lastPushedSha: null,
+      error: config.error,
+    };
+  }
+  return {
+    status: "pending",
+    configured: true,
+    displayUrl: config.displayUrl,
+    lastPushedSha: null,
+    error: null,
+  };
 }

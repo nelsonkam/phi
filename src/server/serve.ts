@@ -22,6 +22,7 @@ import { createFileHandler } from "@/server/files";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { createMessageSearch } from "@/core/search/message-search";
+import { healthPayload } from "@/server/health";
 
 const DEFAULT_PORT = 3141;
 
@@ -70,11 +71,7 @@ export async function startServer(): Promise<void> {
         DELETE: mcpHandler,
       },
       "/api/v1/health": () =>
-        Response.json({
-          ok: checkpoints.health().status === "ok",
-          workspaceId: workspace.id,
-          checkpoints: checkpoints.health(),
-        }),
+        Response.json(healthPayload(workspace.id, checkpoints)),
       "/api/v1/checkpoints": {
         GET: (req, server) => {
           if (!isLoopback(req, server)) {

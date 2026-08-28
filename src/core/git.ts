@@ -49,6 +49,18 @@ export class GitError extends Error {
   }
 }
 
+export const GIT_TERM_GRACE_MS = 200;
+export const GIT_DRAIN_MS = 500;
+
+export interface RunGitOptions {
+  indexFile?: string;
+  stdin?: string;
+  allowFail?: boolean;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  bin?: string;
+}
+
 function gitBin(): string {
   return process.env.PHI_GIT ?? "git";
 }
@@ -63,27 +75,61 @@ export function phiGitEnv(indexFile?: string): Record<string, string> {
   env.GIT_COMMITTER_NAME = PHI_GIT_NAME;
   env.GIT_COMMITTER_EMAIL = PHI_GIT_EMAIL;
   env.GIT_LITERAL_PATHSPECS = "1";
+  env.GIT_TERMINAL_PROMPT = "0";
   if (indexFile) env.GIT_INDEX_FILE = indexFile;
   return env;
+}
+
+function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function abortPromise(signal: AbortSignal): {
+  promise: Promise<"abort">;
+  dispose: () => void;
+} {
+  if (signal.aborted) {
+    return { promise: Promise.resolve("abort"), dispose: () => undefined };
+  }
+  let onAbort: (() => void) | undefined;
+  const promise = new Promise<"abort">((resolve) => {
+    onAbort = () => resolve("abort");
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return {
+    promise,
+    dispose: () => {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    },
+  };
 }
 
 export async function runGit(
   cwd: string,
   args: string[],
-  options: {
-    indexFile?: string;
-    stdin?: string;
-    allowFail?: boolean;
-  } = {},
+  options: RunGitOptions = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const timed = options.timeoutMs !== undefined || options.signal !== undefined;
+  if (options.signal?.aborted) {
+    throw new GitError("git timed out");
+  }
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
-    proc = Bun.spawn([gitBin(), ...args], {
+    proc = Bun.spawn([options.bin ?? gitBin(), ...args], {
       cwd,
       env: phiGitEnv(options.indexFile),
       stdin: options.stdin === undefined ? "ignore" : "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      detached: timed,
     });
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -96,18 +142,55 @@ export async function runGit(
     proc.stdin.write(options.stdin);
     proc.stdin.end();
   }
-  const [stdout, stderr, exitCode] = await Promise.all([
+
+  const finished = Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  if (exitCode !== 0 && !options.allowFail) {
-    throw new GitError(
-      `git ${args[0]} failed (${exitCode}): ${stderr.trim() || stdout.trim()}`,
-      stderr,
+  const racers: Promise<{ kind: "done"; r: [string, string, number] } | "timeout" | "abort">[] = [
+    finished.then((r) => ({ kind: "done" as const, r })),
+  ];
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  if (options.timeoutMs !== undefined) {
+    racers.push(
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve("timeout"), options.timeoutMs);
+      }),
     );
   }
-  return { stdout, stderr, exitCode };
+  let disposeAbort = () => undefined as void;
+  if (options.signal) {
+    const abort = abortPromise(options.signal);
+    disposeAbort = abort.dispose;
+    racers.push(abort.promise);
+  }
+
+  try {
+    const winner = await Promise.race(racers);
+    if (winner !== undefined && typeof winner !== "object") {
+      const pid = proc.pid;
+      if (pid !== undefined) {
+        killProcessGroup(pid, "SIGTERM");
+        await sleep(GIT_TERM_GRACE_MS);
+        killProcessGroup(pid, "SIGKILL");
+      }
+      await Promise.race([finished, sleep(GIT_DRAIN_MS)]);
+      throw new GitError("git timed out");
+    }
+
+    const [stdout, stderr, exitCode] = winner.r;
+    if (exitCode !== 0 && !options.allowFail) {
+      throw new GitError(
+        `git ${args[0]} failed (${exitCode}): ${stderr.trim() || stdout.trim()}`,
+        stderr,
+      );
+    }
+    return { stdout, stderr, exitCode };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    disposeAbort();
+  }
 }
 
 class TempIndex implements Disposable {
@@ -425,6 +508,72 @@ export class GitWorkspace {
       allowFail: true,
     });
     return result.exitCode === 0 ? result.stdout : null;
+  }
+
+  async originUrl(): Promise<string | null> {
+    const result = await runGit(this.root, ["remote", "get-url", "origin"], {
+      allowFail: true,
+    });
+    const url = result.stdout.trim();
+    return result.exitCode === 0 && url ? url : null;
+  }
+
+  async originPushUrls(
+    options: Pick<RunGitOptions, "timeoutMs" | "signal"> = {},
+  ): Promise<string[]> {
+    const result = await runGit(
+      this.root,
+      ["remote", "get-url", "--all", "--push", "origin"],
+      { ...options, allowFail: true },
+    );
+    if (result.exitCode !== 0) return [];
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  async originPushUrl(): Promise<string | null> {
+    const urls = await this.originPushUrls();
+    return urls[0] ?? null;
+  }
+
+  async ensureOrigin(
+    url: string,
+    options: Pick<RunGitOptions, "timeoutMs" | "signal"> = {},
+  ): Promise<void> {
+    const current = await this.originUrl();
+    if (current === null) {
+      await runGit(this.root, ["remote", "add", "origin", url], options);
+    } else if (current !== url) {
+      await runGit(this.root, ["remote", "set-url", "origin", url], options);
+    }
+    await this.clearOriginPushUrls(options);
+    const pushUrls = await this.originPushUrls(options);
+    if (pushUrls.length !== 1 || pushUrls[0] !== url) {
+      throw new GitError("origin push URL does not match the configured remote");
+    }
+  }
+
+  protected async clearOriginPushUrls(
+    options: Pick<RunGitOptions, "timeoutMs" | "signal"> = {},
+  ): Promise<void> {
+    await runGit(
+      this.root,
+      ["config", "--unset-all", "remote.origin.pushurl"],
+      { ...options, allowFail: true },
+    );
+  }
+
+  async pushSha(
+    sha: string,
+    options: Pick<RunGitOptions, "timeoutMs" | "signal"> = {},
+  ): Promise<void> {
+    await runGit(
+      this.root,
+      ["push", "--porcelain", "origin", `${sha}:refs/heads/main`],
+      options,
+    );
   }
 
   private async commitIndex(

@@ -18,3 +18,7 @@ export function workspaceRoot(root: string = phiRoot()): string {
 export function modelCachePath(root: string = phiRoot()): string {
   return join(root, "models");
 }
+
+export function gitRemotePath(root: string = phiRoot()): string {
+  return join(root, "git-remote");
+}

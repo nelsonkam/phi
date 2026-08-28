@@ -6,7 +6,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { GitWorkspace, runGit } from "@/core/git";
+import { GitWorkspace, GIT_DRAIN_MS, GIT_TERM_GRACE_MS, phiGitEnv, runGit } from "@/core/git";
 import { tempDir } from "@/testing/tmpdir";
 
 async function phiRepo(): Promise<{ root: string; git: GitWorkspace }> {
@@ -191,3 +191,170 @@ test("assumeOwned skips a full trailer scan after Phi ownership is proven", asyn
   const owned = await git.inspect({ assumeOwned: true });
   expect(owned.kind).toBe("phi");
 });
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("GIT_TERMINAL_PROMPT is set for every git spawn", () => {
+  expect(phiGitEnv().GIT_TERMINAL_PROMPT).toBe("0");
+});
+
+test("timeout kills the git process group including descendants", async () => {
+  const { chmodSync, readFileSync } = await import("node:fs");
+  const dir = tempDir("phi-git-hang-");
+  const parentPid = join(dir, "parent.pid");
+  const childPid = join(dir, "child.pid");
+  const script = join(dir, "fake-git");
+  writeFileSync(
+    script,
+    `#!/bin/sh
+echo $$ > ${JSON.stringify(parentPid)}
+nohup sleep 86400 >/dev/null 2>&1 &
+echo $! > ${JSON.stringify(childPid)}
+wait
+`,
+  );
+  chmodSync(script, 0o755);
+  const started = Date.now();
+  await expect(
+    runGit(dir, [script], { bin: "/bin/sh", timeoutMs: 400 }),
+  ).rejects.toThrow("timed out");
+  expect(Date.now() - started).toBeLessThan(400 + GIT_TERM_GRACE_MS + GIT_DRAIN_MS + 750);
+  const parent = Number(readFileSync(parentPid, "utf8"));
+  const child = Number(readFileSync(childPid, "utf8"));
+  expect(pidAlive(parent)).toBe(false);
+  expect(pidAlive(child)).toBe(false);
+});
+
+test("ensureOrigin add, set-url, and leaves other remotes", async () => {
+  const { root, git } = await phiRepo();
+  const bare = tempDir("phi-bare-");
+  await runGit(bare, ["init", "--bare", "-b", "main"]);
+  const url = `file://${bare}`;
+  await git.ensureOrigin(url);
+  expect(await git.originUrl()).toBe(url);
+  await git.ensureOrigin(url);
+  expect(await git.originUrl()).toBe(url);
+  const other = `file://${tempDir("phi-bare-other-")}`;
+  await runGit(root, ["remote", "add", "other", other]);
+  const next = `file://${tempDir("phi-bare-2-")}`;
+  await git.ensureOrigin(next);
+  expect(await git.originUrl()).toBe(next);
+  const remotes = (await runGit(root, ["remote"])).stdout.split("\n").filter(Boolean);
+  expect(remotes.sort()).toEqual(["origin", "other"]);
+});
+
+test("ensureOrigin clears a stale origin pushurl so push uses the fetch URL", async () => {
+  const { root, git } = await phiRepo();
+  const destA = tempDir("phi-bare-a-");
+  const destB = tempDir("phi-bare-b-");
+  await runGit(destA, ["init", "--bare", "-b", "main"]);
+  await runGit(destB, ["init", "--bare", "-b", "main"]);
+  const urlA = `file://${destA}`;
+  const urlB = `file://${destB}`;
+  await git.ensureOrigin(urlA);
+  await runGit(root, ["remote", "set-url", "--push", "origin", urlB]);
+  expect(await git.originPushUrl()).toBe(urlB);
+  await git.ensureOrigin(urlA);
+  expect(await git.originUrl()).toBe(urlA);
+  expect(await git.originPushUrl()).toBe(urlA);
+  const head = await git.head();
+  await git.pushSha(head!);
+  const headA = (await runGit(destA, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(headA).toBe(head!);
+  const bHasMain = await runGit(destB, ["rev-parse", "--verify", "-q", "refs/heads/main"], {
+    allowFail: true,
+  });
+  expect(bHasMain.exitCode).not.toBe(0);
+});
+
+test("ensureOrigin rejects when a stale pushurl cannot be cleared", async () => {
+  const { root, git } = await phiRepo();
+  const destA = tempDir("phi-bare-a-");
+  const destB = tempDir("phi-bare-b-");
+  await runGit(destA, ["init", "--bare", "-b", "main"]);
+  await runGit(destB, ["init", "--bare", "-b", "main"]);
+  const urlA = `file://${destA}`;
+  const urlB = `file://${destB}`;
+  await git.ensureOrigin(urlA);
+  await runGit(root, ["remote", "set-url", "--push", "origin", urlB]);
+  const sticky = git as unknown as {
+    clearOriginPushUrls: () => Promise<void>;
+  };
+  sticky.clearOriginPushUrls = async () => undefined;
+  await expect(git.ensureOrigin(urlA)).rejects.toThrow(
+    "origin push URL does not match the configured remote",
+  );
+  expect(await git.originPushUrls()).toEqual([urlB]);
+});
+
+test("successful timed runGit removes abort listeners", async () => {
+  const { root } = await phiRepo();
+  const controller = new AbortController();
+  let added = 0;
+  let removed = 0;
+  const signal = controller.signal;
+  const add = signal.addEventListener.bind(signal);
+  const drop = signal.removeEventListener.bind(signal);
+  signal.addEventListener = ((
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ) => {
+    if (type === "abort") added += 1;
+    return add(type, listener, options);
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ) => {
+    if (type === "abort") removed += 1;
+    return drop(type, listener, options);
+  }) as typeof signal.removeEventListener;
+  for (let i = 0; i < 8; i++) {
+    await runGit(root, ["status", "--porcelain"], {
+      signal,
+      timeoutMs: 5_000,
+    });
+  }
+  expect(added).toBe(8);
+  expect(removed).toBe(added);
+});
+
+test("pushSha fast-forwards a bare remote and refuses unrelated history", async () => {
+  const { root, git } = await phiRepo();
+  const bare = tempDir("phi-bare-push-");
+  await runGit(bare, ["init", "--bare", "-b", "main"]);
+  const url = `file://${bare}`;
+  await git.ensureOrigin(url);
+  const head = await git.head();
+  expect(head).toBeTruthy();
+  await git.pushSha(head!);
+  const remoteHead = (
+    await runGit(bare, ["rev-parse", "refs/heads/main"])
+  ).stdout.trim();
+  expect(remoteHead).toBe(head!);
+
+  const other = tempDir("phi-other-writer-");
+  const otherGit = new GitWorkspace(other);
+  await otherGit.init();
+  writeFileSync(join(other, "x.md"), "other\n");
+  const otherSha = await otherGit.capture({
+    checkpointId: "cp_other",
+    trigger: "baseline",
+  });
+  await otherGit.ensureOrigin(url);
+  await expect(otherGit.pushSha(otherSha!)).rejects.toThrow();
+  expect(await git.head()).toBe(head!);
+  expect(await otherGit.head()).toBe(otherSha!);
+  const still = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(still).toBe(head!);
+});
+

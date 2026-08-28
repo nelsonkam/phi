@@ -92,6 +92,16 @@ export interface CheckpointHealth {
   lastSha: string | null;
 }
 
+export type RemoteHealthStatus = "unset" | "pending" | "ok" | "degraded";
+
+export interface RemoteHealth {
+  status: RemoteHealthStatus;
+  configured: boolean;
+  displayUrl: string | null;
+  lastPushedSha: string | null;
+  error: string | null;
+}
+
 export type RestoreScope = "scratch" | "all";
 
 export interface ThreadTurn {
