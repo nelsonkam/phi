@@ -22,6 +22,7 @@ export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thre
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across your phi workspace using both exact keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace comes from your session; do not ask the user for a thread or channel ID. You may optionally narrow results using a channel name.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
+export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
 
 export interface AgentHarnessCapabilityApi {
   list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
@@ -132,6 +133,36 @@ export function createMcpHandler(
             additionalProperties: false,
           },
         },
+        {
+          name: "create_thread",
+          description: CREATE_THREAD_DESCRIPTION,
+          inputSchema: {
+            type: "object",
+            properties: {
+              content: {
+                type: "string",
+                minLength: 1,
+                description: "Markdown root message of the new thread",
+              },
+              channel: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "Channel name to create the thread in; defaults to your current channel",
+              },
+              to: {
+                type: "array",
+                minItems: 1,
+                uniqueItems: true,
+                items: { type: "string", minLength: 1 },
+                description:
+                  "Agent handles to wake in the new thread, in turn order; the only way the root message routes",
+              },
+            },
+            required: ["content"],
+            additionalProperties: false,
+          },
+        },
         ...(messageSearch
           ? [
               {
@@ -233,6 +264,118 @@ export function createMcpHandler(
                   : message,
               );
             }
+          },
+        );
+      }
+      if (request.params.name === "create_thread") {
+        const thread = store.getThread(caller.threadId);
+        if (!thread) {
+          return toolError("Current thread no longer exists");
+        }
+        const rawContent = request.params.arguments?.content;
+        const content = typeof rawContent === "string" ? rawContent.trim() : "";
+        if (content.length === 0) {
+          return toolError("content is required");
+        }
+        const rawChannel = request.params.arguments?.channel;
+        if (rawChannel !== undefined && typeof rawChannel !== "string") {
+          return toolError("channel must be a string");
+        }
+        const channelName =
+          typeof rawChannel === "string" ? rawChannel.trim() : undefined;
+        if (rawChannel !== undefined && !channelName) {
+          return toolError("channel must not be empty");
+        }
+        const rawTo = request.params.arguments?.to;
+        if (
+          rawTo !== undefined &&
+          (!Array.isArray(rawTo) ||
+            rawTo.length === 0 ||
+            rawTo.some((name) => typeof name !== "string" || !name.trim()))
+        ) {
+          return toolError("to must be a non-empty list of agent names");
+        }
+        const explicitRecipients = Array.isArray(rawTo)
+          ? rawTo.map((name) => String(name).trim())
+          : undefined;
+        const channel = channelName
+          ? store
+              .listChannels(thread.workspaceId)
+              .find(
+                (candidate) =>
+                  candidate.name.toLocaleLowerCase() ===
+                  channelName.toLocaleLowerCase(),
+              )
+          : store.getChannel(thread.channelId);
+        if (!channel) {
+          return toolError(
+            channelName
+              ? `Unknown channel "${channelName}"`
+              : "Current channel no longer exists",
+          );
+        }
+        return tokens.runOnce(
+          token,
+          `create_thread:${JSON.stringify({
+            channel: channel.id,
+            content,
+            to: explicitRecipients,
+          })}`,
+          extra.requestId,
+          async () => {
+            let routing: Awaited<ReturnType<typeof routeAgentContent>>;
+            try {
+              routing = await routeAgentContent(
+                store.defaultWorkspace().rootPath,
+                content,
+                caller.agentName,
+                explicitRecipients,
+                { requireExplicitHandoff: true },
+              );
+            } catch (error) {
+              return toolError((error as Error).message);
+            }
+            const created = store.createThread(channel.id, {
+              author: "agent",
+              kind: "message",
+              content,
+              metadata: { agent: caller.agentName, ...routing },
+            });
+            if (routing.routedTo.length > 0) {
+              onAgentMessage?.(created.message, routing.routedTo);
+            }
+            const notes: string[] = [];
+            // The root is the caller's own agent message, so untagged replies
+            // already fall back to the caller; a self-route adds nothing.
+            if (explicitRecipients?.includes(caller.agentName)) {
+              notes.push(
+                ` Note: you are @${caller.agentName} — a \`to\` naming yourself is ignored; untagged replies in the new thread already come to you.`,
+              );
+            }
+            if (routing.routedTo.length === 0) {
+              const unrouted = await unroutedPeerMentions(
+                store.defaultWorkspace().rootPath,
+                content,
+                caller.agentName,
+              );
+              if (unrouted.length > 0) {
+                notes.push(
+                  ` Note: it mentions ${unrouted
+                    .map((handle) => `@${handle}`)
+                    .join(
+                      ", ",
+                    )} but has no \`to\`, so no agent was woken in the new thread — mentions never route.`,
+                );
+              }
+            }
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Thread created (${created.thread.id}) in #${channel.name}.${notes.join("")}`,
+                },
+              ],
+            };
           },
         );
       }

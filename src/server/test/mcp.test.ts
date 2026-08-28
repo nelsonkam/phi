@@ -142,6 +142,31 @@ function createChannel(
   );
 }
 
+function createThread(
+  handler: (req: Request) => Promise<Response>,
+  token: string,
+  id: number,
+  args: Record<string, unknown>,
+): Promise<Response> {
+  return handler(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "create_thread", arguments: args },
+      }),
+    }),
+  );
+}
+
 function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void) {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
@@ -263,7 +288,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(4);
+  expect(body.result.tools).toHaveLength(5);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.inputSchema.properties.to).toBeDefined();
@@ -274,7 +299,11 @@ test("advertises messaging and workspace search without a thread argument", asyn
   const create = body.result.tools[2]!;
   expect(create.name).toBe("create_channel");
   expect(create.inputSchema.properties.folders).toBeDefined();
-  const search = body.result.tools[3]!;
+  const createThreadTool = body.result.tools[3]!;
+  expect(createThreadTool.name).toBe("create_thread");
+  expect(createThreadTool.inputSchema.properties.channel).toBeDefined();
+  expect(createThreadTool.inputSchema.properties.to).toBeDefined();
+  const search = body.result.tools[4]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
@@ -535,6 +564,121 @@ test("send_message warns when a mid-body peer mention routes nowhere", async () 
     result: { content: Array<{ text: string }> };
   };
   expect(cleanBody.result.content[0]!.text).not.toContain("Note:");
+  store.close();
+});
+
+test("create_thread starts an agent-authored thread in the current channel", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, thread, token, handler } = fixture((message, routedTo) =>
+    routed.push({ message, routedTo }),
+  );
+
+  const response = await createThread(handler, token, 70, {
+    content: "Tracking the release checklist here.",
+  });
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBeUndefined();
+  const text = body.result.content[0]!.text;
+  expect(text).toMatch(/^Thread created \(th_[^)]+\) in #general\.$/);
+
+  const threadId = text.match(/\((th_[^)]+)\)/)![1]!;
+  const created = store.getThread(threadId)!;
+  expect(created.channelId).toBe(thread.channelId);
+  const root = store.rootMessage(threadId)!;
+  expect(root.author).toBe("agent");
+  expect(root.content).toBe("Tracking the release checklist here.");
+  expect(root.metadata).toEqual({
+    agent: "default",
+    mentions: [],
+    routedTo: [],
+  });
+  // Nobody woken: no to list was given.
+  expect(routed).toEqual([]);
+  store.close();
+});
+
+test("create_thread routes an explicit to list in a named channel", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, token, handler, workspace } = fixture((message, routedTo) =>
+    routed.push({ message, routedTo }),
+  );
+  await writeAgent(workspace.rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the work.",
+  });
+  const other = store.createChannel(workspace.id, { name: "releases" });
+
+  const response = await createThread(handler, token, 71, {
+    content: "Release review thread",
+    channel: "RELEASES",
+    to: ["reviewer", "default"],
+  });
+  const body = (await response.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBeUndefined();
+  const text = body.result.content[0]!.text;
+  expect(text).toContain("in #releases.");
+  // The self-route is dropped with a note; the peer handoff sticks.
+  expect(text).toContain("naming yourself is ignored");
+  const threadId = text.match(/\((th_[^)]+)\)/)![1]!;
+  expect(store.getThread(threadId)!.channelId).toBe(other.id);
+  const root = store.rootMessage(threadId)!;
+  expect(root.metadata.routedTo).toEqual(["reviewer"]);
+  expect(routed).toEqual([{ message: root, routedTo: ["reviewer"] }]);
+
+  const unknown = await createThread(handler, token, 72, {
+    content: "Lost thread",
+    channel: "missing",
+  });
+  const unknownBody = (await unknown.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(unknownBody.result.isError).toBe(true);
+  expect(unknownBody.result.content[0]!.text).toContain(
+    'Unknown channel "missing"',
+  );
+  store.close();
+});
+
+test("create_thread rejects a leading peer handle without to", async () => {
+  const routed: Array<{ message: Message; routedTo: string[] }> = [];
+  const { store, token, handler, workspace } = fixture((message, routedTo) =>
+    routed.push({ message, routedTo }),
+  );
+  await writeAgent(workspace.rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the work.",
+  });
+  const channel = store.listChannels(workspace.id)[0]!;
+  const before = store.listThreads(channel.id).length;
+
+  const rejected = await createThread(handler, token, 80, {
+    content: "@reviewer take a look at this",
+  });
+  const body = (await rejected.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBe(true);
+  expect(body.result.content[0]!.text).toContain("EXPLICIT_RECIPIENT_REQUIRED");
+  expect(store.listThreads(channel.id)).toHaveLength(before);
+  expect(routed).toEqual([]);
+
+  // A mid-body prose mention is legal but flagged: nobody was woken.
+  const prose = await createThread(handler, token, 81, {
+    content: "Parking this; @reviewer might weigh in later.",
+  });
+  const proseBody = (await prose.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(proseBody.result.isError).toBeUndefined();
+  expect(proseBody.result.content[0]!.text).toContain(
+    "no agent was woken in the new thread",
+  );
+  expect(routed).toEqual([]);
   store.close();
 });
 
