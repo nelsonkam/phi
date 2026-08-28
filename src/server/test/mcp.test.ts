@@ -7,7 +7,10 @@ import { tempDir } from "@/testing/tmpdir";
 import { ensureWorkspace } from "@/core/workspace";
 import { writeAgent } from "@/core/agents/registry";
 import type { Message } from "@/shared/types";
-import type { SearchMessagesInput } from "@/core/search/types";
+import type {
+  MessageSearchContext,
+  SearchMessagesInput,
+} from "@/core/search/types";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 
@@ -182,10 +185,15 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
   const searchCalls: Array<{
     workspaceId: string;
     input: SearchMessagesInput;
+    context: MessageSearchContext;
   }> = [];
   const messageSearch = {
-    async search(workspaceId: string, input: SearchMessagesInput) {
-      searchCalls.push({ workspaceId, input });
+    async search(
+      workspaceId: string,
+      input: SearchMessagesInput,
+      context: MessageSearchContext,
+    ) {
+      searchCalls.push({ workspaceId, input, context });
       return {
         semanticAvailable: true,
         results: [
@@ -198,8 +206,8 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
             content: "Matched message",
             snippet: "Matched message",
             createdAt: new Date(0).toISOString(),
-            score: 1,
             matchedBy: ["semantic" as const],
+            threadHitCount: 1,
           },
         ],
       };
@@ -308,6 +316,8 @@ test("advertises messaging and workspace search without a thread argument", asyn
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
   expect(search.inputSchema.properties.channel).toBeDefined();
+  expect(search.inputSchema.properties.includeCurrentThread).toBeDefined();
+  expect(search.inputSchema.properties.author).toBeDefined();
   store.close();
 });
 
@@ -410,6 +420,8 @@ test("search_messages derives the workspace from the caller token", async () => 
     query: "prior authentication decision",
     channel: "GENERAL",
     limit: 3,
+    includeCurrentThread: true,
+    author: "user",
   });
   expect(response.status).toBe(200);
   expect(searchCalls).toEqual([
@@ -419,15 +431,19 @@ test("search_messages derives the workspace from the caller token", async () => 
         query: "prior authentication decision",
         channel: "GENERAL",
         limit: 3,
+        includeCurrentThread: true,
+        author: "user",
       },
+      context: { currentThreadId: expect.any(String) },
     },
   ]);
   const body = (await response.json()) as {
     result: { content: Array<{ text: string }> };
   };
-  expect(JSON.parse(body.result.content[0]!.text).results[0].content).toBe(
-    "Matched message",
-  );
+  const payload = JSON.parse(body.result.content[0]!.text);
+  expect(payload.results[0].content).toBe("Matched message");
+  expect(payload.results[0].matchedBy).toEqual(["semantic"]);
+  expect(payload.results[0]).not.toHaveProperty("score");
   store.close();
 });
 

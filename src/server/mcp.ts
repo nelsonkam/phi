@@ -19,7 +19,7 @@ import type { McpTokenRegistry } from "@/server/mcp-token-registry";
 import type { Message } from "@/shared/types";
 
 export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Hand off to peer agents only through the optional to list; message text never routes, and a message that leads with an @agent-handle without to is rejected so an intended handoff cannot silently reach no one. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report.`;
-export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across your phi workspace using both exact keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace comes from your session; do not ask the user for a thread or channel ID. You may optionally narrow results using a channel name.`;
+export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across other threads in your phi workspace using exact phrase/keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace and current thread come from your session; do not ask the user for a thread or channel ID. You may optionally include the current thread, narrow results using a channel name, or filter by author.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
@@ -186,6 +186,16 @@ export function createMcpHandler(
                       minimum: 1,
                       maximum: 20,
                       description: "Maximum results to return (default 8)",
+                    },
+                    includeCurrentThread: {
+                      type: "boolean",
+                      description:
+                        "Include matches from your current thread (default false)",
+                    },
+                    author: {
+                      type: "string",
+                      enum: ["user", "agent"],
+                      description: "Optional message author filter",
                     },
                   },
                   required: ["query"],
@@ -425,6 +435,9 @@ export function createMcpHandler(
         const channel =
           typeof rawChannel === "string" ? rawChannel.trim() : undefined;
         const rawLimit = request.params.arguments?.limit;
+        const rawIncludeCurrentThread =
+          request.params.arguments?.includeCurrentThread;
+        const rawAuthor = request.params.arguments?.author;
         if (!query) {
           return {
             isError: true,
@@ -443,6 +456,19 @@ export function createMcpHandler(
               { type: "text", text: "limit must be an integer from 1 to 20" },
             ],
           };
+        }
+        if (
+          rawIncludeCurrentThread !== undefined &&
+          typeof rawIncludeCurrentThread !== "boolean"
+        ) {
+          return toolError("includeCurrentThread must be a boolean");
+        }
+        if (
+          rawAuthor !== undefined &&
+          rawAuthor !== "user" &&
+          rawAuthor !== "agent"
+        ) {
+          return toolError('author must be "user" or "agent"');
         }
         const thread = store.getThread(caller.threadId);
         if (!thread) {
@@ -470,14 +496,24 @@ export function createMcpHandler(
         }
         return tokens.runOnce(
           token,
-          `search_messages:${JSON.stringify({ query, channel, rawLimit })}`,
+          `search_messages:${JSON.stringify({ query, channel, rawLimit, rawIncludeCurrentThread, rawAuthor })}`,
           extra.requestId,
           async () => {
-            const result = await messageSearch.search(thread.workspaceId, {
-              query,
-              ...(channel ? { channel } : {}),
-              ...(typeof rawLimit === "number" ? { limit: rawLimit } : {}),
-            });
+            const result = await messageSearch.search(
+              thread.workspaceId,
+              {
+                query,
+                ...(channel ? { channel } : {}),
+                ...(typeof rawLimit === "number" ? { limit: rawLimit } : {}),
+                ...(typeof rawIncludeCurrentThread === "boolean"
+                  ? { includeCurrentThread: rawIncludeCurrentThread }
+                  : {}),
+                ...(rawAuthor === "user" || rawAuthor === "agent"
+                  ? { author: rawAuthor }
+                  : {}),
+              },
+              { currentThreadId: caller.threadId },
+            );
             return {
               content: [
                 {

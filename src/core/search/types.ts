@@ -7,6 +7,12 @@ export interface SearchMessagesInput {
   query: string;
   channel?: string;
   limit?: number;
+  includeCurrentThread?: boolean;
+  author?: "user" | "agent";
+}
+
+export interface MessageSearchContext {
+  currentThreadId: string;
 }
 
 export interface MessageSearchResult {
@@ -18,8 +24,9 @@ export interface MessageSearchResult {
   content: string;
   snippet: string;
   createdAt: string;
-  score: number;
   matchedBy: Array<"keyword" | "semantic">;
+  /** Total distinct matching messages represented for this thread. */
+  threadHitCount: number;
 }
 
 export interface MessageSearchResponse {
@@ -38,6 +45,8 @@ export interface SemanticSearchInput {
   workspaceId: string;
   query: string;
   channelId?: string;
+  excludeThreadId?: string;
+  author?: "user" | "agent";
   limit: number;
 }
 

@@ -6,6 +6,7 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   type EmbeddingChunk,
+  type MessageSearchContext,
   type MessageSearchResponse,
   type SearchMessagesInput,
   type VectorIndex,
@@ -84,6 +85,12 @@ interface PendingChunkRow {
 interface RankedChunk {
   score: number;
   matchedBy: Set<"keyword" | "semantic">;
+  phraseMatch: boolean;
+}
+
+interface LexicalCandidate {
+  chunkId: number;
+  phraseMatch: boolean;
 }
 
 interface SearchChunkRow {
@@ -103,6 +110,7 @@ export interface MessageSearchApi {
   search(
     workspaceId: string,
     input: SearchMessagesInput,
+    context: MessageSearchContext,
   ): Promise<MessageSearchResponse>;
 }
 
@@ -133,6 +141,7 @@ export class MessageSearch implements MessageSearchApi {
   async search(
     workspaceId: string,
     input: SearchMessagesInput,
+    context: MessageSearchContext,
   ): Promise<MessageSearchResponse> {
     const query = input.query.trim();
     if (!query) throw new Error("query is required");
@@ -144,10 +153,21 @@ export class MessageSearch implements MessageSearchApi {
     const channelId = input.channel
       ? this.resolveChannelId(workspaceId, input.channel)
       : undefined;
+    const currentThread = this.store.getThread(context.currentThreadId);
+    const currentChannelName = currentThread
+      ? this.store
+          .listChannels(workspaceId)
+          .find((channel) => channel.id === currentThread.channelId)?.name
+      : undefined;
+    const excludeThreadId = input.includeCurrentThread
+      ? undefined
+      : context.currentThreadId;
     const lexical = this.lexicalCandidates(
       workspaceId,
       query,
       channelId,
+      excludeThreadId,
+      input.author,
       candidateLimit,
     );
     let semantic: Awaited<ReturnType<VectorIndex["search"]>> = [];
@@ -157,6 +177,8 @@ export class MessageSearch implements MessageSearchApi {
         workspaceId,
         query,
         channelId,
+        excludeThreadId,
+        author: input.author,
         limit: candidateLimit,
       });
       this.loggedVectorFailure = false;
@@ -169,10 +191,11 @@ export class MessageSearch implements MessageSearchApi {
     }
 
     const ranked = new Map<number, RankedChunk>();
-    lexical.forEach((chunkId, index) => {
-      ranked.set(chunkId, {
+    lexical.forEach((match, index) => {
+      ranked.set(match.chunkId, {
         score: 1 / (RRF_K + index + 1),
         matchedBy: new Set(["keyword"]),
+        phraseMatch: match.phraseMatch,
       });
     });
     semantic.forEach((match, index) => {
@@ -184,31 +207,38 @@ export class MessageSearch implements MessageSearchApi {
         ranked.set(match.chunkId, {
           score: 1 / (RRF_K + index + 1),
           matchedBy: new Set(["semantic"]),
+          phraseMatch: false,
         });
       }
     });
 
-    const candidates = [...ranked.entries()].sort(
-      (a, b) => b[1].score - a[1].score,
-    );
+    const candidates = [...ranked.entries()];
     if (candidates.length === 0) {
       return { results: [], semanticAvailable };
     }
     const rows = this.hydrateChunks(candidates.map(([chunkId]) => chunkId));
     const rowByChunk = new Map(rows.map((row) => [row.chunk_id, row]));
-    const results: MessageSearchResponse["results"] = [];
-    const resultByMessage = new Map<string, (typeof results)[number]>();
+    const resultByMessage = new Map<
+      string,
+      Omit<MessageSearchResponse["results"][number], "threadHitCount"> & {
+        score: number;
+        phraseMatch: boolean;
+      }
+    >();
     for (const [chunkId, rank] of candidates) {
       const row = rowByChunk.get(chunkId);
       if (!row) continue;
+      if (excludeThreadId && row.thread_id === excludeThreadId) continue;
+      if (input.author && row.author !== input.author) continue;
       const existing = resultByMessage.get(row.message_id);
       if (existing) {
         for (const kind of rank.matchedBy) {
           if (!existing.matchedBy.includes(kind)) existing.matchedBy.push(kind);
         }
+        existing.score = Math.max(existing.score, rank.score);
+        existing.phraseMatch ||= rank.phraseMatch;
         continue;
       }
-      if (results.length >= limit) continue;
       const result = {
         messageId: row.message_id,
         workspaceId: row.workspace_id,
@@ -219,10 +249,43 @@ export class MessageSearch implements MessageSearchApi {
         snippet: row.chunk_content,
         createdAt: row.created_at,
         score: rank.score,
-        matchedBy: [...rank.matchedBy],
+        phraseMatch: rank.phraseMatch,
+        matchedBy: orderedMatchKinds(rank.matchedBy),
       };
-      results.push(result);
       resultByMessage.set(row.message_id, result);
+    }
+    const rankedMessages = [...resultByMessage.values()].sort((a, b) => {
+      const band = matchBand(a) - matchBand(b);
+      if (band !== 0) return band;
+      if (input.includeCurrentThread) {
+        const aCurrent = a.threadId === context.currentThreadId;
+        const bCurrent = b.threadId === context.currentThreadId;
+        if (aCurrent !== bCurrent) return aCurrent ? 1 : -1;
+      }
+      if (b.score !== a.score) return b.score - a.score;
+      const aSameChannel = a.channel === currentChannelName;
+      const bSameChannel = b.channel === currentChannelName;
+      if (aSameChannel !== bSameChannel) return bSameChannel ? 1 : -1;
+      return b.createdAt.localeCompare(a.createdAt);
+    });
+    const threadHitCounts = new Map<string, number>();
+    for (const result of rankedMessages) {
+      threadHitCounts.set(
+        result.threadId,
+        (threadHitCounts.get(result.threadId) ?? 0) + 1,
+      );
+    }
+    const seenThreads = new Set<string>();
+    const results: MessageSearchResponse["results"] = [];
+    for (const result of rankedMessages) {
+      if (seenThreads.has(result.threadId)) continue;
+      seenThreads.add(result.threadId);
+      const { score: _score, phraseMatch: _phraseMatch, ...payload } = result;
+      results.push({
+        ...payload,
+        threadHitCount: threadHitCounts.get(result.threadId)!,
+      });
+      if (results.length >= limit) break;
     }
     return { results, semanticAvailable };
   }
@@ -379,30 +442,48 @@ export class MessageSearch implements MessageSearchApi {
     workspaceId: string,
     query: string,
     channelId: string | undefined,
+    excludeThreadId: string | undefined,
+    author: "user" | "agent" | undefined,
     limit: number,
-  ): number[] {
-    const ftsQuery = safeFtsQuery(query);
-    if (!ftsQuery) return [];
-    const sql = channelId
-      ? `SELECT c.id
-         FROM message_search_fts
-         JOIN message_search_chunks c ON c.id = message_search_fts.rowid
-         WHERE message_search_fts MATCH ?
-           AND c.workspace_id = ? AND c.channel_id = ?
-         ORDER BY bm25(message_search_fts) LIMIT ?`
-      : `SELECT c.id
-         FROM message_search_fts
-         JOIN message_search_chunks c ON c.id = message_search_fts.rowid
-         WHERE message_search_fts MATCH ? AND c.workspace_id = ?
-         ORDER BY bm25(message_search_fts) LIMIT ?`;
-    const rows = channelId
-      ? this.store.db
-          .query<{ id: number }, [string, string, string, number]>(sql)
-          .all(ftsQuery, workspaceId, channelId, limit)
-      : this.store.db
-          .query<{ id: number }, [string, string, number]>(sql)
-          .all(ftsQuery, workspaceId, limit);
-    return rows.map((row) => row.id);
+  ): LexicalCandidate[] {
+    const queries = safeFtsQueries(query);
+    if (!queries.and) return [];
+    const seen = new Set<number>();
+    const results: LexicalCandidate[] = [];
+    const collect = (ftsQuery: string, phraseMatch: boolean) => {
+      const clauses = [
+        "message_search_fts MATCH ?",
+        "c.workspace_id = ?",
+        ...(channelId ? ["c.channel_id = ?"] : []),
+        ...(excludeThreadId ? ["c.thread_id != ?"] : []),
+        ...(author ? ["m.author = ?"] : []),
+      ];
+      const sql = `SELECT c.id
+        FROM message_search_fts
+        JOIN message_search_chunks c ON c.id = message_search_fts.rowid
+        JOIN messages m ON m.id = c.message_id
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY bm25(message_search_fts) LIMIT ?`;
+      const args: Array<string | number> = [
+        ftsQuery,
+        workspaceId,
+        ...(channelId ? [channelId] : []),
+        ...(excludeThreadId ? [excludeThreadId] : []),
+        ...(author ? [author] : []),
+        limit,
+      ];
+      const rows = this.store.db
+        .query<{ id: number }, Array<string | number>>(sql)
+        .all(...args);
+      for (const row of rows) {
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        results.push({ chunkId: row.id, phraseMatch });
+      }
+    };
+    if (queries.phrase) collect(queries.phrase, true);
+    collect(queries.and, false);
+    return results.slice(0, limit);
   }
 
   private hydrateChunks(chunkIds: number[]): SearchChunkRow[] {
@@ -445,14 +526,35 @@ export function createMessageSearch(
   );
 }
 
-function safeFtsQuery(query: string): string {
+function safeFtsQueries(query: string): { and: string; phrase?: string } {
   const allTerms = query.match(/[\p{L}\p{N}_]+/gu) ?? [];
   const meaningfulTerms = allTerms.filter(
     (term) => !FTS_STOP_WORDS.has(term.toLowerCase()),
   );
   const terms = meaningfulTerms.length > 0 ? meaningfulTerms : allTerms;
-  return terms
+  const quotedTerms = terms
     .slice(0, 20)
-    .map((term) => `"${term.replaceAll('"', '""')}"`)
-    .join(" OR ");
+    .map((term) => `"${term.replaceAll('"', '""')}"`);
+  return {
+    and: quotedTerms.join(" AND "),
+    ...(meaningfulTerms.length >= 2
+      ? { phrase: `"${allTerms.slice(0, 20).join(" ")}"` }
+      : {}),
+  };
+}
+
+function orderedMatchKinds(
+  kinds: Set<"keyword" | "semantic">,
+): Array<"keyword" | "semantic"> {
+  return (["keyword", "semantic"] as const).filter((kind) => kinds.has(kind));
+}
+
+function matchBand(result: {
+  phraseMatch: boolean;
+  matchedBy: Array<"keyword" | "semantic">;
+}): number {
+  const semantic = result.matchedBy.includes("semantic");
+  if (result.phraseMatch) return semantic ? 0 : 1;
+  if (result.matchedBy.includes("keyword")) return semantic ? 2 : 3;
+  return 4;
 }

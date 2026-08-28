@@ -204,21 +204,27 @@ Following `send_message`, the read slice:
 | `list_channels` | `listChannels(workspaceId)` | workspace resolved server-side |
 | `list_threads` | resolve channel name, then `listThreads(channelId)` | agents pass a channel name, never its ID |
 | `read_thread` | `listMessages(threadId)` | defaults to the caller's own thread |
-| `search_messages` | hybrid FTS5 + local embeddings | workspace resolved server-side; optional channel name, never channel/thread IDs |
+| `search_messages` | hybrid FTS5 + local embeddings | workspace/current thread resolved server-side; optional channel name, author, and current-thread opt-in; never channel/thread IDs |
 
 Cross-thread reads are allowed — threads are not secret from each other —
 but the caller's identity always comes from the token, never from
 arguments. Cross-thread *writes* (a `threadId` argument on `send_message`)
 remain out: one thread, one conversation, one voice.
 
-`search_messages` is the first read tool implemented. It chunks message text,
-indexes exact terms synchronously with FTS5, and generates normalized local
-MiniLM embeddings asynchronously in a dedicated worker. Embeddings are durable
-`Float32Array` BLOBs in SQLite. The worker loads each hot workspace into one
-contiguous vector slab using keyset-paginated batches, scans it exactly, and
-combines semantic and lexical ranks with reciprocal-rank fusion. If local model
-inference is unavailable, the tool degrades to lexical results and reports that
-semantic search was unavailable.
+`search_messages` is the first read tool implemented. It excludes the caller's
+current thread by default; `includeCurrentThread: true` opts it back in without
+exposing thread IDs. `author` can narrow results to `user` or `agent` messages.
+It chunks message text, indexes exact terms synchronously with FTS5, and tries a
+quoted phrase followed by an AND of meaningful quoted terms. Local MiniLM
+embeddings provide paraphrase recall asynchronously in a dedicated worker.
+Embeddings are durable `Float32Array` BLOBs in SQLite. The worker loads each hot
+workspace into one contiguous vector slab using keyset-paginated batches and
+scans it exactly. Results collapse to the best message per thread;
+`threadHitCount` is the total distinct matching messages represented in the
+candidate pool for that thread. `matchedBy` reports keyword and/or semantic
+matching; internal rank scores are not exposed. If local model inference is
+unavailable, the tool degrades to lexical results and reports
+`semanticAvailable: false`.
 
 ### 5.4 `create_channel` and attached folders
 

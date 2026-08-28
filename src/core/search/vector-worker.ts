@@ -32,11 +32,15 @@ interface WorkspaceVectorSlab {
   vectors: Float32Array;
   channelCodes: Uint32Array;
   channelCodeById: Map<string, number>;
+  threadIds: string[];
+  authors: string[];
 }
 
 interface VectorRow {
   id: number;
   channel_id: string;
+  thread_id: string;
+  author: string;
   embedding: Uint8Array;
 }
 
@@ -141,6 +145,13 @@ async function semanticSearch(
     ) {
       continue;
     }
+    if (
+      input.excludeThreadId &&
+      slab.threadIds[rowIndex] === input.excludeThreadId
+    ) {
+      continue;
+    }
+    if (input.author && slab.authors[rowIndex] !== input.author) continue;
     const vectorOffset = rowIndex * dimensions;
     let score = 0;
     for (let dimension = 0; dimension < dimensions; dimension++) {
@@ -183,10 +194,13 @@ function loadWorkspace(workspaceId: string): WorkspaceVectorSlab {
   const vectors = new Float32Array(count * dimensions);
   const channelCodes = new Uint32Array(count);
   const channelCodeById = new Map<string, number>();
+  const threadIds = new Array<string>(count);
+  const authors = new Array<string>(count);
   const query = db.prepare<VectorRow, [string, string, number, number, number]>(
-    `SELECT c.id, c.channel_id, e.embedding
+    `SELECT c.id, c.channel_id, c.thread_id, m.author, e.embedding
      FROM message_embeddings e
      JOIN message_search_chunks c ON c.id = e.chunk_id
+     JOIN messages m ON m.id = c.message_id
      WHERE c.workspace_id = ? AND e.model = ? AND e.dimensions = ?
        AND e.content_hash = c.content_hash AND c.id > ?
      ORDER BY c.id LIMIT ?`,
@@ -220,6 +234,8 @@ function loadWorkspace(workspaceId: string): WorkspaceVectorSlab {
         channelCodeById.set(row.channel_id, code);
       }
       channelCodes[loaded] = code;
+      threadIds[loaded] = row.thread_id;
+      authors[loaded] = row.author;
       loaded++;
       lastId = row.id;
     }
@@ -230,12 +246,14 @@ function loadWorkspace(workspaceId: string): WorkspaceVectorSlab {
 
   const slab =
     loaded === count
-      ? { ids, vectors, channelCodes, channelCodeById }
+      ? { ids, vectors, channelCodes, channelCodeById, threadIds, authors }
       : {
           ids: ids.slice(0, loaded),
           vectors: vectors.slice(0, loaded * dimensions),
           channelCodes: channelCodes.slice(0, loaded),
           channelCodeById,
+          threadIds: threadIds.slice(0, loaded),
+          authors: authors.slice(0, loaded),
         };
   slabs.set(workspaceId, slab);
   while (slabs.size > MAX_HOT_WORKSPACES) {
