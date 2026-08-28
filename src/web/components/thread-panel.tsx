@@ -41,7 +41,7 @@ export function ThreadPanel({
   const cancel = useCancelTurn(threadId);
   const messages = data?.messages ?? [];
   const [root, ...replies] = messages;
-  const untaggedAgent = threadUntaggedAgent(root, agentData?.agents);
+  const untaggedAgent = threadUntaggedAgent(messages, agentData?.agents);
   const liveTurn = useThreadTurn(threadId);
   const persistedAgent = turnActive ? (turnAgent ?? "agent") : null;
   const activeAgent = liveTurn.ready ? liveTurn.agent : persistedAgent;

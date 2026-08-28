@@ -339,6 +339,15 @@ export class PhiStore {
     return row ? messageFromRow(row) : null;
   }
 
+  lastAgentMessage(threadId: string): Message | null {
+    const row = this.db
+      .query<MessageRow, [string]>(
+        "SELECT * FROM messages WHERE thread_id = ? AND author = 'agent' ORDER BY seq DESC LIMIT 1",
+      )
+      .get(threadId);
+    return row ? messageFromRow(row) : null;
+  }
+
   getThreadSession(
     threadId: string,
     agentName = "default",

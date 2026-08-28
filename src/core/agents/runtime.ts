@@ -178,9 +178,15 @@ export class AgentRuntime {
     );
   }
 
-  // The agent the thread's root message routed to. A thread opened with
-  // "@researcher ..." belongs to researcher; unmentioned replies stay with it.
+  // The agent an unmentioned reply falls back to: the last agent that
+  // answered in the thread, so a follow-up continues the conversation with
+  // whoever just spoke. Before any agent has replied, the thread belongs to
+  // the agent its root message routed to ("@researcher ..." keeps
+  // researcher). A stale name (agent since deleted) degrades to the
+  // workspace default in routeUserContent.
   private threadFallbackAgent(threadId: string): string {
+    const last = this.store.lastAgentMessage(threadId)?.metadata.agent;
+    if (typeof last === "string" && last.length > 0) return last;
     const routed = this.store.rootMessage(threadId)?.metadata.routedTo;
     const agent = Array.isArray(routed) ? routed[0] : undefined;
     return typeof agent === "string" ? agent : DEFAULT_AGENT_NAME;

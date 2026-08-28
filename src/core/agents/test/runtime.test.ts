@@ -1578,3 +1578,66 @@ test("two overlapping turns capture once at global idle", async () => {
   expect(turnRows).toHaveLength(1);
   await done();
 });
+
+test("untagged replies route to the last agent that answered", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    instructions: "Review the request.",
+  });
+  const root = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hello",
+    metadata: { mentions: [], routedTo: ["default"] },
+  });
+
+  // Before any agent reply, the thread still belongs to the root's agent.
+  expect(await runtime.routeUserContent("keep going", root.thread.id)).toEqual({
+    mentions: [],
+    routedTo: ["default"],
+  });
+
+  store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "done — handing to review",
+    metadata: { agent: "default" },
+  });
+  store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "review notes",
+    metadata: { agent: "reviewer" },
+  });
+  expect(
+    await runtime.routeUserContent("thanks, one more thing", root.thread.id),
+  ).toEqual({
+    mentions: [],
+    routedTo: ["reviewer"],
+  });
+
+  // A mention still outranks the last responder.
+  expect(
+    await runtime.routeUserContent("@default take over", root.thread.id),
+  ).toEqual({
+    mentions: ["default"],
+    routedTo: ["default"],
+  });
+
+  // A last responder that has since been deleted degrades to the
+  // workspace default.
+  store.appendMessage(root.thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "gone now",
+    metadata: { agent: "ghost" },
+  });
+  expect(await runtime.routeUserContent("still there?", root.thread.id)).toEqual(
+    {
+      mentions: [],
+      routedTo: ["default"],
+    },
+  );
+  await done();
+});
