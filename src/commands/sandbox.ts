@@ -20,7 +20,7 @@ const MINIMUM_SBX = "0.42.0-rc1";
 const SANDBOX_PORT = 3141;
 
 function registry(env: NodeJS.ProcessEnv): string {
-  return (env.PHI_SANDBOX_REGISTRY?.trim() || "docker.io/nelsonkam").replace(
+  return (env.PHI_SANDBOX_REGISTRY?.trim() || "ghcr.io/nelsonkam").replace(
     /\/$/,
     "",
   );

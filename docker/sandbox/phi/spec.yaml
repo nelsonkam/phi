@@ -11,7 +11,7 @@ locked:
   - sandbox.image
 
 sandbox:
-  image: docker.io/nelsonkam/phi-sandbox:0.2.0
+  image: ghcr.io/nelsonkam/phi-sandbox:0.2.0
   entrypoint:
     - /usr/local/bin/phi-sandbox-entrypoint
   resources:

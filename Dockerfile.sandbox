@@ -1,5 +1,9 @@
 FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae3212a0310b2e5a0349c54e29249e45e919
 
+LABEL org.opencontainers.image.source="https://github.com/nelsonkam/phi" \
+      org.opencontainers.image.description="Phi persistent multi-agent sandbox" \
+      org.opencontainers.image.licenses="MIT"
+
 ARG TARGETARCH
 ARG PHI_VERSION=0.2.0
 ARG PHI_RELEASE_REPO=nelsonkam/phi

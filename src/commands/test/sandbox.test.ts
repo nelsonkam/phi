@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { CliOutput } from "@/cli";
 import { officialKitRefs, runSandbox, supportsPhiSandbox } from "@/commands/sandbox";
+import { VERSION } from "@/version";
 
 function capture() {
   let stdout = "";
@@ -19,6 +20,17 @@ test("requires the no-workspace sbx release line", () => {
   expect(supportsPhiSandbox("0.42.0-rc2")).toBe(true);
   expect(supportsPhiSandbox("0.42.0")).toBe(true);
   expect(supportsPhiSandbox("1.0.0")).toBe(true);
+});
+
+test("official kits default to the GitHub container registry", () => {
+  expect(officialKitRefs({})).toEqual({
+    root: `ghcr.io/nelsonkam/phi-kit:${VERSION}`,
+    mixins: [
+      `ghcr.io/nelsonkam/phi-claude-kit:${VERSION}`,
+      `ghcr.io/nelsonkam/phi-codex-kit:${VERSION}`,
+      `ghcr.io/nelsonkam/phi-cursor-kit:${VERSION}`,
+    ],
+  });
 });
 
 test("create composes pinned official kits and a custom mixin as exact argv", async () => {
