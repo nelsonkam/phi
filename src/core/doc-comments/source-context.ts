@@ -48,7 +48,7 @@ export function formatDocCommentContext(ctx: DocSourceContext): string {
   }
   if (ctx.parentThreadId) {
     lines.push(
-      `Parent thread: ${ctx.parentThreadId}. Use read_thread with that id to pull the sharing conversation. To surface a resolution in the channel flow, send_message with thread_id set to that parent.`,
+      `Parent thread: ${ctx.parentThreadId}. Use read_thread with that id to pull the sharing conversation if you need it. Reply only in this comment thread: call send_message without thread_id. Do not follow up or recap into the parent. Set thread_id to that parent only if the user asked you to post in the sharing conversation, or a decision must be recorded there that this comment thread cannot hold.`,
     );
   }
   return lines.join("\n\n");

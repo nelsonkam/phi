@@ -38,5 +38,6 @@ test("the comment-thread context includes a parent-thread pointer", () => {
   });
   expect(prompt).toContain("Parent thread: th_parent");
   expect(prompt).toContain("read_thread");
-  expect(prompt).toContain("thread_id");
+  expect(prompt).toContain("without thread_id");
+  expect(prompt).toContain("Do not follow up or recap into the parent");
 });
