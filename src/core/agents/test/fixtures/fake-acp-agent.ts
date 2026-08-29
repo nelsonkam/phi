@@ -223,7 +223,7 @@ async function handle(line: string): Promise<void> {
         ? "[since] "
         : "";
       const attach = promptText.includes("server-owned attachments")
-        ? "[attach] "
+        ? `[attach${promptText.includes("read_attachment") ? ":read_attachment" : ""}] `
         : "";
       const docComment = promptText.includes("comment thread on a markdown document")
         ? "[doc-comment] "

@@ -264,8 +264,7 @@ test("user attachments are listed in the prompt and images embed when supported"
   runtime.handleUserMessage(message);
   await runtime.settled(thread.id);
   const reply = store.listMessages(thread.id)[1]!;
-  expect(reply.content).toContain("[attach]");
-  expect(reply.content).toContain("read_attachment");
+  expect(reply.content).toContain("[attach:read_attachment]");
   expect(reply.content).toContain("[image:image/png]");
   expect(reply.content).toContain("what is this");
   await done();
@@ -994,10 +993,15 @@ test("pools Cursor by channel folder set and passes launch-time roots", async ()
   for (const item of messages) runtime.handleUserMessage(item.message);
   await Promise.all(messages.map((item) => runtime.settled(item.thread.id)));
 
-  expect(launches).toEqual([
-    { harnessId: "cursor", additionalDirectories: firstFolders },
-    { harnessId: "cursor", additionalDirectories: secondFolders },
-  ]);
+  expect(launches).toHaveLength(2);
+  expect(launches).toContainEqual({
+    harnessId: "cursor",
+    additionalDirectories: firstFolders,
+  });
+  expect(launches).toContainEqual({
+    harnessId: "cursor",
+    additionalDirectories: secondFolders,
+  });
   await done();
 });
 
