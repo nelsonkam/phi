@@ -1,7 +1,7 @@
 schemaVersion: "2"
 kind: sandbox
 name: phi
-version: 0.1.0
+version: 0.2.0
 displayName: Phi
 description: Persistent multi-agent workspace coordinator and web UI
 sourceURL: https://github.com/nelsonkam/phi
@@ -11,7 +11,7 @@ locked:
   - sandbox.image
 
 sandbox:
-  image: docker.io/nelsonkam/phi-sandbox:0.1.0
+  image: docker.io/nelsonkam/phi-sandbox:0.2.0
   entrypoint:
     - /usr/local/bin/phi-sandbox-entrypoint
   resources:
