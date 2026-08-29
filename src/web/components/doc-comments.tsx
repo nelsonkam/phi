@@ -273,7 +273,7 @@ function DocCommentPanel({
   const selected = comments.find((item) => item.thread.id === selectedId);
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col overflow-hidden border-l bg-background">
+    <aside className="flex min-w-72 w-1/3 shrink-0 flex-col overflow-hidden border-l bg-background">
       <header className="flex h-10 shrink-0 items-center gap-2 border-b px-3">
         <MessageSquareText className="size-3.5 text-muted-foreground" />
         <h2 className="text-xs font-semibold">Comments</h2>

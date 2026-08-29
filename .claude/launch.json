@@ -18,7 +18,7 @@
       "runtimeExecutable": "env",
       "runtimeArgs": [
         "PHI_PORT=3143",
-        "PHI_ROOT=/private/tmp/claude-501/-Users-nelson-work-phi/7358281e-56c3-4102-aa3a-35ec8e63b168/scratchpad/phi-root",
+        "PHI_ROOT=/private/tmp/claude-501/-Users-nelson-work-phi/fcb6d4bb-674e-4a36-975f-6363d30b9f91/scratchpad/phi-root",
         "bun",
         "run",
         "dev"

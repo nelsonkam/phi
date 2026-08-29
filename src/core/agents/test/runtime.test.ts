@@ -100,6 +100,16 @@ test("the messaging preamble opens with the agent's own handle", () => {
   expect(preamble).toContain("that handle is your own name in this thread");
   expect(preamble).toContain("attachment:att_");
   expect(preamble).toContain("Comment-thread turns");
+  // Narrow guards on the style rules, so a future prompt edit can't drop
+  // them silently: earned structure, the judgment-based doc condition, and
+  // the result-vs-acknowledgement distinction.
+  expect(preamble).toContain("must be earned by the content");
+  expect(preamble).toContain(
+    "durable, reviewable, or easier to navigate as a document",
+  );
+  expect(preamble).toContain(
+    "in an initial acknowledgement, name the first concrete step",
+  );
 });
 
 test("a user message gets the agent's reply appended to its thread", async () => {

@@ -39,7 +39,7 @@ export function docSourceContext(
 
 export function formatDocCommentContext(ctx: DocSourceContext): string {
   const lines = [
-    `This turn is a comment thread on a markdown document (${ctx.path}). The quoted text is the excerpt the user selected; reply with send_message as in any other thread.`,
+    `This turn is a comment thread on a markdown document (${ctx.path}). The quoted text is the excerpt the user selected. Reply as marginalia, focused on the selected passage: the user is looking at the document, so never quote it back or re-summarize it. When the user asked for an edit or clearly authorized one, make it and confirm briefly ("Tightened that paragraph") rather than describing the change you would make; otherwise discuss first. If the discussion outgrows the excerpt — it's really about the whole document or new work — suggest continuing in the main channel, or create and link a doc when broader work was requested, instead of building it in the margin.`,
     `Quoted text:\n${ctx.quote}`,
   ];
   if (ctx.surrounding) {

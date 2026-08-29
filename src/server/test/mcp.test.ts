@@ -299,6 +299,12 @@ test("advertises messaging and workspace search without a thread argument", asyn
   expect(body.result.tools).toHaveLength(5);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
+  expect(body.result.tools[0]!.description).toContain(
+    "a doc under the channel plus a linked summary",
+  );
+  expect(body.result.tools[0]!.description).toContain(
+    "earned by enumerable content",
+  );
   expect(body.result.tools[0]!.inputSchema.properties.to).toBeDefined();
   const harnesses = body.result.tools[1]!;
   expect(harnesses.name).toBe("list_agent_harnesses");

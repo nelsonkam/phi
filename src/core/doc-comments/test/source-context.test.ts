@@ -18,3 +18,13 @@ test("maps a rendered quote through mdast onto surrounding source", () => {
   expect(ctx.surrounding).toContain("Hello **world**");
   expect(formatDocCommentContext(ctx)).toContain("Quoted text:\nworld");
 });
+
+test("the comment-thread context carries the marginalia contract", () => {
+  const prompt = formatDocCommentContext({
+    path: "notes.md",
+    quote: "world",
+    surrounding: null,
+  });
+  expect(prompt).toContain("Reply as marginalia");
+  expect(prompt).toContain("asked for an edit or clearly authorized one");
+});
