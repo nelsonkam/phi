@@ -426,7 +426,9 @@ There is no agent-facing comment tool — the user creates comments; agents
 reply through `send_message`.
 
 Routing matches chat: a leading `@name` is the addressee; otherwise the
-parent thread's agent, else the workspace default. Mid-body mentions are
+last agent that answered in this comment thread, else the agent the root
+routed to. A new unmentioned comment inherits the parent thread's agent
+as that root, else the workspace default. Mid-body mentions are
 speculative. Retry on an unmentioned comment wakes that fallback agent.
 
 The comment-thread prompt includes the quoted excerpt, surrounding source,

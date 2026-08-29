@@ -192,7 +192,7 @@ test("a doc-comment turn includes the anchored excerpt in the prompt", async () 
       headingSlug: "intro",
     },
   );
-  const routing = await runtime.routeDocCommentContent(message.content);
+  const routing = await runtime.routeUserContent(message.content);
   runtime.handleUserMessage(message, routing.routedTo);
   await runtime.settled(thread.id);
   const reply = store.listMessages(thread.id).at(-1)!;
@@ -227,13 +227,61 @@ test("an unmentioned doc-comment falls back to the parent thread's agent", async
       parentThreadId: parent.thread.id,
     },
   );
-  const routing = await runtime.routeDocCommentContent(message.content, {
-    threadId: thread.id,
-  });
+  const routing = await runtime.routeUserContent(
+    message.content,
+    parent.thread.id,
+  );
   expect(routing).toEqual({ mentions: [], routedTo: ["reviewer"] });
   runtime.handleUserMessage(message, routing.routedTo);
   await runtime.settled(thread.id);
   expect(store.listMessages(thread.id).at(-1)?.metadata.agent).toBe("reviewer");
+  await done();
+});
+
+test("unmentioned doc-comment replies stay with the last agent in the comment thread", async () => {
+  const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    model: "smart",
+    instructions: "Review the request.",
+  });
+  const parent = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "@reviewer please look",
+    metadata: { mentions: ["reviewer"], routedTo: ["reviewer"] },
+  });
+  const { thread, message } = store.createDocComment(
+    channel.id,
+    {
+      author: "user",
+      kind: "message",
+      content: "looks off",
+      metadata: { mentions: [], routedTo: ["reviewer"] },
+    },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "unique quote",
+      prefix: "The ",
+      suffix: " lives",
+      headingSlug: "intro",
+      parentThreadId: parent.thread.id,
+    },
+  );
+  runtime.handleUserMessage(message, ["reviewer"]);
+  await runtime.settled(thread.id);
+
+  store.appendMessage(thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "default took over",
+    metadata: { agent: "default" },
+  });
+  expect(await runtime.routeUserContent("keep going", thread.id)).toEqual({
+    mentions: [],
+    routedTo: ["default"],
+  });
   await done();
 });
 

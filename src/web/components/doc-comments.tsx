@@ -563,7 +563,6 @@ function DocCommentPanel({
             key={selected.thread.id}
             channelId={channelId}
             comment={selected}
-            fallbackParentThreadId={parentThreadId}
             onBack={() => onSelect(null)}
           />
         ) : (
@@ -664,14 +663,13 @@ function useCommentFallbackAgent(parentThreadId: string | null | undefined): str
 function DocCommentThreadView({
   channelId,
   comment,
-  fallbackParentThreadId,
   onBack,
 }: {
   channelId: string;
   comment: DocCommentThread & { detached?: boolean };
-  fallbackParentThreadId?: string;
   onBack: () => void;
 }) {
+  const { data: agentData } = useAgents();
   const { data } = useMessages(comment.thread.id);
   const send = useSendMessage(comment.thread.id);
   const cancel = useCancelTurn(comment.thread.id);
@@ -688,9 +686,7 @@ function DocCommentThreadView({
   const workingRef = useRef(isAgentWorking);
   workingRef.current = isAgentWorking;
   const last = messages[messages.length - 1];
-  const fallbackAgent = useCommentFallbackAgent(
-    comment.anchor.parentThreadId ?? fallbackParentThreadId,
-  );
+  const fallbackAgent = threadUntaggedAgent(messages, agentData?.agents);
   const status = useUpdateThreadStatus(channelId);
   const [copied, setCopied] = useState(false);
   const resolved = comment.thread.status !== "open";

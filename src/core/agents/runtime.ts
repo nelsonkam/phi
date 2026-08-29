@@ -14,7 +14,6 @@ import { DEFAULT_AGENT_NAME, loadAgent } from "./registry";
 import type { AgentDefinition } from "./registry";
 import {
   routeAgentContent,
-  routeDocCommentContent,
   routeUserContent,
   stripLeadingMention,
 } from "./routing";
@@ -205,7 +204,9 @@ export class AgentRuntime {
   }
 
   // Pass `threadId` when routing a reply so unmentioned messages fall back to
-  // the thread's own agent; omit it for a thread root, which has no history.
+  // that thread's agent. Omit it for a new chat thread (workspace default). A
+  // new doc comment passes the parent chat thread id — it has no history yet,
+  // so it inherits that conversation's agent.
   async routeUserContent(
     content: string,
     threadId?: string,
@@ -215,32 +216,6 @@ export class AgentRuntime {
       content,
       threadId ? this.threadFallbackAgent(threadId) : undefined,
     );
-  }
-
-  async routeDocCommentContent(
-    content: string,
-    context?: { threadId?: string; parentThreadId?: string | null },
-  ): Promise<MessageRouting> {
-    return routeDocCommentContent(
-      this.workspaceRoot,
-      content,
-      this.docCommentFallbackAgent(context),
-    );
-  }
-
-  // Unmentioned comments follow the parent chat thread's fallback agent,
-  // then the workspace default.
-  private docCommentFallbackAgent(context?: {
-    threadId?: string;
-    parentThreadId?: string | null;
-  }): string {
-    const parentId =
-      context?.parentThreadId ??
-      (context?.threadId
-        ? this.store.getDocCommentAnchor(context.threadId)?.parentThreadId
-        : null);
-    if (parentId) return this.threadFallbackAgent(parentId);
-    return DEFAULT_AGENT_NAME;
   }
 
   // The agent an unmentioned reply falls back to: the last agent that
@@ -496,16 +471,7 @@ export class AgentRuntime {
       };
     }
     if (message.author === "user") {
-      if (this.store.getThread(message.threadId)?.kind === "doc_comment") {
-        return this.routeDocCommentContent(message.content, {
-          threadId: message.threadId,
-        });
-      }
-      return this.routeUserContentFn(
-        this.workspaceRoot,
-        message.content,
-        this.threadFallbackAgent(message.threadId),
-      );
+      return this.routeUserContent(message.content, message.threadId);
     }
     const authorAgent = String(message.metadata.agent ?? "");
     return this.routeAgentContentFn(

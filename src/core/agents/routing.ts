@@ -105,16 +105,6 @@ export async function routeUserContent(
   };
 }
 
-// Same fallback chain as chat: parent thread's agent (passed in), else the
-// workspace default. Mentions still outrank the fallback.
-export async function routeDocCommentContent(
-  workspaceRoot: string,
-  content: string,
-  fallbackAgent: string = DEFAULT_AGENT_NAME,
-): Promise<MessageRouting> {
-  return routeUserContent(workspaceRoot, content, fallbackAgent);
-}
-
 // Agent messages route only from the structured `to` list; content never
 // affects execution, and `mentions` is display metadata. On the send_message
 // path, `requireExplicitHandoff` rejects a leading known-agent handle when

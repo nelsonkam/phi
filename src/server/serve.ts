@@ -233,12 +233,10 @@ export async function startServer(): Promise<void> {
           if (!thread) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
-          const routing =
-            thread.kind === "doc_comment"
-              ? await runtime.routeDocCommentContent(posted.content, {
-                  threadId: thread.id,
-                })
-              : await runtime.routeUserContent(posted.content, thread.id);
+          const routing = await runtime.routeUserContent(
+            posted.content,
+            thread.id,
+          );
           const message = store.appendMessage(req.params.id!, {
             author: "user",
             kind: "message",
@@ -273,15 +271,7 @@ export async function startServer(): Promise<void> {
               { status: 400 },
             );
           }
-          if (thread.kind === "doc_comment") {
-            const routing = await runtime.routeDocCommentContent(
-              lastUserMessage.content,
-              { threadId: thread.id },
-            );
-            runtime.handleUserMessage(lastUserMessage, routing.routedTo);
-          } else {
-            runtime.handleUserMessage(lastUserMessage);
-          }
+          runtime.handleUserMessage(lastUserMessage);
           return Response.json({ ok: true }, { status: 202 });
         },
       },
@@ -418,9 +408,9 @@ export async function startServer(): Promise<void> {
               { status: parent.status },
             );
           }
-          const routing = await runtime.routeDocCommentContent(
+          const routing = await runtime.routeUserContent(
             parsed.value.content,
-            { parentThreadId: parent.parentThreadId },
+            parent.parentThreadId ?? undefined,
           );
           const result = store.createDocComment(
             channelId,

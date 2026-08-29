@@ -617,9 +617,11 @@ They do not appear in the channel flow or Activity. File-chip badges
 remain channel-wide; the "docs with comments" browser lives on the open
 thread's header and lists files commented from that thread.
 
-The user creates comments from the markdown viewer. Unmentioned comments
-route to the parent thread's default agent, else the workspace default —
-the same fallback chain as chat replies. Retry on an unmentioned comment
+The user creates comments from the markdown viewer. Routing matches chat:
+a leading `@name` is the addressee; otherwise last-responder in this
+comment thread, else the agent the root routed to, else the workspace
+default. A new unmentioned comment has no history yet, so it inherits the
+parent thread's agent as that root. Retry on an unmentioned comment
 wakes that agent. Agents can `read_thread` the parent and `send_message`
 with `thread_id` set to it.
 

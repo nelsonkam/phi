@@ -98,10 +98,12 @@ The outbox effectively already became this after delivery was dropped;
 A doc comment is a real thread (`kind = 'doc_comment'`) plus a
 `doc_comment_anchors` row (text-quote selector: quote, prefix, suffix,
 nearest `heading_slug`, optional `parent_thread_id`). The user creates
-comments from a text selection in the markdown viewer. Unmentioned
-comments route to the parent thread's agent, else the workspace default.
-Retry wakes that agent. Agents read the parent with `read_thread` and may
-post back into it via `send_message` `thread_id`.
+comments from a text selection in the markdown viewer. Routing matches
+chat (last-responder in the comment thread, else the root's agent). A
+new unmentioned comment inherits the parent thread's agent as that root,
+else the workspace default. Retry wakes that agent. Agents read the
+parent with `read_thread` and may post back into it via `send_message`
+`thread_id`.
 
 Endpoints (channel-scoped, same device auth as the rest of the API):
 
