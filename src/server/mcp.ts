@@ -18,8 +18,9 @@ import type { PhiStore } from "@/core/store/store";
 import type { McpTokenRegistry } from "@/server/mcp-token-registry";
 import type { Message } from "@/shared/types";
 
-export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Hand off to peer agents only through the optional to list; message text never routes, and a message that leads with an @agent-handle without to is rejected so an intended handoff cannot silently reach no one. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report; for durable or reviewable material, a doc under the channel plus a linked summary beats a long report in chat. Structure (bullets, headers) is earned by enumerable content, never the default.`;
+export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Hand off to peer agents only through the optional to list; message text never routes, and a message that leads with an @agent-handle without to is rejected so an intended handoff cannot silently reach no one. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report; for durable or reviewable material, a doc under the channel plus a linked summary beats a long report in chat. Structure (bullets, headers) is earned by enumerable content, never the default. When this turn is a doc comment with a parent thread, you may pass thread_id set to that parent to post into the sharing conversation — other thread ids are rejected.`;
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across other threads in your phi workspace using exact phrase/keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace and current thread come from your session; do not ask the user for a thread or channel ID. You may optionally include the current thread, narrow results using a channel name, or filter by author.`;
+export const READ_THREAD_DESCRIPTION = `Read messages in a thread by id. Use this to pull a parent conversation linked from a doc-comment turn. The id must be your current thread or, when this turn is a comment, that comment's parent thread.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
@@ -81,6 +82,12 @@ export function createMcpHandler(
                 items: { type: "string", minLength: 1 },
                 description:
                   "Agent handles to hand the turn to, in turn order; the only way an agent message routes",
+              },
+              thread_id: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "When this turn is a doc comment, the parent thread id to post into; omit to stay in the current thread",
               },
             },
             required: ["content"],
@@ -160,6 +167,23 @@ export function createMcpHandler(
               },
             },
             required: ["content"],
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "read_thread",
+          description: READ_THREAD_DESCRIPTION,
+          inputSchema: {
+            type: "object",
+            properties: {
+              thread_id: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "Thread to read; must be the current thread or this comment's parent",
+              },
+            },
+            required: ["thread_id"],
             additionalProperties: false,
           },
         },
@@ -525,6 +549,40 @@ export function createMcpHandler(
           },
         );
       }
+      if (request.params.name === "read_thread") {
+        const rawId = request.params.arguments?.thread_id;
+        const requested =
+          typeof rawId === "string" ? rawId.trim() : "";
+        if (!requested) {
+          return toolError("thread_id is required");
+        }
+        const allowed = allowedReadThreadId(store, caller.threadId, requested);
+        if (!allowed.ok) return toolError(allowed.error);
+        return tokens.runOnce(
+          token,
+          `read_thread:${requested}`,
+          extra.requestId,
+          async () => {
+            const messages = store.listMessages(requested);
+            const truncated = messages.length > READ_THREAD_MAX;
+            const slice = truncated
+              ? messages.slice(-READ_THREAD_MAX)
+              : messages;
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({
+                    threadId: requested,
+                    truncated,
+                    messages: slice.map(serializeReadMessage),
+                  }),
+                },
+              ],
+            };
+          },
+        );
+      }
       if (request.params.name !== "send_message") {
         return {
           isError: true,
@@ -559,9 +617,24 @@ export function createMcpHandler(
       const explicitRecipients = Array.isArray(rawTo)
         ? rawTo.map((name) => String(name).trim())
         : undefined;
+      const rawThreadId = request.params.arguments?.thread_id;
+      if (
+        rawThreadId !== undefined &&
+        (typeof rawThreadId !== "string" || !rawThreadId.trim())
+      ) {
+        return toolError("thread_id must be a non-empty string");
+      }
+      const requestedThreadId =
+        typeof rawThreadId === "string" ? rawThreadId.trim() : undefined;
+      const destination = resolveSendThreadId(
+        store,
+        caller.threadId,
+        requestedThreadId,
+      );
+      if (!destination.ok) return toolError(destination.error);
       return tokens.runOnce(
         token,
-        `send_message:${JSON.stringify({ content, to: explicitRecipients })}`,
+        `send_message:${JSON.stringify({ content, to: explicitRecipients, thread_id: destination.threadId })}`,
         extra.requestId,
         async () => {
           let routing: Awaited<ReturnType<typeof routeAgentContent>>;
@@ -581,7 +654,7 @@ export function createMcpHandler(
               ],
             };
           }
-          const message = store.appendMessage(caller.threadId, {
+          const message = store.appendMessage(destination.threadId, {
             author: "agent",
             kind: "message",
             content,
@@ -660,6 +733,62 @@ function toolError(message: string) {
   return {
     isError: true,
     content: [{ type: "text" as const, text: message }],
+  };
+}
+
+const READ_THREAD_MAX = 50;
+
+function allowedReadThreadId(
+  store: PhiStore,
+  callerThreadId: string,
+  requested: string,
+): { ok: true } | { ok: false; error: string } {
+  if (requested === callerThreadId) return { ok: true };
+  const caller = store.getThread(callerThreadId);
+  const parent =
+    caller?.kind === "doc_comment"
+      ? store.getDocCommentAnchor(callerThreadId)?.parentThreadId
+      : null;
+  if (parent && requested === parent) return { ok: true };
+  return {
+    ok: false,
+    error:
+      "thread_id must be the current thread or this comment's parent thread",
+  };
+}
+
+function resolveSendThreadId(
+  store: PhiStore,
+  callerThreadId: string,
+  requested: string | undefined,
+): { ok: true; threadId: string } | { ok: false; error: string } {
+  if (!requested || requested === callerThreadId) {
+    return { ok: true, threadId: callerThreadId };
+  }
+  const caller = store.getThread(callerThreadId);
+  const parent =
+    caller?.kind === "doc_comment"
+      ? store.getDocCommentAnchor(callerThreadId)?.parentThreadId
+      : null;
+  if (parent && requested === parent) {
+    return { ok: true, threadId: requested };
+  }
+  return {
+    ok: false,
+    error:
+      "thread_id must be the current thread or this comment's parent thread",
+  };
+}
+
+function serializeReadMessage(message: Message) {
+  return {
+    id: message.id,
+    author: message.author,
+    content: message.content,
+    createdAt: message.createdAt,
+    ...(typeof message.metadata.agent === "string"
+      ? { agent: message.metadata.agent }
+      : {}),
   };
 }
 

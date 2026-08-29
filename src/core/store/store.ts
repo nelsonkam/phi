@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dbPath, phiRoot, workspaceRoot } from "@/core/paths";
 import { migrate } from "@/db/migrate";
+import { messageContainsFileLink } from "@/shared/file-link-match";
 import type {
   ActivityItem,
   Attachment,
@@ -397,6 +398,17 @@ export class PhiStore {
       .run(workspaceId);
   }
 
+  setThreadStatus(threadId: string, status: Thread["status"]): Thread | null {
+    if (!this.getThread(threadId)) return null;
+    const now = new Date().toISOString();
+    this.db
+      .query("UPDATE threads SET status = ?, updated_at = ? WHERE id = ?",)
+      .run(status, now, threadId);
+    const thread = this.getThread(threadId)!;
+    this.emit({ type: "thread.updated", thread });
+    return thread;
+  }
+
   rootMessage(threadId: string): Message | null {
     const row = this.db
       .query<MessageRow, [string]>(
@@ -560,6 +572,7 @@ export class PhiStore {
       prefix: string;
       suffix: string;
       headingSlug: string | null;
+      parentThreadId?: string | null;
     },
   ): { thread: Thread; message: Message } {
     const channel = this.getChannel(channelId);
@@ -586,8 +599,8 @@ export class PhiStore {
       this.db
         .query(
           `INSERT INTO doc_comment_anchors
-             (thread_id, root_id, path, quote, prefix, suffix, heading_slug)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (thread_id, root_id, path, quote, prefix, suffix, heading_slug, parent_thread_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           threadId,
@@ -597,6 +610,7 @@ export class PhiStore {
           anchor.prefix,
           anchor.suffix,
           anchor.headingSlug,
+          anchor.parentThreadId ?? null,
         );
       const message = this.insertMessage(
         channel.workspaceId,
@@ -622,6 +636,54 @@ export class PhiStore {
     return row ? docCommentAnchorFromRow(row) : null;
   }
 
+  isChatThreadInChannel(threadId: string, channelId: string): boolean {
+    const thread = this.getThread(threadId);
+    return Boolean(
+      thread && thread.channelId === channelId && thread.kind === "chat",
+    );
+  }
+
+  // Fallback parent when the client did not send one: a parent already
+  // stored on this doc, else the latest chat message that links the path.
+  findDocCommentParent(
+    channelId: string,
+    rootId: string,
+    path: string,
+  ): string | null {
+    const fromComments = this.db
+      .query<{ parent_thread_id: string }, [string, string, string]>(
+        `SELECT a.parent_thread_id
+         FROM doc_comment_anchors a
+         JOIN threads t ON t.id = a.thread_id
+         JOIN threads parent ON parent.id = a.parent_thread_id
+         WHERE t.channel_id = ? AND a.root_id = ? AND a.path = ?
+           AND parent.kind = 'chat' AND parent.channel_id = t.channel_id
+         ORDER BY t.created_at DESC
+         LIMIT 1`,
+      )
+      .get(channelId, rootId, path);
+    if (fromComments?.parent_thread_id) return fromComments.parent_thread_id;
+
+    // Chat messages don't record which file-root a chip pointed at, so a
+    // linking-message fallback on an attached root can steal lineage from
+    // a workspace file at the same relative path (or vice versa).
+    if (rootId !== "workspace") return null;
+
+    const candidates = this.db
+      .query<{ thread_id: string; content: string }, [string]>(
+        `SELECT m.thread_id, m.content
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE t.channel_id = ? AND t.kind = 'chat'
+         ORDER BY m.seq DESC`,
+      )
+      .all(channelId);
+    for (const row of candidates) {
+      if (messageContainsFileLink(row.content, path)) return row.thread_id;
+    }
+    return null;
+  }
+
   listDocComments(
     channelId: string,
     rootId: string,
@@ -632,7 +694,7 @@ export class PhiStore {
         ThreadRow & DocCommentAnchorRow & { message_count: number; unread_count: number },
         [string, string, string]
       >(
-        `SELECT t.*, a.thread_id, a.root_id, a.path, a.quote, a.prefix, a.suffix, a.heading_slug,
+        `SELECT t.*, a.thread_id, a.root_id, a.path, a.quote, a.prefix, a.suffix, a.heading_slug, a.parent_thread_id,
            (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count,
            (
              SELECT COUNT(*)
@@ -663,18 +725,12 @@ export class PhiStore {
     }));
   }
 
-  listDocCommentSummary(channelId: string): DocCommentDocSummary[] {
-    return this.db
-      .query<
-        {
-          root_id: string;
-          path: string;
-          comment_count: number;
-          unread_count: number;
-        },
-        [string]
-      >(
-        `SELECT a.root_id, a.path,
+  listDocCommentSummary(
+    channelId: string,
+    parentThreadId?: string,
+  ): DocCommentDocSummary[] {
+    const parent = parentThreadId?.trim() || undefined;
+    const sql = `SELECT a.root_id, a.path,
            COUNT(*) AS comment_count,
            SUM((
              SELECT COUNT(*)
@@ -686,17 +742,25 @@ export class PhiStore {
          FROM doc_comment_anchors a
          JOIN threads t ON t.id = a.thread_id
          LEFT JOIN thread_reads r ON r.thread_id = t.id
-         WHERE t.channel_id = ? AND t.kind = 'doc_comment'
+         WHERE t.channel_id = ? AND t.kind = 'doc_comment' AND t.status = 'open'
+           ${parent ? "AND a.parent_thread_id = ?" : ""}
          GROUP BY a.root_id, a.path
-         ORDER BY MAX(t.updated_at) DESC`,
-      )
-      .all(channelId)
-      .map((row) => ({
-        rootId: row.root_id,
-        path: row.path,
-        commentCount: row.comment_count,
-        unreadCount: row.unread_count ?? 0,
-      }));
+         ORDER BY MAX(t.updated_at) DESC`;
+    type SummaryRow = {
+      root_id: string;
+      path: string;
+      comment_count: number;
+      unread_count: number;
+    };
+    const rows = parent
+      ? this.db.query<SummaryRow, [string, string]>(sql).all(channelId, parent)
+      : this.db.query<SummaryRow, [string]>(sql).all(channelId);
+    return rows.map((row) => ({
+      rootId: row.root_id,
+      path: row.path,
+      commentCount: row.comment_count,
+      unreadCount: row.unread_count ?? 0,
+    }));
   }
 
   private messagesAtSeqForThreads(
@@ -926,6 +990,7 @@ interface DocCommentAnchorRow {
   prefix: string;
   suffix: string;
   heading_slug: string | null;
+  parent_thread_id: string | null;
 }
 
 interface MessageRow {
@@ -999,6 +1064,7 @@ function docCommentAnchorFromRow(row: DocCommentAnchorRow): DocCommentAnchor {
     prefix: row.prefix,
     suffix: row.suffix,
     headingSlug: row.heading_slug,
+    parentThreadId: row.parent_thread_id,
   };
 }
 

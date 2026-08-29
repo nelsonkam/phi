@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { captureTextQuote, locateTextQuote } from "@/shared/doc-comment-anchor";
+import { captureTextQuote, locateTextQuote, snapSelectionToWords } from "@/shared/doc-comment-anchor";
 
 test("formatted-span selections round-trip through concatenated projection text", () => {
   const projection = "The quick brown fox jumps";
@@ -47,4 +47,15 @@ test("a missing quote is detached, then reattaches when restored", () => {
   expect(
     locateTextQuote("before unique phrase after", quote, prefix, suffix),
   ).toEqual({ start: 7, end: 20 });
+});
+
+test("partial-word selections snap out to word boundaries", () => {
+  expect(snapSelectionToWords("worker fleet. Burrow", 14, 17)).toEqual({
+    start: 14,
+    end: 20,
+  });
+  expect(snapSelectionToWords("The unique phrase", 6, 10)).toEqual({
+    start: 4,
+    end: 10,
+  });
 });

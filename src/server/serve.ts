@@ -21,6 +21,7 @@ import {
 import { createFileHandler } from "@/server/files";
 import {
   parseDocCommentBody,
+  resolveDocCommentParent,
   resolveMarkdownDoc,
 } from "@/server/doc-comments";
 import {
@@ -144,6 +145,24 @@ export async function startServer(): Promise<void> {
       },
       "/api/v1/channels": () =>
         Response.json({ channels: store.listChannels(workspace.id) }),
+      "/api/v1/search": {
+        GET: async (req) => {
+          const url = new URL(req.url);
+          const query = url.searchParams.get("q")?.trim() ?? "";
+          if (!query) {
+            return Response.json({ error: "q is required" }, { status: 400 });
+          }
+          const limit = positiveInteger(url.searchParams.get("limit"));
+          // The web client searches the whole workspace, so there is no
+          // current thread to exclude.
+          const result = await messageSearch.search(
+            workspace.id,
+            { query, includeCurrentThread: true, ...(limit ? { limit } : {}) },
+            { currentThreadId: "" },
+          );
+          return Response.json(result);
+        },
+      },
       "/api/v1/activity": {
         GET: (req) => {
           const url = new URL(req.url);
@@ -204,7 +223,9 @@ export async function startServer(): Promise<void> {
           }
           const routing =
             thread.kind === "doc_comment"
-              ? await runtime.routeDocCommentContent(posted.content)
+              ? await runtime.routeDocCommentContent(posted.content, {
+                  threadId: thread.id,
+                })
               : await runtime.routeUserContent(posted.content, thread.id);
           const message = store.appendMessage(req.params.id!, {
             author: "user",
@@ -243,6 +264,7 @@ export async function startServer(): Promise<void> {
           if (thread.kind === "doc_comment") {
             const routing = await runtime.routeDocCommentContent(
               lastUserMessage.content,
+              { threadId: thread.id },
             );
             runtime.handleUserMessage(lastUserMessage, routing.routedTo);
           } else {
@@ -285,14 +307,32 @@ export async function startServer(): Promise<void> {
                 : null,
           });
         },
+        PATCH: async (req) => {
+          const thread = store.getThread(req.params.id!);
+          if (!thread) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          const body = (await req.json().catch(() => null)) as {
+            status?: unknown;
+          } | null;
+          const status = body?.status;
+          if (status !== "open" && status !== "settled" && status !== "archived") {
+            return Response.json({ error: "invalid status" }, { status: 400 });
+          }
+          const updated = store.setThreadStatus(thread.id, status);
+          return Response.json({ thread: updated });
+        },
       },
       "/api/v1/channels/:id/doc-comments/summary": {
         GET: (req) => {
           if (!store.getChannel(req.params.id!)) {
             return Response.json({ error: "not found" }, { status: 404 });
           }
+          const parentThreadId =
+            new URL(req.url).searchParams.get("parentThreadId")?.trim() ||
+            undefined;
           return Response.json({
-            docs: store.listDocCommentSummary(req.params.id!),
+            docs: store.listDocCommentSummary(req.params.id!, parentThreadId),
           });
         },
       },
@@ -353,8 +393,22 @@ export async function startServer(): Promise<void> {
               { status: 400 },
             );
           }
+          const parent = resolveDocCommentParent(
+            store,
+            channelId,
+            parsed.value.rootId,
+            parsed.value.path,
+            parsed.value.parentThreadId,
+          );
+          if (!parent.ok) {
+            return Response.json(
+              { error: parent.error },
+              { status: parent.status },
+            );
+          }
           const routing = await runtime.routeDocCommentContent(
             parsed.value.content,
+            { parentThreadId: parent.parentThreadId },
           );
           const result = store.createDocComment(
             channelId,
@@ -371,6 +425,7 @@ export async function startServer(): Promise<void> {
               prefix: parsed.value.prefix,
               suffix: parsed.value.suffix,
               headingSlug: parsed.value.headingSlug,
+              parentThreadId: parent.parentThreadId,
             },
           );
           runtime.handleUserMessage(result.message, routing.routedTo);

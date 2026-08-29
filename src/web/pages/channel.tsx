@@ -1,23 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { FileText, LoaderCircle, MessageSquareText } from "lucide-react";
+import { LoaderCircle, MessageSquareText } from "lucide-react";
 import type { ThreadSummary } from "@/shared/types";
 import { Composer } from "@/web/components/composer";
-import { shouldOpenChannelThreadPanel, docCommentDeepLink } from "@/web/components/doc-comments";
+import { shouldOpenChannelThreadPanel, docCommentDeepLink, shouldOpenThreadFromClick, mergeBrowseFileFromDocLink } from "@/web/components/doc-comments";
 import { FileViewerDialog } from "@/web/components/file-link";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { MessageItem } from "@/web/components/message";
 import { ThreadPanel } from "@/web/components/thread-panel";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/web/components/ui/popover";
+import { FileViewerOutlet } from "@/web/lib/file-link-context";
 import {
   useAgents,
   useChannels,
   useCreateThread,
-  useDocCommentSummary,
   useThread,
   useThreadTurn,
   useThreads,
@@ -65,8 +60,10 @@ export function ChannelPage() {
 
   const [browseFile, setBrowseFile] = useState<{
     path: string;
-    root: string;
+    root?: string;
     commentId?: string;
+    parentThreadId?: string;
+    fragment?: string;
   } | null>(null);
 
   useEffect(() => {
@@ -74,11 +71,13 @@ export function ChannelPage() {
     const anchor = docThread?.anchor;
     if (!docThreadId || !thread || !anchor) return;
     if (thread.channelId !== channelId) return;
-    setBrowseFile({
-      path: anchor.path,
-      root: anchor.rootId,
-      commentId: docThreadId,
-    });
+    setBrowseFile((prev) =>
+      mergeBrowseFileFromDocLink(prev, {
+        path: anchor.path,
+        root: anchor.rootId,
+        commentId: docThreadId,
+      }),
+    );
   }, [docThread, docThreadId, channelId]);
 
   // The flow reads oldest-first by root message; replies bump a thread's
@@ -108,23 +107,27 @@ export function ChannelPage() {
     <Page
       title={channel ? `# ${channel.name}` : "…"}
       titleExtra={
-        <span className="flex min-w-0 items-center gap-2">
-          {untaggedAgent ? (
-            <Link
-              to={`/agents/${untaggedAgent}`}
-              title="Answers messages that do not start with @name"
-              className="mention shrink-0 text-[11px] leading-5"
-            >
-              @{untaggedAgent}
-            </Link>
-          ) : null}
-          <CommentedDocsButton
-            channelId={channelId}
-            onOpen={(doc) => setBrowseFile(doc)}
-          />
-        </span>
+        untaggedAgent ? (
+          <Link
+            to={`/agents/${untaggedAgent}`}
+            title="Answers messages that do not start with @name"
+            className="mention shrink-0 text-[11px] leading-5"
+          >
+            @{untaggedAgent}
+          </Link>
+        ) : null
       }
     >
+      <FileViewerOutlet
+        onOpen={(doc) =>
+          setBrowseFile({
+            path: doc.path,
+            root: doc.root,
+            parentThreadId: doc.parentThreadId,
+            fragment: doc.fragment,
+          })
+        }
+      >
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1">
@@ -171,14 +174,18 @@ export function ChannelPage() {
         )}
         {browseFile && (
           <FileViewerDialog
+            key={`${browseFile.root ?? ""}:${browseFile.path}`}
             path={browseFile.path}
             url={workspaceFileUrl(browseFile.path, {
               channelId,
               root: browseFile.root,
             })}
+            fragment={browseFile.fragment}
             channelId={channelId}
             root={browseFile.root}
+            parentThreadId={browseFile.parentThreadId}
             focusCommentId={browseFile.commentId}
+            syncRoute
             onClose={() => {
               setBrowseFile(null);
               if (docThreadId) navigate(`/c/${channelId}`);
@@ -186,55 +193,8 @@ export function ChannelPage() {
           />
         )}
       </div>
+      </FileViewerOutlet>
     </Page>
-  );
-}
-
-function CommentedDocsButton({
-  channelId,
-  onOpen,
-}: {
-  channelId: string;
-  onOpen: (doc: { path: string; root: string }) => void;
-}) {
-  const { data } = useDocCommentSummary(channelId);
-  const docs = data?.docs ?? [];
-  const unread = docs.reduce((n, doc) => n + doc.unreadCount, 0);
-  return (
-    <Popover>
-      <PopoverTrigger
-        title="Docs with comments"
-        className="relative flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-      >
-        <FileText className="size-3.5" />
-        {unread > 0 && (
-          <span className="absolute top-1 right-1 size-1.5 rounded-full bg-sky-600" />
-        )}
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 gap-1 p-2">
-        <p className="px-2 py-1 text-xs font-medium">Docs with comments</p>
-        {docs.length === 0 ? (
-          <p className="px-2 py-3 text-xs text-muted-foreground">
-            No comments on files in this channel yet.
-          </p>
-        ) : (
-          docs.map((doc) => (
-            <button
-              key={`${doc.rootId}:${doc.path}`}
-              type="button"
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent"
-              onClick={() => onOpen({ path: doc.path, root: doc.rootId })}
-            >
-              <span className="min-w-0 flex-1 truncate">{doc.path}</span>
-              <span className="text-muted-foreground">{doc.commentCount}</span>
-              {doc.unreadCount > 0 && (
-                <span className="size-1.5 rounded-full bg-sky-600" />
-              )}
-            </button>
-          ))
-        )}
-      </PopoverContent>
-    </Popover>
   );
 }
 
@@ -260,9 +220,7 @@ function ThreadRoot({
   return (
     <div
       onClick={(e) => {
-        // Markdown bodies contain their own interactive elements (links, the
-        // code-header copy button); those clicks must not also open the thread.
-        if ((e.target as HTMLElement).closest("a, button")) return;
+        if (!shouldOpenThreadFromClick(e.currentTarget, e.target)) return;
         onOpen();
       }}
       className={`group cursor-pointer px-5 py-2 transition-colors ${

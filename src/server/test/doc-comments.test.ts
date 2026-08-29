@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { PhiStore } from "@/core/store/store";
 import {
   parseDocCommentBody,
+  resolveDocCommentParent,
   resolveMarkdownDoc,
 } from "@/server/doc-comments";
 import { tempDir } from "@/testing/tmpdir";
@@ -28,6 +29,28 @@ test("rejects missing quote and non-markdown paths", () => {
       suffix: "",
     }).ok,
   ).toBe(true);
+  const withParent = parseDocCommentBody({
+    content: "hi",
+    rootId: "workspace",
+    path: "notes.md",
+    quote: "hello",
+    prefix: "",
+    suffix: "",
+    parentThreadId: "th_parent",
+  });
+  expect(withParent.ok).toBe(true);
+  if (withParent.ok) expect(withParent.value.parentThreadId).toBe("th_parent");
+  expect(
+    parseDocCommentBody({
+      content: "hi",
+      rootId: "workspace",
+      path: "notes.md",
+      quote: "hello",
+      prefix: "",
+      suffix: "",
+      parentThreadId: 1,
+    }).ok,
+  ).toBe(false);
   expect(
     parseDocCommentBody({
       content: "",
@@ -86,5 +109,71 @@ test("resolves markdown through the file-root checker and rejects other types", 
     "../secret.md",
   );
   expect(escaped.ok).toBe(false);
+  store.close();
+});
+
+test("resolves a requested parent and falls back to existing comments or a linking message", () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const parent = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "See [notes](channels/general/notes.md)",
+  });
+  const other = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "unrelated",
+  });
+
+  const requested = resolveDocCommentParent(
+    store,
+    channel.id,
+    "workspace",
+    "channels/general/notes.md",
+    parent.thread.id,
+  );
+  expect(requested).toEqual({ ok: true, parentThreadId: parent.thread.id });
+
+  const bad = resolveDocCommentParent(
+    store,
+    channel.id,
+    "workspace",
+    "channels/general/notes.md",
+    "th_missing",
+  );
+  expect(bad.ok).toBe(false);
+
+  const fromLink = resolveDocCommentParent(
+    store,
+    channel.id,
+    "workspace",
+    "channels/general/notes.md",
+    null,
+  );
+  expect(fromLink).toEqual({ ok: true, parentThreadId: parent.thread.id });
+
+  store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "first" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "hello",
+      prefix: "",
+      suffix: "",
+      headingSlug: null,
+      parentThreadId: other.thread.id,
+    },
+  );
+  const fromExisting = resolveDocCommentParent(
+    store,
+    channel.id,
+    "workspace",
+    "channels/general/notes.md",
+    null,
+  );
+  expect(fromExisting).toEqual({ ok: true, parentThreadId: other.thread.id });
   store.close();
 });

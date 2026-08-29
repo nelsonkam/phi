@@ -109,9 +109,9 @@ Lifecycle:
 3. **Validate** — every `/mcp` request does one registry lookup before any
    tool logic; missing or unknown tokens get 401. The resolved caller is
    passed into tool execution as ambient context: tools never take identity
-   from arguments. `send_message` posts to the caller's own thread by
-   construction — there is nothing the model can put in the arguments to
-   post elsewhere.
+   from arguments. `send_message` posts to the caller's thread by default;
+   a `thread_id` argument is accepted only when it names that thread or,
+   on a doc-comment turn, the recorded parent.
 4. **Revoke** — `dropSession` removes the logical session's token. ACP host
    processes are pooled separately and may continue serving other sessions.
    The durable harness session binding remains, but a later resume receives a
@@ -203,13 +203,13 @@ Following `send_message`, the read slice:
 | ---- | ------------------ | ----- |
 | `list_channels` | `listChannels(workspaceId)` | workspace resolved server-side |
 | `list_threads` | resolve channel name, then `listThreads(channelId)` | agents pass a channel name, never its ID |
-| `read_thread` | `listMessages(threadId)` | defaults to the caller's own thread |
+| `read_thread` | `listMessages(threadId)` | current thread, or the comment's parent |
 | `search_messages` | hybrid FTS5 + local embeddings | workspace/current thread resolved server-side; optional channel name, author, and current-thread opt-in; never channel/thread IDs |
 
-Cross-thread reads are allowed — threads are not secret from each other —
-but the caller's identity always comes from the token, never from
-arguments. Cross-thread *writes* (a `threadId` argument on `send_message`)
-remain out: one thread, one conversation, one voice.
+Cross-thread reads via `read_thread` are limited to the caller's thread and
+a doc comment's recorded parent — enough to pull the sharing conversation
+without a general thread browser. `send_message` may post to that same
+parent (`thread_id`); arbitrary thread ids are rejected.
 
 `search_messages` is the first read tool implemented. It excludes the caller's
 current thread by default; `includeCurrentThread: true` opts it back in without
@@ -417,20 +417,26 @@ tells agents to use workspace-relative paths).
 ### 7.2 Doc comments
 
 Comment threads on shared markdown are ordinary threads with
-`threads.kind = 'doc_comment'` and a `doc_comment_anchors` row. They stay
-out of `list_threads` / channel flow / Activity. There is no agent-facing
-comment tool in v1 — the user creates comments; agents reply through
-`send_message`.
+`threads.kind = 'doc_comment'` and a `doc_comment_anchors` row, including
+an optional `parent_thread_id` pointing at the chat thread the doc was
+opened from. They stay out of `list_threads` / channel flow / Activity.
+There is no agent-facing comment tool — the user creates comments; agents
+reply through `send_message`.
 
-Routing is mention-only: `@name` in the comment wakes that agent. An
-unmentioned comment files silently with nobody woken, and retry on it is a
-no-op (no default-agent fallback). The messaging preamble states this.
+Routing matches chat: a leading `@name` is the addressee; otherwise the
+parent thread's agent, else the workspace default. Mid-body mentions are
+speculative. Retry on an unmentioned comment wakes that fallback agent.
+
+The comment-thread prompt includes the quoted excerpt, surrounding source,
+and (when known) the parent thread id. `read_thread` pulls that parent's
+messages. `send_message` may pass `thread_id` set to the parent to post a
+resolution into the sharing conversation; other thread ids are rejected.
 
 HTTP (device-auth, same as the rest of the app API):
 
 - `GET /api/v1/channels/:id/doc-comments?root=&path=`
 - `POST /api/v1/channels/:id/doc-comments`
-- `GET /api/v1/channels/:id/doc-comments/summary`
+- `GET /api/v1/channels/:id/doc-comments/summary` (`parentThreadId` optional)
 
 `GET /api/v1/threads/:id` includes `anchor` when the thread is a doc
 comment, so clients can canonicalize `/t/:id` and wrong-channel doc URLs

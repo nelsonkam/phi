@@ -45,6 +45,7 @@ export interface DocCommentAnchor {
   prefix: string;
   suffix: string;
   headingSlug: string | null;
+  parentThreadId: string | null;
 }
 
 export interface DocCommentThread {

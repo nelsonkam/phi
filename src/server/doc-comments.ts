@@ -15,6 +15,7 @@ export interface ParsedDocCommentBody {
   prefix: string;
   suffix: string;
   headingSlug: string | null;
+  parentThreadId: string | null;
 }
 
 export type ParseDocCommentResult =
@@ -36,6 +37,15 @@ export function parseDocCommentBody(body: unknown): ParseDocCommentResult {
     typeof rec.headingSlug === "string" && rec.headingSlug.trim()
       ? rec.headingSlug.trim()
       : null;
+  if (rec.parentThreadId !== undefined && rec.parentThreadId !== null) {
+    if (typeof rec.parentThreadId !== "string") {
+      return { ok: false, error: "parentThreadId must be a string", status: 400 };
+    }
+  }
+  const parentThreadId =
+    typeof rec.parentThreadId === "string" && rec.parentThreadId.trim()
+      ? rec.parentThreadId.trim()
+      : null;
   if (!rootId) return { ok: false, error: "rootId is required", status: 400 };
   if (!path) return { ok: false, error: "path is required", status: 400 };
   if (!quote) return { ok: false, error: "quote is required", status: 400 };
@@ -50,7 +60,16 @@ export function parseDocCommentBody(body: unknown): ParseDocCommentResult {
   }
   return {
     ok: true,
-    value: { content, rootId, path, quote, prefix, suffix, headingSlug },
+    value: {
+      content,
+      rootId,
+      path,
+      quote,
+      prefix,
+      suffix,
+      headingSlug,
+      parentThreadId,
+    },
   };
 }
 
@@ -87,4 +106,34 @@ export function readWorkspaceFile(file: string): string | null {
 function isMarkdownPath(path: string): boolean {
   const base = path.split(/[/?#]/).at(-1) ?? path;
   return /\.(md|markdown)$/i.test(base);
+}
+
+export type ResolveParentResult =
+  | { ok: true; parentThreadId: string | null }
+  | { ok: false; error: string; status: number };
+
+// Client-supplied parent wins when it is a chat thread in this channel.
+// Otherwise: a parent already recorded on this doc, else the most recent
+// chat message in the channel that links the path.
+export function resolveDocCommentParent(
+  store: PhiStore,
+  channelId: string,
+  rootId: string,
+  path: string,
+  requested: string | null,
+): ResolveParentResult {
+  if (requested) {
+    if (!store.isChatThreadInChannel(requested, channelId)) {
+      return {
+        ok: false,
+        error: "parentThreadId must be a chat thread in this channel",
+        status: 400,
+      };
+    }
+    return { ok: true, parentThreadId: requested };
+  }
+  return {
+    ok: true,
+    parentThreadId: store.findDocCommentParent(channelId, rootId, path),
+  };
 }

@@ -1,6 +1,7 @@
 import {
   captureTextQuote,
   locateTextQuote,
+  snapSelectionToWords,
   type TextQuote,
 } from "@/shared/doc-comment-anchor";
 
@@ -55,7 +56,9 @@ export function captureSelectionAnchor(
   const start = offsetInProjection(projection, range.startContainer, range.startOffset);
   const end = offsetInProjection(projection, range.endContainer, range.endOffset);
   if (start === null || end === null || end <= start) return null;
-  const quote = captureTextQuote(projection.text, start, end);
+  const snapped = snapSelectionToWords(projection.text, start, end);
+  if (snapped.end <= snapped.start) return null;
+  const quote = captureTextQuote(projection.text, snapped.start, snapped.end);
   if (!quote.quote.trim()) return null;
   return {
     ...quote,

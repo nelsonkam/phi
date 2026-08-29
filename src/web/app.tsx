@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
-import { Activity, Bot } from "lucide-react";
+import { Activity, Bot, Search } from "lucide-react";
+import { SearchDialog } from "@/web/components/search-dialog";
 import { ThemeToggle } from "@/web/components/theme-toggle";
 import { activityWaitingCount } from "@/web/lib/activity";
 import { applyServerFrame, useActivity, useChannels } from "@/web/lib/queries";
@@ -13,12 +14,24 @@ export function App() {
   const channels = data?.channels ?? [];
   const waitingCount = activityWaitingCount(activity?.pages);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
     return connectDeltaSocket({
       onFrame: applyServerFrame,
       onStatus: setStatus,
     });
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        setSearchOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   return (
@@ -38,6 +51,17 @@ export function App() {
           <ThemeToggle />
         </header>
         <nav className="flex-1 overflow-y-auto p-2">
+          <button
+            type="button"
+            onClick={() => setSearchOpen(true)}
+            className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          >
+            <Search className="size-4" />
+            Search
+            <kbd className="ml-auto text-xs text-muted-foreground">
+              {isMac() ? "⌘K" : "Ctrl K"}
+            </kbd>
+          </button>
           <SidebarLink to="/" end>
             <Activity className="size-4" />
             Activity
@@ -72,8 +96,14 @@ export function App() {
       </aside>
 
       <Outlet />
+
+      <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
     </div>
   );
+}
+
+function isMac(): boolean {
+  return /Mac|iP/.test(navigator.platform);
 }
 
 function SidebarLink({

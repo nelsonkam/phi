@@ -19,6 +19,7 @@ export interface DocSourceContext {
   path: string;
   quote: string;
   surrounding: string | null;
+  parentThreadId?: string | null;
 }
 
 // Map a rendered quote onto the markdown source via an mdast text
@@ -44,6 +45,11 @@ export function formatDocCommentContext(ctx: DocSourceContext): string {
   ];
   if (ctx.surrounding) {
     lines.push(`Surrounding source:\n\`\`\`\n${ctx.surrounding}\n\`\`\``);
+  }
+  if (ctx.parentThreadId) {
+    lines.push(
+      `Parent thread: ${ctx.parentThreadId}. Use read_thread with that id to pull the sharing conversation. To surface a resolution in the channel flow, send_message with thread_id set to that parent.`,
+    );
   }
   return lines.join("\n\n");
 }

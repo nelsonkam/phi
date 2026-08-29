@@ -28,3 +28,15 @@ test("the comment-thread context carries the marginalia contract", () => {
   expect(prompt).toContain("Reply as marginalia");
   expect(prompt).toContain("asked for an edit or clearly authorized one");
 });
+
+test("the comment-thread context includes a parent-thread pointer", () => {
+  const prompt = formatDocCommentContext({
+    path: "notes.md",
+    quote: "world",
+    surrounding: null,
+    parentThreadId: "th_parent",
+  });
+  expect(prompt).toContain("Parent thread: th_parent");
+  expect(prompt).toContain("read_thread");
+  expect(prompt).toContain("thread_id");
+});

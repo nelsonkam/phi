@@ -170,6 +170,32 @@ function createThread(
   );
 }
 
+function callTool(
+  handler: (req: Request) => Promise<Response>,
+  token: string,
+  id: number,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Response> {
+  return handler(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    }),
+  );
+}
+
 function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void) {
   const store = new PhiStore(tempDir());
   const workspace = store.defaultWorkspace();
@@ -296,7 +322,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(5);
+  expect(body.result.tools).toHaveLength(6);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.description).toContain(
@@ -306,6 +332,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     "earned by enumerable content",
   );
   expect(body.result.tools[0]!.inputSchema.properties.to).toBeDefined();
+  expect(body.result.tools[0]!.inputSchema.properties.thread_id).toBeDefined();
   const harnesses = body.result.tools[1]!;
   expect(harnesses.name).toBe("list_agent_harnesses");
   expect(harnesses.description).toContain("copied verbatim from ACP");
@@ -317,7 +344,10 @@ test("advertises messaging and workspace search without a thread argument", asyn
   expect(createThreadTool.name).toBe("create_thread");
   expect(createThreadTool.inputSchema.properties.channel).toBeDefined();
   expect(createThreadTool.inputSchema.properties.to).toBeDefined();
-  const search = body.result.tools[4]!;
+  const readThread = body.result.tools[4]!;
+  expect(readThread.name).toBe("read_thread");
+  expect(readThread.inputSchema.properties.thread_id).toBeDefined();
+  const search = body.result.tools[5]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
@@ -727,5 +757,114 @@ test("send_message rejects a leading peer handle without to", async () => {
   expect(body.result.content[0]!.text).toContain('to: ["reviewer"]');
   expect(store.listMessages(thread.id)).toHaveLength(before);
   expect(routed).toEqual([]);
+  store.close();
+});
+
+test("read_thread returns the current thread or a comment's parent", async () => {
+  const { store, thread, token, tokens, handler } = fixture();
+  const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
+  const own = await callTool(handler, token, 50, "read_thread", {
+    thread_id: thread.id,
+  });
+  const ownBody = (await own.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  const ownPayload = JSON.parse(ownBody.result.content[0]!.text) as {
+    threadId: string;
+    messages: Array<{ content: string }>;
+  };
+  expect(ownPayload.threadId).toBe(thread.id);
+  expect(ownPayload.messages[0]!.content).toBe("Start");
+
+  const other = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "secret",
+  });
+  const denied = await callTool(handler, token, 51, "read_thread", {
+    thread_id: other.thread.id,
+  });
+  const deniedBody = (await denied.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(deniedBody.result.isError).toBe(true);
+
+  const comment = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "looks off" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "hello",
+      prefix: "",
+      suffix: "",
+      headingSlug: null,
+      parentThreadId: thread.id,
+    },
+  );
+  const commentToken = tokens.mint({
+    threadId: comment.thread.id,
+    agentName: "default",
+  });
+  const parent = await callTool(handler, commentToken, 52, "read_thread", {
+    thread_id: thread.id,
+  });
+  const parentBody = (await parent.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  const parentPayload = JSON.parse(parentBody.result.content[0]!.text) as {
+    threadId: string;
+  };
+  expect(parentPayload.threadId).toBe(thread.id);
+  store.close();
+});
+
+test("send_message can post to a comment's parent thread only", async () => {
+  const { store, thread, tokens, handler } = fixture();
+  const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
+  const comment = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "looks off" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "hello",
+      prefix: "",
+      suffix: "",
+      headingSlug: null,
+      parentThreadId: thread.id,
+    },
+  );
+  const commentToken = tokens.mint({
+    threadId: comment.thread.id,
+    agentName: "default",
+  });
+  const posted = await callTool(handler, commentToken, 60, "send_message", {
+    content: "Resolved in the margin",
+    thread_id: thread.id,
+  });
+  const postedBody = (await posted.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(postedBody.result.content[0]!.text).toContain("Message sent");
+  expect(store.listMessages(thread.id).at(-1)?.content).toBe(
+    "Resolved in the margin",
+  );
+  expect(store.listMessages(comment.thread.id)).toHaveLength(1);
+
+  const other = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "elsewhere",
+  });
+  const rejected = await callTool(handler, commentToken, 61, "send_message", {
+    content: "nope",
+    thread_id: other.thread.id,
+  });
+  const rejectedBody = (await rejected.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(rejectedBody.result.isError).toBe(true);
+  expect(store.listMessages(other.thread.id)).toHaveLength(1);
   store.close();
 });

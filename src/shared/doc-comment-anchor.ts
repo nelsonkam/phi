@@ -31,6 +31,28 @@ export function captureTextQuote(
   };
 }
 
+export function snapSelectionToWords(
+  text: string,
+  start: number,
+  end: number,
+): { start: number; end: number } {
+  let from = Math.max(0, Math.min(start, end));
+  let to = Math.max(from, Math.max(start, end));
+  while (from > 0 && isWordChar(text[from]) && isWordChar(text[from - 1])) {
+    from--;
+  }
+  while (to < text.length && isWordChar(text[to - 1]) && isWordChar(text[to])) {
+    to++;
+  }
+  while (from < to && /\s/.test(text[from]!)) from++;
+  while (to > from && /\s/.test(text[to - 1]!)) to--;
+  return { start: from, end: to };
+}
+
+function isWordChar(ch: string | undefined): boolean {
+  return Boolean(ch && /[\p{L}\p{N}_]/u.test(ch));
+}
+
 // Exact quote, then prefix/suffix to pick among repeats, then a whitespace-
 // collapsed search. Returns null when the quote is gone (detached).
 export function locateTextQuote(

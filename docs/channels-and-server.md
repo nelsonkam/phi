@@ -97,17 +97,20 @@ The outbox effectively already became this after delivery was dropped;
 
 A doc comment is a real thread (`kind = 'doc_comment'`) plus a
 `doc_comment_anchors` row (text-quote selector: quote, prefix, suffix,
-nearest `heading_slug`). The user creates comments from a text selection in
-the markdown viewer; agents reply only when mentioned. Unmentioned comments
-file as threads but wake nobody — there is no default-agent fallback, and
-retry on an unmentioned comment is a no-op.
+nearest `heading_slug`, optional `parent_thread_id`). The user creates
+comments from a text selection in the markdown viewer. Unmentioned
+comments route to the parent thread's agent, else the workspace default.
+Retry wakes that agent. Agents read the parent with `read_thread` and may
+post back into it via `send_message` `thread_id`.
 
 Endpoints (channel-scoped, same device auth as the rest of the API):
 
 - `GET /api/v1/channels/:id/doc-comments?root=&path=` — comments on one file
-- `POST /api/v1/channels/:id/doc-comments` — create (user-only)
+- `POST /api/v1/channels/:id/doc-comments` — create (user-only; optional
+  `parentThreadId`)
 - `GET /api/v1/channels/:id/doc-comments/summary` — per-doc unread/count
-  for file-chip badges and the "docs with comments" browser
+  for file-chip badges (channel-wide) and the thread-panel "docs with
+  comments" browser (`?parentThreadId=` to scope to that chat thread)
 
 `GET /api/v1/threads/:id` returns `{ thread, anchor }` so `/t/:threadId` and
 wrong-channel `/c/:channelId/doc/:id` can redirect to the canonical
@@ -328,7 +331,7 @@ authorities, which correlates more with multi-workspace than naming.
 - HTTP JSON API for commands and keyset-paginated queries:
   `GET /channels/:id/threads?cursor=`, `GET /threads/:id/messages?before=`,
   `POST /threads/:id/messages`, `GET /channels/:id/doc-comments`,
-  `POST /channels/:id/doc-comments`, `GET /channels/:id/doc-comments/summary`,
+  `POST /channels/:id/doc-comments`, `GET /channels/:id/doc-comments/summary` (`?parentThreadId=` optional),
   `GET /workers`, `POST /jobs/:id/cancel`, persona/worker endpoints.
 - WebSocket deltas fed by a change hook in `PhiStore` (post-commit emit) to
   a broadcast hub: `message.appended`, `thread.updated`,

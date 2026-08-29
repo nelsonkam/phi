@@ -264,12 +264,16 @@ test("send-path routing rejects a leading handle without `to`", async () => {
   ).toEqual({ mentions: ["reviewer"], routedTo: [] });
 });
 
-test("doc comments route only known mentions and skip the default fallback", async () => {
+test("doc comments use the same fallback chain as chat", async () => {
   const root = await workspaceWithAgents();
 
   expect(await routeDocCommentContent(root, "looks off")).toEqual({
     mentions: [],
-    routedTo: [],
+    routedTo: ["default"],
+  });
+  expect(await routeDocCommentContent(root, "looks off", "reviewer")).toEqual({
+    mentions: [],
+    routedTo: ["reviewer"],
   });
   expect(await routeDocCommentContent(root, "@default check this")).toEqual({
     mentions: ["default"],
@@ -284,7 +288,13 @@ test("doc comments route only known mentions and skip the default fallback", asy
   });
   expect(await routeDocCommentContent(root, "ask @reviewer about this")).toEqual({
     mentions: ["reviewer"],
-    routedTo: ["reviewer"],
+    routedTo: ["default", "reviewer"],
     speculative: ["reviewer"],
+  });
+  expect(
+    await routeDocCommentContent(root, "ask @reviewer about this", "reviewer"),
+  ).toEqual({
+    mentions: ["reviewer"],
+    routedTo: ["reviewer"],
   });
 });

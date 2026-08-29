@@ -47,10 +47,12 @@ function DialogOverlay({
   )
 }
 
-function isMentionListboxEvent(target: EventTarget | null): boolean {
+function isPortaledPopoverEvent(target: EventTarget | null): boolean {
   return (
     target instanceof Element &&
-    Boolean(target.closest("[data-phi-mention-listbox]"))
+    Boolean(
+      target.closest("[data-phi-mention-listbox], [data-phi-comment-popover]"),
+    )
   );
 }
 
@@ -80,7 +82,7 @@ function DialogContent({
           onInteractOutside?.(event)
           if (
             !event.defaultPrevented &&
-            isMentionListboxEvent(event.target)
+            isPortaledPopoverEvent(event.target)
           ) {
             event.preventDefault()
           }
@@ -89,7 +91,7 @@ function DialogContent({
           onPointerDownOutside?.(event)
           if (
             !event.defaultPrevented &&
-            isMentionListboxEvent(event.target)
+            isPortaledPopoverEvent(event.target)
           ) {
             event.preventDefault()
           }

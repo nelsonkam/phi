@@ -4,6 +4,11 @@ import {
   shouldOpenActivityThreadPanel,
   docCommentDeepLink,
   docCommentScrollLatch,
+  docCommentSyncPath,
+  commentReplyPlaceholder,
+  shouldOpenThreadFromClick,
+  shouldSelectExistingComment,
+  mergeBrowseFileFromDocLink,
 } from "@/web/components/doc-comments";
 
 test("a doc-comment thread id does not open channel chrome", () => {
@@ -77,4 +82,112 @@ test("deselecting a comment clears the scroll latch so the same thread can scrol
     scroll: true,
     latch: "th_1",
   });
+});
+
+test("comment composers name the fallback agent", () => {
+  expect(commentReplyPlaceholder("grok", "reply")).toBe(
+    "Reply — @grok will answer",
+  );
+  expect(commentReplyPlaceholder("grok", "new")).toBe(
+    "Add a comment — @grok will answer",
+  );
+  expect(commentReplyPlaceholder(null, "reply")).toBe("Reply");
+});
+
+test("thread row clicks ignore portal targets outside the row", () => {
+  expect(shouldOpenThreadFromClick(null, null)).toBe(false);
+});
+
+test("a drag-select over an existing highlight does not steal the comment popover", () => {
+  const inside = {} as Node;
+  const outside = {} as Node;
+  const root = { contains: (node: Node | null) => node === inside };
+  expect(shouldSelectExistingComment(null, root as unknown as Node)).toBe(true);
+  expect(
+    shouldSelectExistingComment(
+      { isCollapsed: true, anchorNode: inside },
+      root as unknown as Node,
+    ),
+  ).toBe(true);
+  expect(
+    shouldSelectExistingComment(
+      { isCollapsed: false, anchorNode: inside },
+      root as unknown as Node,
+    ),
+  ).toBe(false);
+  expect(
+    shouldSelectExistingComment(
+      { isCollapsed: false, anchorNode: outside },
+      root as unknown as Node,
+    ),
+  ).toBe(true);
+});
+
+test("deep-link rehydration keeps chip parent lineage on the same doc", () => {
+  const fromChip = {
+    path: "channels/design/proposal.md",
+    root: "workspace",
+    parentThreadId: "th_chat",
+    fragment: "intro",
+  };
+  expect(
+    mergeBrowseFileFromDocLink(fromChip, {
+      path: "channels/design/proposal.md",
+      root: "workspace",
+      commentId: "th_doc",
+    }),
+  ).toEqual({
+    path: "channels/design/proposal.md",
+    root: "workspace",
+    commentId: "th_doc",
+    parentThreadId: "th_chat",
+    fragment: "intro",
+  });
+  expect(
+    mergeBrowseFileFromDocLink(fromChip, {
+      path: "channels/other.md",
+      root: "workspace",
+      commentId: "th_other",
+    }),
+  ).toEqual({
+    path: "channels/other.md",
+    root: "workspace",
+    commentId: "th_other",
+    parentThreadId: undefined,
+    fragment: undefined,
+  });
+  const unresolvedChip = {
+    path: "src/notes.md",
+    parentThreadId: "th_chat",
+  };
+  expect(
+    mergeBrowseFileFromDocLink(unresolvedChip, {
+      path: "src/notes.md",
+      root: "phi",
+      commentId: "th_doc",
+    }),
+  ).toEqual({
+    path: "src/notes.md",
+    root: "phi",
+    commentId: "th_doc",
+    parentThreadId: "th_chat",
+    fragment: undefined,
+  });
+});
+
+test("syncRoute writes the comment URL and pops it when selection clears", () => {
+  expect(docCommentSyncPath("ch_phi", "th_1", "/c/ch_phi")).toBe(
+    "/c/ch_phi/doc/th_1",
+  );
+  expect(docCommentSyncPath("ch_phi", "th_1", "/c/ch_phi/doc/th_1")).toBe(
+    "/c/ch_phi/doc/th_1",
+  );
+  expect(docCommentSyncPath("ch_phi", null, "/c/ch_phi/doc/th_1")).toBe(
+    "/c/ch_phi",
+  );
+  expect(docCommentSyncPath("ch_phi", "new", "/c/ch_phi/doc/th_1")).toBe(
+    "/c/ch_phi",
+  );
+  expect(docCommentSyncPath("ch_phi", null, "/c/ch_phi")).toBeNull();
+  expect(docCommentSyncPath("ch_phi", null, "/c/ch_phi/t/th_chat")).toBeNull();
 });

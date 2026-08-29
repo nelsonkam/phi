@@ -138,7 +138,7 @@ export function MessageItem({
           </span>
           <HandoffChips message={message} />
         </p>
-        <FileLinkScope channelId={message.channelId}>
+        <FileLinkScope channelId={message.channelId} threadId={message.threadId}>
           {renderAsMarkdown ? (
             <div className="text-sm break-words">
               <TextMessagePartProvider text={message.content}>

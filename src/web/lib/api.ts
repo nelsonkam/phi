@@ -13,6 +13,7 @@ import type {
   Thread,
   ThreadSummary,
 } from "@/shared/types";
+import type { MessageSearchResponse } from "@/core/search/types";
 
 // The only file (with ws.ts) that knows the transport. Everything else
 // consumes typed results, so a future mobile client mirrors just these two.
@@ -42,6 +43,15 @@ export function fetchActivity(
   return get(`/activity?${params}`);
 }
 
+export function searchMessages(
+  query: string,
+  limit?: number,
+): Promise<MessageSearchResponse> {
+  const params = new URLSearchParams({ q: query });
+  if (limit !== undefined) params.set("limit", String(limit));
+  return get(`/search?${params}`);
+}
+
 export function fetchMessages(
   threadId: string,
 ): Promise<{ messages: Message[] }> {
@@ -66,8 +76,12 @@ export function fetchDocComments(
 
 export function fetchDocCommentSummary(
   channelId: string,
+  parentThreadId?: string,
 ): Promise<{ docs: DocCommentDocSummary[] }> {
-  return get(`/channels/${channelId}/doc-comments/summary`);
+  const params = parentThreadId
+    ? `?parentThreadId=${encodeURIComponent(parentThreadId)}`
+    : "";
+  return get(`/channels/${channelId}/doc-comments/summary${params}`);
 }
 
 export function createDocComment(
@@ -81,6 +95,7 @@ export function createDocComment(
     prefix: string;
     suffix: string;
     headingSlug?: string | null;
+    parentThreadId?: string | null;
   },
 ): Promise<{ thread: Thread; message: Message }> {
   return post(`/channels/${channelId}/doc-comments`, input);
@@ -108,6 +123,19 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`/api/v1${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `PATCH ${path} failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export function createThread(
   channelId: string,
   input: { content: string; attachmentIds?: string[] },
@@ -126,6 +154,13 @@ export function sendMessage(
     content: input.content,
     attachmentIds: input.attachmentIds,
   });
+}
+
+export function updateThreadStatus(
+  threadId: string,
+  status: Thread["status"],
+): Promise<{ thread: Thread }> {
+  return patch(`/threads/${threadId}`, { status });
 }
 
 export async function uploadAttachment(file: File): Promise<Attachment> {

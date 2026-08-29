@@ -1,4 +1,9 @@
-import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+} from "@tanstack/react-query";
 import { queryClient } from "./query-client";
 import {
   createDefaultAgent,
@@ -21,8 +26,10 @@ import {
   markThreadRead,
   retryTurn,
   cancelTurn,
+  searchMessages,
   sendMessage,
   updateAgent,
+  updateThreadStatus,
 } from "./api";
 import type { UpdateAgentInput } from "./api";
 import { ACTIVITY_PAGE_SIZE, activityNextCursor } from "./activity";
@@ -31,6 +38,7 @@ import type {
   Message,
   ServerFrame,
   Attachment,
+  Thread,
 } from "@/shared/types";
 
 interface TurnPresenceState {
@@ -55,8 +63,11 @@ export const queryKeys = {
   thread: (threadId: string) => ["threads", threadId] as const,
   docComments: (channelId: string, rootId: string, path: string) =>
     ["channels", channelId, "doc-comments", rootId, path] as const,
-  docCommentSummary: (channelId: string) =>
-    ["channels", channelId, "doc-comments", "summary"] as const,
+  messageSearch: (query: string) => ["search", query] as const,
+  docCommentSummary: (channelId: string, parentThreadId?: string) =>
+    parentThreadId
+      ? (["channels", channelId, "doc-comments", "summary", parentThreadId] as const)
+      : (["channels", channelId, "doc-comments", "summary"] as const),
 };
 
 // The Activity feed: one row per thread, newest latest-message first,
@@ -108,6 +119,18 @@ export function useMarkAllRead() {
 
 export function useChannels() {
   return useQuery({ queryKey: queryKeys.channels, queryFn: fetchChannels });
+}
+
+// Search-as-you-type: previous results stay visible while the next query is
+// in flight so the palette never flashes empty between keystrokes.
+export function useMessageSearch(query: string) {
+  return useQuery({
+    queryKey: queryKeys.messageSearch(query),
+    queryFn: () => searchMessages(query),
+    enabled: query.length > 0,
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+  });
 }
 
 export function useAgents() {
@@ -173,10 +196,11 @@ export function useThreads(channelId: string) {
   });
 }
 
-export function useMessages(threadId: string) {
+export function useMessages(threadId: string | undefined) {
   return useQuery({
-    queryKey: queryKeys.threadMessages(threadId),
-    queryFn: () => fetchMessages(threadId),
+    queryKey: queryKeys.threadMessages(threadId ?? ""),
+    queryFn: () => fetchMessages(threadId!),
+    enabled: Boolean(threadId),
   });
 }
 
@@ -201,10 +225,13 @@ export function useDocComments(
   });
 }
 
-export function useDocCommentSummary(channelId: string | undefined) {
+export function useDocCommentSummary(
+  channelId: string | undefined,
+  parentThreadId?: string,
+) {
   return useQuery({
-    queryKey: queryKeys.docCommentSummary(channelId ?? ""),
-    queryFn: () => fetchDocCommentSummary(channelId!),
+    queryKey: queryKeys.docCommentSummary(channelId ?? "", parentThreadId),
+    queryFn: () => fetchDocCommentSummary(channelId!, parentThreadId),
     enabled: Boolean(channelId),
   });
 }
@@ -214,6 +241,16 @@ export function useCreateDocComment(channelId: string) {
     mutationFn: (
       input: Parameters<typeof createDocComment>[1],
     ) => createDocComment(channelId, input),
+    onSuccess: () => {
+      invalidateDocComments(channelId);
+    },
+  });
+}
+
+export function useUpdateThreadStatus(channelId: string) {
+  return useMutation({
+    mutationFn: (input: { threadId: string; status: Thread["status"] }) =>
+      updateThreadStatus(input.threadId, input.status),
     onSuccess: () => {
       invalidateDocComments(channelId);
     },

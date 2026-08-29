@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { LoaderCircle, RotateCcw, Square, X } from "lucide-react";
+import { FileText, LoaderCircle, RotateCcw, Square, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
+import { FileViewerDialog } from "@/web/components/file-link";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
 import { AgentWorkingMessage, MessageItem } from "@/web/components/message";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/web/components/ui/popover";
+import {
   useAgents,
+  useDocCommentSummary,
   useMarkThreadRead,
   useMessages,
   useCancelTurn,
@@ -14,6 +21,8 @@ import {
   useThreadTurn,
 } from "@/web/lib/queries";
 import { latestCommittedMessageId } from "@/web/lib/activity";
+import { useFileViewerOutlet } from "@/web/lib/file-link-context";
+import { workspaceFileUrl } from "@/web/lib/file-links";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
 import { cn } from "@/web/lib/utils";
@@ -117,13 +126,16 @@ export function ThreadPanel({
             @{untaggedAgent}
           </Link>
         )}
-        <Link
-          to={closeTo ?? `/c/${channelId}`}
-          aria-label="Close thread"
-          className="ml-auto flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        >
-          <X className="size-4" />
-        </Link>
+        <div className="ml-auto flex shrink-0 items-center">
+          <CommentedDocsButton channelId={channelId} threadId={threadId} />
+          <Link
+            to={closeTo ?? `/c/${channelId}`}
+            aria-label="Close thread"
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <X className="size-4" />
+          </Link>
+        </div>
       </header>
 
       <div className="relative min-h-0 flex-1">
@@ -205,10 +217,99 @@ export function ThreadPanel({
       <Composer
         placeholder="Reply…"
         draftKey={`thread:${threadId}`}
-        onSend={(input) => send.mutate(input)}
+        onSend={(input) => void send.mutateAsync(input)}
+        onSteer={async (input) => {
+          await cancel.mutateAsync();
+          await send.mutateAsync(input);
+        }}
+        followUpMode={isAgentWorking}
         className="px-4 pb-4"
       />
     </aside>
+  );
+}
+
+function CommentedDocsButton({
+  channelId,
+  threadId,
+}: {
+  channelId: string;
+  threadId: string;
+}) {
+  const { data } = useDocCommentSummary(channelId, threadId);
+  const docs = data?.docs ?? [];
+  const unread = docs.reduce((n, doc) => n + doc.unreadCount, 0);
+  const outlet = useFileViewerOutlet();
+  const [open, setOpen] = useState(false);
+  const [browseFile, setBrowseFile] = useState<{
+    path: string;
+    root: string;
+  } | null>(null);
+
+  function openDoc(doc: { path: string; rootId: string }) {
+    setOpen(false);
+    const next = {
+      path: doc.path,
+      root: doc.rootId,
+      parentThreadId: threadId,
+    };
+    if (outlet) {
+      outlet(next);
+      return;
+    }
+    setBrowseFile({ path: doc.path, root: doc.rootId });
+  }
+
+  return (
+    <>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger
+          title="Docs with comments"
+          className="relative flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <FileText className="size-3.5" />
+          {unread > 0 && (
+            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-sky-600" />
+          )}
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-80 gap-1 p-2">
+          <p className="px-2 py-1 text-xs font-medium">Docs with comments</p>
+          {docs.length === 0 ? (
+            <p className="px-2 py-3 text-xs text-muted-foreground">
+              No comments on files in this thread yet.
+            </p>
+          ) : (
+            docs.map((doc) => (
+              <button
+                key={`${doc.rootId}:${doc.path}`}
+                type="button"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => openDoc(doc)}
+              >
+                <span className="min-w-0 flex-1 truncate">{doc.path}</span>
+                <span className="text-muted-foreground">{doc.commentCount}</span>
+                {doc.unreadCount > 0 && (
+                  <span className="size-1.5 rounded-full bg-sky-600" />
+                )}
+              </button>
+            ))
+          )}
+        </PopoverContent>
+      </Popover>
+      {browseFile && (
+        <FileViewerDialog
+          path={browseFile.path}
+          url={workspaceFileUrl(browseFile.path, {
+            channelId,
+            root: browseFile.root,
+          })}
+          channelId={channelId}
+          root={browseFile.root}
+          parentThreadId={threadId}
+          onClose={() => setBrowseFile(null)}
+        />
+      )}
+    </>
   );
 }
 

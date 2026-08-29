@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { FileLink } from "@/web/components/file-link";
-import { TEXT_PATH_PATTERN } from "@/web/lib/file-links";
+import { TEXT_PATH_PATTERN, parseWorkspaceHref } from "@/web/lib/file-links";
 import { useAgents } from "@/web/lib/queries";
 
 // Matches the agent-name grammar used by routing (see core/agents/routing.ts).
@@ -58,20 +58,56 @@ function splitMentions(
 }
 
 function linkifyPaths(text: string): React.ReactNode[] {
-  if (!text.includes("/")) return [text];
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
+  if (!text.includes("/") && !text.includes("](")) return [text];
+  type Hit = {
+    index: number;
+    end: number;
+    path: string;
+    fragment?: string;
+    label?: string;
+  };
+  const hits: Hit[] = [];
+  for (const match of text.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)) {
+    const parsed = parseWorkspaceHref(match[2]!);
+    if (!parsed) continue;
+    hits.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      path: parsed.path,
+      fragment: parsed.fragment,
+      label: match[1],
+    });
+  }
   for (const match of text.matchAll(TEXT_PATH_PATTERN)) {
     const index = match.index;
-    // Skip matches embedded in a longer token (URLs, absolute paths).
+    // Skip matches embedded in a longer token (URLs, absolute paths) or
+    // already consumed as a labeled markdown link.
     if (index > 0 && /[\w/@.:%+=-]/.test(text[index - 1]!)) continue;
-    if (index > cursor) nodes.push(text.slice(cursor, index));
-    nodes.push(
-      <FileLink key={`f${index}`} path={match[0].replace(/^\.\//, "")} />,
-    );
-    cursor = index + match[0].length;
+    const end = index + match[0].length;
+    if (hits.some((hit) => index >= hit.index && index < hit.end)) continue;
+    hits.push({
+      index,
+      end,
+      path: match[0].replace(/^\.\//, ""),
+    });
   }
-  if (nodes.length === 0) return [text];
+  hits.sort((a, b) => a.index - b.index);
+  if (hits.length === 0) return [text];
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const hit of hits) {
+    if (hit.index < cursor) continue;
+    if (hit.index > cursor) nodes.push(text.slice(cursor, hit.index));
+    nodes.push(
+      <FileLink
+        key={`f${hit.index}`}
+        path={hit.path}
+        fragment={hit.fragment}
+        label={hit.label}
+      />,
+    );
+    cursor = hit.end;
+  }
   if (cursor < text.length) nodes.push(text.slice(cursor));
   return nodes;
 }

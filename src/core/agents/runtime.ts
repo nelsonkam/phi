@@ -54,7 +54,7 @@ Match the size and shape of a reply to the ask: a short or conversational messag
 
 In answers and result messages, lead with the answer or outcome; in an initial acknowledgement, name the first concrete step. Don't restate the question, don't open a result with a status word ("Done —", "Fixed —") before saying what you did, and don't close with filler ("Let me know if you need anything else"). Write like a teammate: plain words, contractions, no help-desk openers ("Certainly!", "I'd be happy to"). Progress updates carry information or don't get sent: say what actually changed or what you found, never a repeated "still working on it". When something fails, give what's wrong and the single most likely next step in a sentence or two — not an unprompted numbered troubleshooting guide. Keep the plumbing out of your voice: tool names, message and thread ids, turn mechanics, and system reminders don't appear in user-facing text unless the user asks about the internals or they're necessary to explain a blocker.
 
-Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths. A client-uploaded file is an attachment:att_… reference, not a workspace path — never treat a client filesystem path as a server path. Comment-thread turns are discussions on a quoted excerpt of a markdown document; when the prompt includes that excerpt, reply with send_message as usual.`;
+Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths. A client-uploaded file is an attachment:att_… reference, not a workspace path — never treat a client filesystem path as a server path. Comment-thread turns are discussions on a quoted excerpt of a markdown document; when the prompt includes that excerpt, the comment-thread context in that prompt applies.`;
 }
 
 // Framing for a turn triggered by a non-leading mention in a user message:
@@ -197,8 +197,30 @@ export class AgentRuntime {
     );
   }
 
-  async routeDocCommentContent(content: string): Promise<MessageRouting> {
-    return routeDocCommentContent(this.workspaceRoot, content);
+  async routeDocCommentContent(
+    content: string,
+    context?: { threadId?: string; parentThreadId?: string | null },
+  ): Promise<MessageRouting> {
+    return routeDocCommentContent(
+      this.workspaceRoot,
+      content,
+      this.docCommentFallbackAgent(context),
+    );
+  }
+
+  // Unmentioned comments follow the parent chat thread's fallback agent,
+  // then the workspace default.
+  private docCommentFallbackAgent(context?: {
+    threadId?: string;
+    parentThreadId?: string | null;
+  }): string {
+    const parentId =
+      context?.parentThreadId ??
+      (context?.threadId
+        ? this.store.getDocCommentAnchor(context.threadId)?.parentThreadId
+        : null);
+    if (parentId) return this.threadFallbackAgent(parentId);
+    return DEFAULT_AGENT_NAME;
   }
 
   // The agent an unmentioned reply falls back to: the last agent that
@@ -455,7 +477,9 @@ export class AgentRuntime {
     }
     if (message.author === "user") {
       if (this.store.getThread(message.threadId)?.kind === "doc_comment") {
-        return routeDocCommentContent(this.workspaceRoot, message.content);
+        return this.routeDocCommentContent(message.content, {
+          threadId: message.threadId,
+        });
       }
       return this.routeUserContentFn(
         this.workspaceRoot,
@@ -1116,6 +1140,7 @@ export class AgentRuntime {
     if (thread?.kind !== "doc_comment") return undefined;
     const anchor = this.store.getDocCommentAnchor(threadId);
     if (!anchor) return undefined;
+    const parent = { parentThreadId: anchor.parentThreadId };
     const resolved = resolveMarkdownDoc(
       this.store,
       this.workspaceRoot,
@@ -1128,6 +1153,7 @@ export class AgentRuntime {
         path: anchor.path,
         quote: anchor.quote,
         surrounding: null,
+        ...parent,
       });
     }
     const source = readWorkspaceFile(resolved.file);
@@ -1136,17 +1162,19 @@ export class AgentRuntime {
         path: anchor.path,
         quote: anchor.quote,
         surrounding: null,
+        ...parent,
       });
     }
-    return formatDocCommentContext(
-      docSourceContext(
+    return formatDocCommentContext({
+      ...docSourceContext(
         source,
         anchor.path,
         anchor.quote,
         anchor.prefix,
         anchor.suffix,
       ),
-    );
+      ...parent,
+    });
   }
 
   // Messages that landed after the turn's trigger (or the agent's seen

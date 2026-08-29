@@ -105,30 +105,14 @@ export async function routeUserContent(
   };
 }
 
-// Doc comments never fall back to the workspace default. Only known mentions
-// wake an agent; a leading mention is the required addressee and any other
-// mentioned agents are speculative, same as chat.
+// Same fallback chain as chat: parent thread's agent (passed in), else the
+// workspace default. Mentions still outrank the fallback.
 export async function routeDocCommentContent(
   workspaceRoot: string,
   content: string,
+  fallbackAgent: string = DEFAULT_AGENT_NAME,
 ): Promise<MessageRouting> {
-  const { agents } = await loadAgents(workspaceRoot);
-  const known = new Set(agents.map((agent) => agent.name));
-  const mentions = knownBodyMentions(content, known);
-  const leading = leadingMention(content);
-  const primary = leading && known.has(leading) ? leading : null;
-  if (primary) {
-    const speculative = mentions.filter((handle) => handle !== primary);
-    return {
-      mentions,
-      routedTo: [primary, ...speculative],
-      ...(speculative.length > 0 ? { speculative } : {}),
-    };
-  }
-  if (mentions.length > 0) {
-    return { mentions, routedTo: mentions, speculative: mentions };
-  }
-  return { mentions, routedTo: [] };
+  return routeUserContent(workspaceRoot, content, fallbackAgent);
 }
 
 // Agent messages route only from the structured `to` list; content never

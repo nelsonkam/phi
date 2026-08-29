@@ -420,6 +420,7 @@ test("doc-comment threads stay out of chat gates and survive mark-all-read", () 
     },
   );
   expect(store.getDocCommentAnchor(comment.thread.id)?.quote).toBe("unique quote");
+  expect(store.getDocCommentAnchor(comment.thread.id)?.parentThreadId).toBeNull();
   expect(
     store.listDocComments(channel.id, "workspace", "channels/general/notes.md")[0]!
       .unreadCount,
@@ -461,6 +462,200 @@ test("doc-comment threads stay out of chat gates and survive mark-all-read", () 
     store.listDocComments(channel.id, "workspace", "channels/general/notes.md")[0]!
       .unreadCount,
   ).toBe(1);
+  store.close();
+});
+
+test("doc-comment anchors record a parent thread and fall back to a linking message", () => {
+  const { store, channel } = chatFixture();
+  const parent = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Discuss [notes](channels/general/notes.md)",
+  });
+  const comment = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "Looks off" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "unique quote",
+      prefix: "before ",
+      suffix: " after",
+      headingSlug: "intro",
+      parentThreadId: parent.thread.id,
+    },
+  );
+  expect(store.getDocCommentAnchor(comment.thread.id)?.parentThreadId).toBe(
+    parent.thread.id,
+  );
+  expect(
+    store.findDocCommentParent(
+      channel.id,
+      "workspace",
+      "channels/general/notes.md",
+    ),
+  ).toBe(parent.thread.id);
+  store.setThreadStatus(comment.thread.id, "settled");
+  expect(store.listDocCommentSummary(channel.id)).toEqual([]);
+  store.close();
+});
+
+test("doc-comment summary can filter to a parent thread", () => {
+  const { store, channel } = chatFixture();
+  const parentA = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Discuss [notes](channels/general/notes.md)",
+  });
+  const parentB = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Also [spec](channels/general/spec.md)",
+  });
+  store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "Notes comment" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "notes quote",
+      prefix: "before ",
+      suffix: " after",
+      headingSlug: "intro",
+      parentThreadId: parentA.thread.id,
+    },
+  );
+  store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "Spec comment" },
+    {
+      rootId: "workspace",
+      path: "channels/general/spec.md",
+      quote: "spec quote",
+      prefix: "before ",
+      suffix: " after",
+      headingSlug: "intro",
+      parentThreadId: parentB.thread.id,
+    },
+  );
+  store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "Notes from B" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "second notes quote",
+      prefix: "before ",
+      suffix: " after",
+      headingSlug: "intro",
+      parentThreadId: parentB.thread.id,
+    },
+  );
+
+  expect(store.listDocCommentSummary(channel.id)).toEqual([
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      commentCount: 2,
+      unreadCount: 0,
+    },
+    {
+      rootId: "workspace",
+      path: "channels/general/spec.md",
+      commentCount: 1,
+      unreadCount: 0,
+    },
+  ]);
+  expect(store.listDocCommentSummary(channel.id, parentA.thread.id)).toEqual([
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      commentCount: 1,
+      unreadCount: 0,
+    },
+  ]);
+  expect(store.listDocCommentSummary(channel.id, parentB.thread.id)).toEqual([
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      commentCount: 1,
+      unreadCount: 0,
+    },
+    {
+      rootId: "workspace",
+      path: "channels/general/spec.md",
+      commentCount: 1,
+      unreadCount: 0,
+    },
+  ]);
+  store.close();
+});
+
+test("doc-comment parent fallback requires a file link and the workspace root", () => {
+  const { store, channel } = chatFixture();
+  store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "I copied channels/general/notes.md.bak into the other folder",
+  });
+  store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "plain prose about notes.md",
+  });
+  expect(
+    store.findDocCommentParent(
+      channel.id,
+      "workspace",
+      "channels/general/notes.md",
+    ),
+  ).toBeNull();
+
+  const linked = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "See [notes](channels/general/notes.md)",
+  });
+  expect(
+    store.findDocCommentParent(
+      channel.id,
+      "workspace",
+      "channels/general/notes.md",
+    ),
+  ).toBe(linked.thread.id);
+  expect(
+    store.findDocCommentParent(
+      channel.id,
+      "attached-root",
+      "channels/general/notes.md",
+    ),
+  ).toBeNull();
+  store.close();
+});
+
+test("doc-comment parent fallback matches percent-encoded file hrefs", () => {
+  const { store, channel } = chatFixture();
+  const spaces = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "See [report](channels/general/My%20Report.md)",
+  });
+  expect(
+    store.findDocCommentParent(
+      channel.id,
+      "workspace",
+      "channels/general/My Report.md",
+    ),
+  ).toBe(spaces.thread.id);
+
+  const cafe = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "See [notes](channels/caf%c3%a9.md)",
+  });
+  expect(
+    store.findDocCommentParent(channel.id, "workspace", "channels/café.md"),
+  ).toBe(cafe.thread.id);
   store.close();
 });
 

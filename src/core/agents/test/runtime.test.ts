@@ -170,8 +170,19 @@ test("a doc-comment turn includes the anchored excerpt in the prompt", async () 
   await done();
 });
 
-test("an unmentioned doc-comment does not start a turn", async () => {
+test("an unmentioned doc-comment falls back to the parent thread's agent", async () => {
   const { store, runtime, channel, done } = await fixture();
+  await writeAgent(store.defaultWorkspace().rootPath, "reviewer", {
+    harness: "codex",
+    model: "smart",
+    instructions: "Review the request.",
+  });
+  const parent = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "@reviewer please look",
+    metadata: { mentions: ["reviewer"], routedTo: ["reviewer"] },
+  });
   const { thread, message } = store.createDocComment(
     channel.id,
     { author: "user", kind: "message", content: "looks off" },
@@ -182,14 +193,16 @@ test("an unmentioned doc-comment does not start a turn", async () => {
       prefix: "The ",
       suffix: " lives",
       headingSlug: "intro",
+      parentThreadId: parent.thread.id,
     },
   );
-  const routing = await runtime.routeDocCommentContent(message.content);
-  expect(routing).toEqual({ mentions: [], routedTo: [] });
+  const routing = await runtime.routeDocCommentContent(message.content, {
+    threadId: thread.id,
+  });
+  expect(routing).toEqual({ mentions: [], routedTo: ["reviewer"] });
   runtime.handleUserMessage(message, routing.routedTo);
   await runtime.settled(thread.id);
-  expect(store.listMessages(thread.id)).toHaveLength(1);
-  expect(store.getThread(thread.id)!.turnActive).toBe(false);
+  expect(store.listMessages(thread.id).at(-1)?.metadata.agent).toBe("reviewer");
   await done();
 });
 

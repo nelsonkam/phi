@@ -19,6 +19,17 @@ export function followContentHeight(
   return pinned ? "stick" : "hasNew";
 }
 
+// Queue growth shrinks the message viewport without changing content
+// height. Keep the last messages in view while the reader is pinned.
+export function followContainerShrink(
+  prevClientHeight: number,
+  nextClientHeight: number,
+  pinned: boolean,
+): "stick" | "ignore" {
+  if (nextClientHeight >= prevClientHeight) return "ignore";
+  return pinned ? "stick" : "ignore";
+}
+
 // Chat-style scroll anchoring: follow new content only while the reader is at
 // the bottom. `itemCount` growing scrolls smoothly when pinned and raises
 // `hasNew` when not; `resetKey` changing (switching thread/channel) jumps to
@@ -68,9 +79,9 @@ export function useStickToBottom(itemCount: number, resetKey: string) {
     }
   }, [itemCount, scrollToBottom]);
 
-  // The working row (and any other in-place growth) changes height without
-  // changing `itemCount`. Snap rather than smooth-scroll so a 200ms CSS
-  // expand is tracked each frame instead of landing on a stale height.
+  // The working row grows without changing `itemCount`; the follow-up queue
+  // shrinks this viewport the same way. Snap rather than smooth-scroll so a
+  // 200ms CSS expand (or queue insert) is tracked each frame.
   useEffect(() => {
     const content = contentRef.current;
     const container = containerRef.current;
@@ -78,17 +89,30 @@ export function useStickToBottom(itemCount: number, resetKey: string) {
       return;
     }
     let lastHeight = content.offsetHeight;
+    let lastClient = container.clientHeight;
     const observer = new ResizeObserver(() => {
       const nextHeight = content.offsetHeight;
-      const action = followContentHeight(lastHeight, nextHeight, pinnedRef.current);
+      const nextClient = container.clientHeight;
+      const contentAction = followContentHeight(
+        lastHeight,
+        nextHeight,
+        pinnedRef.current,
+      );
+      const viewportAction = followContainerShrink(
+        lastClient,
+        nextClient,
+        pinnedRef.current,
+      );
       lastHeight = nextHeight;
-      if (action === "stick") {
+      lastClient = nextClient;
+      if (contentAction === "stick" || viewportAction === "stick") {
         container.scrollTop = container.scrollHeight;
-      } else if (action === "hasNew") {
+      } else if (contentAction === "hasNew") {
         setHasNew(true);
       }
     });
     observer.observe(content);
+    observer.observe(container);
     return () => observer.disconnect();
   }, [resetKey]);
 

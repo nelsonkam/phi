@@ -24,6 +24,16 @@ import {
   saveComposerDraft,
   type DraftAttachment,
 } from "@/web/lib/drafts";
+import { FollowUpQueue } from "@/web/components/follow-up-queue";
+import {
+  attachmentsToDraft,
+  followUpComposerCommit,
+  followUpDumpInput,
+  followUpSendInput,
+  retainedEditingId,
+  useFollowUpQueue,
+  type FollowUpItem,
+} from "@/web/lib/follow-up-queue";
 import { useAgents } from "@/web/lib/queries";
 import { cn } from "@/web/lib/utils";
 
@@ -73,6 +83,8 @@ export function Composer({
   onSend,
   className,
   mentions = "leading",
+  followUpMode = false,
+  onSteer,
 }: {
   placeholder: string;
   disabled?: boolean;
@@ -82,6 +94,10 @@ export function Composer({
   className?: string;
   /** Chat: leading @ only. Doc comments: @ anywhere in the body. */
   mentions?: "leading" | "anywhere";
+  /** While an agent is working, Enter queues a follow-up instead of sending. */
+  followUpMode?: boolean;
+  /** ↑ Send on a queued item: interrupt the running turn, then post. */
+  onSteer?: (input: ComposerSendInput) => void | Promise<void>;
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -97,6 +113,22 @@ export function Composer({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [overflowNotice, setOverflowNotice] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingKey, setEditingKey] = useState(draftKey);
+  const editingIdRef = useRef<string | null>(null);
+  if (draftKey !== editingKey) {
+    setEditingKey(draftKey);
+    setEditingId(null);
+    editingIdRef.current = null;
+  } else {
+    editingIdRef.current = editingId;
+  }
+  const queue = useFollowUpQueue(draftKey);
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
+  const onSteerRef = useRef(onSteer);
+  onSteerRef.current = onSteer;
+  const dumpingRef = useRef(false);
   const { data: agentData } = useAgents();
 
   const suggestions =
@@ -220,46 +252,33 @@ export function Composer({
     }
   }
 
-  // Capture phase, so an accepting Enter or dismissing Escape never reaches
-  // the primitive's own send / cancel handlers.
-  function handleKeyDownCapture(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (open) {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        const step = e.key === "ArrowDown" ? 1 : -1;
-        setActiveIndex(
-          (active + step + suggestions.length) % suggestions.length,
-        );
-      } else if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        e.stopPropagation();
-        acceptMention(suggestions[active]!);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setMentionQuery(null);
-      }
-      return;
-    }
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-      const text = e.currentTarget.value.trim();
-      if (!text && ready.length > 0 && !uploading && !disabled) {
-        e.preventDefault();
-        e.stopPropagation();
-        void submit(text);
-      }
-    }
-  }
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
 
   async function submit(content: string) {
     if (disabled || uploading) return;
     if (!content && ready.length === 0) return;
     setMentionQuery(null);
-    await onSend({
+    const input: ComposerSendInput = {
       content,
       attachmentIds: ready.map((item) => item.id),
       attachments: ready,
-    });
+    };
+    const commit = followUpComposerCommit(editingId, input);
+    if (commit.action === "update") {
+      queue.update(commit.id, {
+        content: input.content,
+        attachments: input.attachments,
+      });
+      stopEditing();
+    } else if (commit.action === "remove") {
+      queue.remove(commit.id);
+      stopEditing();
+    } else if (followUpMode) {
+      queue.enqueue(input);
+    } else {
+      await onSend(input);
+    }
     setPending([]);
     setOverflowNotice(null);
   }
@@ -283,10 +302,143 @@ export function Composer({
     onNew: handleNew,
   });
 
+  function composerTextValue() {
+    return runtime.thread.composer.getState().text;
+  }
+
+  function setComposerText(text: string) {
+    runtime.thread.composer.setText(text);
+  }
+
+  function clearComposer() {
+    setComposerText("");
+    setPending([]);
+    setOverflowNotice(null);
+    setMentionQuery(null);
+  }
+
+  function stopEditing() {
+    editingIdRef.current = null;
+    setEditingId(null);
+  }
+
+  function applyComposerToQueue() {
+    const content = composerTextValue().trim();
+    const attachments = ready;
+    const commit = followUpComposerCommit(editingId, {
+      content,
+      attachments,
+    });
+    if (commit.action === "enqueue") {
+      if (content || attachments.length > 0) {
+        queue.enqueue({ content, attachments });
+      }
+    } else if (commit.action === "update") {
+      queue.update(commit.id, { content, attachments });
+    } else {
+      queue.remove(commit.id);
+    }
+  }
+
+  function beginEdit(item: FollowUpItem) {
+    if (uploading) return;
+    if (editingId === item.id) {
+      inputRef.current?.focus();
+      return;
+    }
+    applyComposerToQueue();
+    if (draftKey) persistDraft(draftKey, "", []);
+    editingIdRef.current = item.id;
+    setEditingId(item.id);
+    setComposerText(item.content);
+    setPending(item.attachments.map(draftAttachmentToPending));
+    setOverflowNotice(null);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    });
+  }
+
+  function cancelEdit() {
+    if (!editingId) return;
+    stopEditing();
+    clearComposer();
+  }
+
+  // Capture phase, so an accepting Enter or dismissing Escape never reaches
+  // the primitive's own send / cancel handlers.
+  function handleKeyDownCapture(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (open) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        setActiveIndex(
+          (active + step + suggestions.length) % suggestions.length,
+        );
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        acceptMention(suggestions[active]!);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setMentionQuery(null);
+      }
+      return;
+    }
+    if (e.key === "Escape" && editingId) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelEdit();
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      const text = e.currentTarget.value.trim();
+      if (!text && ready.length > 0 && !uploading && !disabled) {
+        e.preventDefault();
+        e.stopPropagation();
+        void submit(text);
+      }
+    }
+  }
+
+  function sendQueued(item: FollowUpItem) {
+    if (dumpingRef.current || uploading) return;
+    const live =
+      editingId === item.id
+        ? {
+            ...item,
+            content: composerTextValue().trim(),
+            attachments: attachmentsToDraft(ready),
+          }
+        : item;
+    if (editingId === item.id) {
+      stopEditing();
+      clearComposer();
+    }
+    if (!live.content.trim() && live.attachments.length === 0) {
+      queue.remove(item.id);
+      return;
+    }
+    dumpingRef.current = true;
+    queue.remove(item.id);
+    const input = followUpSendInput(live);
+    const post = followUpMode && onSteerRef.current
+      ? onSteerRef.current
+      : onSendRef.current;
+    void Promise.resolve(post(input)).finally(() => {
+      dumpingRef.current = false;
+    });
+  }
+
   // Restores the draft for the current key (replacing any text left over from
   // a previous key) and persists every subsequent edit. Sending resets the
   // composer text to "", which flows through the same subscription and removes
-  // the stored draft.
+  // the stored draft. A queued row loaded for editing is not written as a draft.
   useEffect(() => {
     if (!draftKey) return;
     const composer = runtime.thread.composer;
@@ -300,21 +452,41 @@ export function Composer({
       const text = composer.getState().text;
       if (text === lastText) return;
       lastText = text;
+      if (editingIdRef.current) return;
       persistDraft(draftKey, text, pendingRef.current);
     });
   }, [draftKey, runtime]);
 
-  const pendingRef = useRef(pending);
-  pendingRef.current = pending;
-
   useEffect(() => {
-    if (!draftKey) return;
+    if (!draftKey || editingId) return;
     persistDraft(
       draftKey,
       runtime.thread.composer.getState().text,
       pending,
     );
-  }, [draftKey, pending, runtime]);
+  }, [draftKey, pending, runtime, editingId]);
+
+  // Drop the composer copy if the row is dismissed (or the queue is replaced)
+  // while it is loaded for editing.
+  useEffect(() => {
+    const next = retainedEditingId(editingId, queue.items);
+    if (next === editingId) return;
+    stopEditing();
+    if (next === null) clearComposer();
+  }, [queue.items, editingId]);
+
+  // When the agent goes idle, dump remaining follow-ups as one user message
+  // so they share a single turn. Skip while a row is loaded in the composer.
+  useEffect(() => {
+    if (followUpMode || editingId || dumpingRef.current) return;
+    if (queue.items.length === 0) return;
+    dumpingRef.current = true;
+    const input = followUpDumpInput(queue.items);
+    queue.clear();
+    void Promise.resolve(onSendRef.current(input)).finally(() => {
+      dumpingRef.current = false;
+    });
+  }, [followUpMode, editingId, queue.items, queue.clear]);
 
   const composerText = inputRef.current?.value ?? "";
   const canSend =
@@ -325,7 +497,18 @@ export function Composer({
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <div className={cn("shrink-0 px-5 pt-1 pb-5", className)}>
-        <div className="relative">
+        <div className="relative flex flex-col gap-2">
+          <FollowUpQueue
+            items={queue.items}
+            selectedId={editingId}
+            disabled={uploading}
+            onEdit={beginEdit}
+            onSend={sendQueued}
+            onDismiss={(id) => {
+              if (uploading) return;
+              queue.remove(id);
+            }}
+          />
           {open &&
             mentionBox &&
             createPortal(
@@ -418,7 +601,13 @@ export function Composer({
               rows={1}
               maxRows={8}
               submitMode="enter"
-              placeholder={placeholder}
+              placeholder={
+                editingId
+                  ? "Edit follow-up…"
+                  : followUpMode
+                    ? "Add follow-up…"
+                    : placeholder
+              }
               onKeyDownCapture={handleKeyDownCapture}
               onChange={(e) => syncMention(e.currentTarget)}
               // Covers caret moves that change no text (clicks, arrow keys).

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readDraft, readComposerDraft, saveDraft, saveComposerDraft } from "@/web/lib/drafts";
+import { readDraft, readComposerDraft, saveDraft, saveComposerDraft, readDocCommentAnchor, saveDocCommentAnchor, clearDocCommentAnchor, docCommentDraftKey } from "@/web/lib/drafts";
 
 function fakeStorage(): Storage {
   const map = new Map<string, string>();
@@ -85,4 +85,30 @@ test("persists uploaded attachment ids alongside text", () => {
   });
   saveComposerDraft("thread:t1", { text: "", attachments: [] }, storage);
   expect(readComposerDraft("thread:t1", storage)).toBeNull();
+});
+
+test("persists a doc-comment draft anchor", () => {
+  const storage = fakeStorage();
+  saveDocCommentAnchor(
+    "doc-comment-new:ch:notes.md",
+    { quote: "hello world", prefix: "say ", suffix: " now", headingSlug: "intro" },
+    storage,
+  );
+  expect(readDocCommentAnchor("doc-comment-new:ch:notes.md", storage)).toEqual({
+    quote: "hello world",
+    prefix: "say ",
+    suffix: " now",
+    headingSlug: "intro",
+  });
+  clearDocCommentAnchor("doc-comment-new:ch:notes.md", storage);
+  expect(readDocCommentAnchor("doc-comment-new:ch:notes.md", storage)).toBeNull();
+});
+
+test("doc-comment draft keys include the file root", () => {
+  expect(docCommentDraftKey("ch_1", "workspace", "channels/a.md")).toBe(
+    "doc-comment-new:ch_1:workspace:channels/a.md",
+  );
+  expect(docCommentDraftKey("ch_1", "workspace", "src/a.md")).not.toBe(
+    docCommentDraftKey("ch_1", "phi", "src/a.md"),
+  );
 });

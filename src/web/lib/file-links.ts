@@ -1,3 +1,5 @@
+import { decodePathSegments } from "@/shared/file-link-match";
+
 // Message file-link convention: a relative href/path in a message refers to a
 // workspace file. Channel-aware serving lives at
 // /api/v1/channels/:id/file-roots/:root/<path>; /api/v1/files/<path> is the
@@ -31,22 +33,6 @@ export function parseWorkspaceHref(href: string): {
   if (!path) return null;
   const fragment = hash >= 0 ? href.slice(hash + 1) : undefined;
   return { path, fragment: fragment || undefined };
-}
-
-// Decode each path segment once so an already-escaped href (`My%20Report.md`)
-// is not encoded a second time when building the serving URL.
-function decodePathSegments(path: string): string {
-  return path
-    .split("/")
-    .filter((segment) => segment !== "" && segment !== ".")
-    .map((segment) => {
-      try {
-        return decodeURIComponent(segment);
-      } catch {
-        return segment;
-      }
-    })
-    .join("/");
 }
 
 export function encodeFilePath(path: string): string {
@@ -167,8 +153,4 @@ export function fileKind(path: string): FileKind {
   return "text";
 }
 
-// A conservative match for workspace paths in plain text: at least one "/",
-// segments of word-ish characters, ending in an extension. Requiring the
-// slash keeps prose like "node.js" plain.
-export const TEXT_PATH_PATTERN =
-  /(?:\.\/)?[\w@%+=-][\w@%+=.-]*(?:\/[\w@%+=.-]+)+\.[A-Za-z0-9]{1,8}/g;
+export { TEXT_PATH_PATTERN } from "@/shared/file-link-match";

@@ -613,17 +613,25 @@ Durable partial assistant frames and tool-progress checkpoints are deferred. The
 Shared markdown files can host comment threads anchored to a text
 selection. Each comment is a real thread (`threads.kind = 'doc_comment'`)
 plus a `doc_comment_anchors` row (quote, prefix, suffix, `heading_slug`).
-They do not appear in the channel flow or Activity.
+They do not appear in the channel flow or Activity. File-chip badges
+remain channel-wide; the "docs with comments" browser lives on the open
+thread's header and lists files commented from that thread.
 
-The user creates comments from the markdown viewer. Agents are woken only
-when `@mentioned` — there is no default-agent fallback. Retry on an
-unmentioned comment is a no-op.
+The user creates comments from the markdown viewer. Unmentioned comments
+route to the parent thread's default agent, else the workspace default —
+the same fallback chain as chat replies. Retry on an unmentioned comment
+wakes that agent. Agents can `read_thread` the parent and `send_message`
+with `thread_id` set to it.
 
 HTTP:
 
 - `GET /api/v1/channels/:id/doc-comments?root=&path=`
-- `POST /api/v1/channels/:id/doc-comments`
-- `GET /api/v1/channels/:id/doc-comments/summary`
+- `POST /api/v1/channels/:id/doc-comments` (`parentThreadId` optional;
+  omitted viewers fall back to an existing comment's parent or the latest
+  channel message linking the path)
+- `GET /api/v1/channels/:id/doc-comments/summary` (`parentThreadId` optional;
+  omitted is channel-wide for file-chip badges; set to a chat thread for
+  that thread's "docs with comments" browser)
 
 Deep links use `/c/:channelId/doc/:threadId`. `/t/:threadId` for a
 doc-comment thread redirects there. Selecting a comment scrolls its

@@ -132,3 +132,77 @@ function defaultStorage(): Storage | undefined {
     return undefined;
   }
 }
+
+export function docCommentDraftKey(
+  channelId: string,
+  rootId: string,
+  path: string,
+): string {
+  return `doc-comment-new:${channelId}:${rootId}:${path}`;
+}
+
+const ANCHOR_PREFIX = "phi:doc-comment-anchor:";
+
+export interface DocCommentDraftAnchor {
+  quote: string;
+  prefix: string;
+  suffix: string;
+  headingSlug: string | null;
+}
+
+export function readDocCommentAnchor(
+  key: string,
+  storage: Pick<Storage, "getItem"> | undefined = defaultStorage(),
+): DocCommentDraftAnchor | null {
+  try {
+    const raw = storage?.getItem(ANCHOR_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DocCommentDraftAnchor>;
+    if (
+      typeof parsed.quote !== "string" ||
+      !parsed.quote ||
+      typeof parsed.prefix !== "string" ||
+      typeof parsed.suffix !== "string"
+    ) {
+      return null;
+    }
+    return {
+      quote: parsed.quote,
+      prefix: parsed.prefix,
+      suffix: parsed.suffix,
+      headingSlug:
+        typeof parsed.headingSlug === "string" ? parsed.headingSlug : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveDocCommentAnchor(
+  key: string,
+  anchor: DocCommentDraftAnchor,
+  storage:
+    | Pick<Storage, "setItem" | "removeItem">
+    | undefined = defaultStorage(),
+): void {
+  try {
+    if (!anchor.quote) {
+      storage?.removeItem(ANCHOR_PREFIX + key);
+      return;
+    }
+    storage?.setItem(ANCHOR_PREFIX + key, JSON.stringify(anchor));
+  } catch {
+    // Ignore quota or access errors.
+  }
+}
+
+export function clearDocCommentAnchor(
+  key: string,
+  storage: Pick<Storage, "removeItem"> | undefined = defaultStorage(),
+): void {
+  try {
+    storage?.removeItem(ANCHOR_PREFIX + key);
+  } catch {
+    // Ignore access errors.
+  }
+}

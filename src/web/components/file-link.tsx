@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { Component, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { TextMessagePartProvider } from "@assistant-ui/react";
 import { Download, FileText, Maximize2, Minimize2, X } from "lucide-react";
@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/web/components/ui/dialog";
-import { FileLinkScope, useFileLinkScope } from "@/web/lib/file-link-context";
+import { FileLinkScope, useFileLinkScope, useFileViewerOutlet } from "@/web/lib/file-link-context";
 import {
   fileBasename,
   fileKind,
@@ -68,7 +68,7 @@ function AttachmentFileLink({
           setOpen(true);
         }}
         title={filename}
-        className="mention inline-flex max-w-full items-center gap-1 align-[-0.14em] transition-colors hover:bg-sky-400/25 dark:hover:bg-sky-400/20"
+        className="mention inline-flex max-w-full items-center gap-1 text-sm align-[-0.14em] transition-colors hover:bg-sky-400/25 dark:hover:bg-sky-400/20"
       >
         <FileText className="size-3 shrink-0 opacity-80" />
         <span className="truncate leading-tight">{filename}</span>
@@ -95,6 +95,7 @@ function WorkspaceFileLink({
 }) {
   const [open, setOpen] = useState(false);
   const scope = useFileLinkScope();
+  const outlet = useFileViewerOutlet();
   const parsed = parseWorkspaceHref(path);
   const resolved = resolveLinkedPath(parsed?.path ?? path, scope.baseDir);
   const hash = fragment ?? parsed?.fragment;
@@ -115,38 +116,53 @@ function WorkspaceFileLink({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
+          if (outlet) {
+            outlet({
+              path: resolved,
+              root: scope.root,
+              parentThreadId: scope.threadId,
+              fragment: hash,
+            });
+            return;
+          }
           setOpen(true);
         }}
         title={resolved}
-        className="mention inline-flex max-w-full items-center gap-1 align-[-0.14em] transition-colors hover:bg-sky-400/25 dark:hover:bg-sky-400/20"
+        className="mention inline-flex max-w-full items-center gap-1 text-sm align-[-0.14em] transition-colors hover:bg-sky-400/25 dark:hover:bg-sky-400/20"
       >
         <FileText className="size-3 shrink-0 opacity-80" />
         <span className="truncate leading-tight">
           {label ?? fileBasename(resolved)}
         </span>
-        {badge && badge.unreadCount > 0 && (
+        {badge && badge.commentCount > 0 && (
           <span
             aria-label={
-              badge.unreadCount === 1
-                ? "1 unread comment"
-                : `${badge.unreadCount} unread comments`
+              badge.unreadCount > 0
+                ? badge.unreadCount === 1
+                  ? `1 unread comment, ${badge.commentCount} total`
+                  : `${badge.unreadCount} unread comments, ${badge.commentCount} total`
+                : `${badge.commentCount} comments`
             }
-            className="size-1.5 shrink-0 rounded-full bg-sky-600"
-          />
-        )}
-        {badge && badge.unreadCount === 0 && badge.commentCount > 0 && (
-          <span className="text-[10px] font-medium leading-none text-sky-700/80 dark:text-sky-400/80">
+            className="text-[10px] font-medium leading-none text-sky-700/80 dark:text-sky-400/80"
+          >
             {badge.commentCount}
           </span>
         )}
+        {badge && badge.unreadCount > 0 && (
+          <span
+            aria-hidden="true"
+            className="size-1.5 shrink-0 rounded-full bg-sky-600"
+          />
+        )}
       </button>
-      {open && (
+      {open && !outlet && (
         <FileViewerDialog
           path={resolved}
           url={url}
           fragment={hash}
           channelId={scope.channelId}
           root={scope.root}
+          parentThreadId={scope.threadId}
           onClose={() => setOpen(false)}
         />
       )}
@@ -157,24 +173,51 @@ function WorkspaceFileLink({
 const HEADER_ACTION_CLASS =
   "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
 
+class FileViewerErrorBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  override render() {
+    if (this.state.failed) {
+      return (
+        <p className="p-4 text-sm text-muted-foreground">
+          This view hit an error. Close and reopen the file.
+        </p>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function FileViewerDialog({
   path,
   url,
   fragment,
   channelId,
   root,
+  parentThreadId,
   focusCommentId,
   onClose,
+  syncRoute,
 }: {
   path: string;
   url: string;
   fragment?: string;
   channelId?: string;
   root?: string;
+  parentThreadId?: string;
   focusCommentId?: string;
   onClose: () => void;
+  syncRoute?: boolean;
 }) {
   const [fullscreen, setFullscreen] = useState(false);
+  const [commentUiOpen, setCommentUiOpen] = useState(false);
   const kind = fileKind(path);
   const wide = kind === "markdown" && Boolean(channelId);
   return (
@@ -189,6 +232,15 @@ export function FileViewerDialog({
               ? "max-h-[85svh] sm:max-w-5xl"
               : "max-h-[85svh] sm:max-w-3xl",
         )}
+        onEscapeKeyDown={(event) => {
+          if (commentUiOpen) event.preventDefault();
+        }}
+        onInteractOutside={(event) => {
+          if (commentUiOpen) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (commentUiOpen) event.preventDefault();
+        }}
       >
         <DialogHeader className="shrink-0 border-b px-4 py-2.5">
           <DialogTitle className="flex items-center gap-2 text-sm font-semibold">
@@ -224,16 +276,21 @@ export function FileViewerDialog({
           </DialogTitle>
         </DialogHeader>
         <div className={cn("min-h-24 flex-1", wide ? "flex overflow-hidden" : "overflow-auto")}>
-          <FileViewerBody
-            kind={kind}
-            path={path}
-            url={url}
-            fragment={fragment}
-            channelId={channelId}
-            root={root}
-            fullscreen={fullscreen}
-            focusCommentId={focusCommentId}
-          />
+          <FileViewerErrorBoundary>
+            <FileViewerBody
+              kind={kind}
+              path={path}
+              url={url}
+              fragment={fragment}
+              channelId={channelId}
+              root={root}
+              parentThreadId={parentThreadId}
+              fullscreen={fullscreen}
+              focusCommentId={focusCommentId}
+              onCommentUiOpenChange={setCommentUiOpen}
+              syncRoute={syncRoute}
+            />
+          </FileViewerErrorBoundary>
         </div>
       </DialogContent>
     </Dialog>
@@ -247,8 +304,11 @@ function FileViewerBody({
   fragment,
   channelId,
   root,
+  parentThreadId,
   fullscreen,
   focusCommentId,
+  onCommentUiOpenChange,
+  syncRoute,
 }: {
   kind: ReturnType<typeof fileKind>;
   path: string;
@@ -256,8 +316,11 @@ function FileViewerBody({
   fragment?: string;
   channelId?: string;
   root?: string;
+  parentThreadId?: string;
   fullscreen: boolean;
   focusCommentId?: string;
+  onCommentUiOpenChange?: (open: boolean) => void;
+  syncRoute?: boolean;
 }) {
   if (kind === "image") {
     return (
@@ -290,7 +353,11 @@ function FileViewerBody({
       fragment={fragment}
       channelId={channelId}
       root={root}
+      parentThreadId={parentThreadId}
       focusCommentId={focusCommentId}
+      onCommentUiOpenChange={onCommentUiOpenChange}
+      fullscreen={fullscreen}
+      syncRoute={syncRoute}
     />
   );
 }
@@ -302,7 +369,11 @@ function TextFileBody({
   fragment,
   channelId,
   root,
+  parentThreadId,
   focusCommentId,
+  onCommentUiOpenChange,
+  fullscreen,
+  syncRoute,
 }: {
   kind: "markdown" | "text";
   path: string;
@@ -310,7 +381,11 @@ function TextFileBody({
   fragment?: string;
   channelId?: string;
   root?: string;
+  parentThreadId?: string;
   focusCommentId?: string;
+  onCommentUiOpenChange?: (open: boolean) => void;
+  fullscreen?: boolean;
+  syncRoute?: boolean;
 }) {
   const { data, isPending, isError, error } = useQuery({
     // Linked files are live references; always show the current bytes.
@@ -376,7 +451,11 @@ function TextFileBody({
         channelId={channelId}
         root={data.root}
         baseDir={workspaceDirname(data.path)}
+        parentThreadId={parentThreadId}
         focusCommentId={focusCommentId}
+        onDraftOpenChange={onCommentUiOpenChange}
+        fullscreen={fullscreen}
+        syncRoute={syncRoute}
       />
     );
   }
@@ -396,7 +475,11 @@ export function MarkdownFileView({
   channelId,
   root,
   baseDir,
+  parentThreadId,
   focusCommentId,
+  onDraftOpenChange,
+  fullscreen,
+  syncRoute,
 }: {
   text: string;
   path?: string;
@@ -404,7 +487,11 @@ export function MarkdownFileView({
   channelId?: string;
   root?: string;
   baseDir?: string;
+  parentThreadId?: string;
   focusCommentId?: string;
+  onDraftOpenChange?: (open: boolean) => void;
+  fullscreen?: boolean;
+  syncRoute?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -434,7 +521,11 @@ export function MarkdownFileView({
           path={path!}
           text={text}
           containerRef={containerRef}
+          parentThreadId={parentThreadId}
           focusThreadId={focusCommentId}
+          onDraftOpenChange={onDraftOpenChange}
+          fullscreen={fullscreen}
+          syncRoute={syncRoute}
         />
       )}
     </div>
