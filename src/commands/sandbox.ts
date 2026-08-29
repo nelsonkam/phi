@@ -129,9 +129,15 @@ function hostPort(value: unknown): number | null {
   for (const entry of objects(value)) {
     const container = entry.container
       ?? entry.containerPort
+      ?? entry.container_port
       ?? entry.sandboxPort
+      ?? entry.sandbox_port
       ?? entry.targetPort;
-    const published = entry.hostPort ?? entry.publishedPort ?? entry.published;
+    const published = entry.hostPort
+      ?? entry.host_port
+      ?? entry.publishedPort
+      ?? entry.published_port
+      ?? entry.published;
     if (numericPort(container) !== SANDBOX_PORT) continue;
     const directPort = numericPort(published);
     if (directPort !== null) return directPort;

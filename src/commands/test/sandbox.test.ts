@@ -160,6 +160,56 @@ test("a non-interactive create does not require API keys before OAuth login", as
   expect(captureOutput.stdout()).toContain("API keys or OAuth tokens");
 });
 
+test("open accepts the snake_case port payload from sbx v0.42.0-rc2", async () => {
+  const captureOutput = capture();
+  const opened: string[] = [];
+  const exitCode = await runSandbox(captureOutput.output, ["open", "phi"], {
+    env: {},
+    which: () => "/fake/sbx",
+    openUrl: async (url) => { opened.push(url); },
+    runCommand: async (args) => {
+      const command = args.slice(1);
+      if (command[0] === "version") {
+        return { exitCode: 0, stdout: "sbx version: v0.42.0-rc2\n", stderr: "" };
+      }
+      if (command[0] === "ls") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            sandboxes: [{ name: "phi", agent: "phi", status: "running" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (command[0] === "ports") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              host_ip: "127.0.0.1",
+              host_port: 49152,
+              sandbox_port: 3141,
+              protocol: "tcp",
+            },
+            {
+              host_ip: "::1",
+              host_port: 49152,
+              sandbox_port: 3141,
+              protocol: "tcp",
+            },
+          ]),
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  expect(exitCode).toBe(0);
+  expect(captureOutput.stdout()).toBe("http://127.0.0.1:49152\n");
+  expect(opened).toEqual(["http://127.0.0.1:49152"]);
+});
+
 test("refuses recursion before invoking sbx", async () => {
   let called = false;
   await expect(runSandbox(capture().output, ["status"], {
