@@ -13,4 +13,7 @@ permissions:
       - api2.cursor.sh
       - api3.cursor.sh
       - repo42.cursor.sh
+      - '*.cursor.sh'
+      - api.cursor.com
       - cursor.com
+      - '*.cursor.com'

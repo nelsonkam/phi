@@ -46,17 +46,6 @@ test("OAuth mode writes only proxy sentinels and placeholders", async () => {
   expect(auth).toBe('{"OPENAI_API_KEY":"proxy-managed"}\n');
 });
 
-test("API-key mode uses the normal Codex provider with a proxy placeholder", async () => {
-  const home = await configure({ anthropic: "apikey", openai: "apikey" });
-  const codex = readFileSync(join(home, ".codex/config.toml"), "utf8");
-  const auth = readFileSync(join(home, ".codex/auth.json"), "utf8");
-
-  expect(codex).toContain('forced_login_method = "api"');
-  expect(codex).not.toContain("model_provider");
-  expect(codex).not.toContain("sandboxd");
-  expect(auth).toBe('{"OPENAI_API_KEY":"proxy-managed"}\n');
-});
-
 test("none mode removes stale managed authentication", async () => {
   const home = await configure({ anthropic: "oauth", openai: "oauth" });
   const claudePath = join(home, ".claude/settings.json");
@@ -91,9 +80,11 @@ test("root kit owns complete OAuth contracts", () => {
   expect(root).not.toContain("internal-ca");
   expect(root.match(/required: false/g)).toHaveLength(3);
   expect(root).not.toContain("required: true");
+  expect(root).not.toContain("apiKey:");
+  expect(root).toContain("CURSOR_AUTH_TOKEN: cursor-oat-proxy-managed");
 });
 
-test("sandbox startup reapplies auth modes acquired after creation", () => {
+test("sandbox startup reapplies OAuth modes acquired after creation", () => {
   const entrypoint = readFileSync(
     resolve(import.meta.dir, "../../../scripts/phi-sandbox-entrypoint"),
     "utf8",

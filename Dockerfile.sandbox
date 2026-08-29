@@ -19,7 +19,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=755 scripts/install-sandbox-harnesses /usr/local/bin/install-sandbox-harnesses
-COPY --chmod=755 scripts/cursor-agent-wrapper /usr/local/libexec/phi/cursor-agent-wrapper
 RUN PHI_HARNESSES="$PHI_HARNESSES" \
     CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
     CODEX_VERSION="$CODEX_VERSION" \

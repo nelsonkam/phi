@@ -11,18 +11,11 @@ Claude Code, Codex, and Cursor inside Docker Sandboxes' microVM boundary.
   OAuth callback, and egress fixes.
 - A Phi release with matching OCI kit and multi-architecture image tags.
 
-Phi supports either provider API keys or proxy-managed subscription OAuth.
-Authentication belongs to sbx: real keys and OAuth tokens stay in its host-side
-credential store and Phi sees only non-secret proxy sentinels.
-
-For API-key authentication, configure any providers you intend to use directly
-with sbx before creating the sandbox:
-
-```bash
-sbx secret set anthropic
-sbx secret set openai
-sbx secret set cursor
-```
+The official Phi kit declares proxy-managed subscription OAuth only.
+Authentication belongs to sbx: real OAuth tokens stay in its host-side
+credential store and Phi sees only non-secret proxy sentinels. Keeping API-key
+declarations out of the kit prevents an absent credential from becoming a
+placeholder that a CLI mistakes for a real key.
 
 For a ChatGPT subscription, complete OpenAI OAuth on the host before creation:
 
@@ -47,20 +40,51 @@ phi sandbox stop phi
 phi sandbox start phi
 ```
 
-Startup reruns Phi's mode-aware Claude and Codex configuration. This depends
+Startup reruns Phi's OAuth-aware Claude and Codex configuration. This depends
 on sbx recomputing `SBX_CRED_*_MODE` when a sandbox starts after a new OAuth
 binding; confirming that behavior on v0.42.0-rc1+ is a release validation gate.
 
 The root kit declares the complete OAuth interception contracts directly. It
 writes Claude's sentinel credential file, points Codex at the ChatGPT Codex
-backend with a sentinel bearer token, and keeps Cursor credentials in memory
-while forcing its traffic through the proxy-compatible HTTP/1 path. No custom
-CA certificate is required; the CA used in the original Cursor proof was only
-for corporate WARP TLS inspection.
+backend with a sentinel bearer token, and gives Cursor its OAuth sentinel
+statically while keeping credentials in memory and forcing traffic through the
+proxy-compatible HTTP/1 path. No custom CA certificate is required; the CA used
+in the original Cursor proof was only for corporate WARP TLS inspection.
 
-Select one mode per provider. If both an API key and OAuth credential exist,
-sbx version-specific precedence rules apply; Phi deliberately does not read
-credential metadata or attempt to choose between them.
+### API keys through custom secrets
+
+API-key users can create sandbox-scoped custom secrets after creation. The real
+value remains in sbx's host store; the VM receives an `sbx-cs-…` placeholder,
+and the egress proxy substitutes the real value only for the listed hosts.
+With the corresponding key already exported in the host shell, use only the
+providers you need:
+
+```bash
+sbx secret set-custom --sandbox phi \
+  --env ANTHROPIC_API_KEY \
+  --host api.anthropic.com --host '*.anthropic.com' \
+  --value "$ANTHROPIC_API_KEY"
+
+sbx secret set-custom --sandbox phi \
+  --env OPENAI_API_KEY \
+  --host api.openai.com --host '*.openai.com' \
+  --value "$OPENAI_API_KEY"
+
+sbx secret set-custom --sandbox phi \
+  --env CURSOR_API_KEY \
+  --host api2.cursor.sh --host '*.cursor.sh' \
+  --host api.cursor.com --host cursor.com --host '*.cursor.com' \
+  --value "$CURSOR_API_KEY"
+
+phi sandbox stop phi
+phi sandbox start phi
+```
+
+`set-custom` also accepts `--ref` and `--command` so a secret manager can
+provide the value without putting it directly on the command line. Do not keep
+an OpenAI OAuth binding when using an OpenAI API key: OAuth mode configures
+Codex for the ChatGPT backend instead of the normal API provider. Remove the
+global binding with `sbx secret rm openai` before restarting the sandbox.
 
 ## Sandbox MCP gateway
 

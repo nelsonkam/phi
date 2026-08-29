@@ -24,10 +24,10 @@ function configureClaude() {
   const path = join(directory, "settings.json");
   const settings = readJson(path);
   const mode = process.env.SBX_CRED_ANTHROPIC_MODE || "none";
-  if (mode === "none") {
-    if (settings.apiKeyHelper === "echo proxy-managed") delete settings.apiKeyHelper;
-  } else {
+  if (mode === "oauth") {
     settings.apiKeyHelper = "echo proxy-managed";
+  } else if (settings.apiKeyHelper === "echo proxy-managed") {
+    delete settings.apiKeyHelper;
   }
   ensureDirectory(directory);
   writePrivate(path, `${JSON.stringify(settings, null, 2)}\n`);
@@ -44,7 +44,7 @@ function configureCodex() {
     'mcp_oauth_credentials_store = "file"',
   ];
 
-  if (mode === "oauth" || mode === "apikey" || mode === "api-key") {
+  if (mode === "oauth") {
     lines.push('forced_login_method = "api"');
   }
   if (mode === "oauth") {
@@ -61,7 +61,7 @@ function configureCodex() {
 
   ensureDirectory(directory);
   writePrivate(configPath, `${lines.join("\n")}\n`);
-  if (mode === "oauth" || mode === "apikey" || mode === "api-key") {
+  if (mode === "oauth") {
     writePrivate(authPath, '{"OPENAI_API_KEY":"proxy-managed"}\n');
   } else {
     rmSync(authPath, { force: true });

@@ -44,8 +44,7 @@ if has_harness cursor; then
   curl -fsSL \
     "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/${cursor_arch}/agent-cli-package.tar.gz" \
     | tar --strip-components=1 -xzf - -C "$cursor_dir"
-  ln -s "$cursor_dir/cursor-agent" /usr/local/bin/cursor-agent.real
-  install -m 0755 /usr/local/libexec/phi/cursor-agent-wrapper /usr/local/bin/cursor-agent
+  ln -s "$cursor_dir/cursor-agent" /usr/local/bin/cursor-agent
 fi
 
 install -d /etc/phi

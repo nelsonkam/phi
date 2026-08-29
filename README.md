@@ -39,20 +39,20 @@ the local network.
 ## Docker Sandbox
 
 Phi can run as a persistent computer inside Docker Sandboxes. Install `sbx`
-v0.42.0-rc1 or newer, choose API-key or subscription authentication for the
-providers you use, then create the version-matched Phi kit. For example, use a
-ChatGPT subscription for Codex and an API key for Claude:
+v0.42.0-rc1 or newer, configure any host-completed subscription login, then
+create the version-matched Phi kit. For example, use a ChatGPT subscription
+for Codex:
 
 ```bash
 sbx secret set openai --oauth
-sbx secret set anthropic
 phi sandbox create --name phi
 ```
 
 Claude and Cursor subscription logins are completed from their CLIs inside the
-sandbox after creation. Phi never reads provider secrets or OAuth tokens;
-Docker's host-side credential proxy owns them. `phi sandbox open`, `status`,
-`stop`, and `start` manage the sandbox;
+sandbox after creation. The official kit is OAuth-only; API-key users can add
+an sbx custom secret scoped to the sandbox. In both cases Phi never reads
+provider secrets or OAuth tokens—Docker's host-side credential proxy owns
+them. `phi sandbox open`, `status`, `stop`, and `start` manage the sandbox;
 `phi sandbox remove phi --confirm` permanently deletes the VM, Phi database,
 repositories, worktrees, and volumes. Repeat `--kit <mixin-ref>` on create to
 add inspected custom feature kits. See [docs/docker-sandbox.md](./docs/docker-sandbox.md).

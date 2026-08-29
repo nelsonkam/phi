@@ -28,17 +28,11 @@ environment:
     PHI_HOST: 0.0.0.0
     PHI_PORT: "3141"
     PHI_IN_SANDBOX: "1"
+    CURSOR_AUTH_TOKEN: cursor-oat-proxy-managed
 
 credentials:
   - service: anthropic
     required: false
-    apiKey:
-      name: ANTHROPIC_API_KEY
-      proxyManaged: true
-      inject:
-        - domain: api.anthropic.com
-          header: x-api-key
-          format: "%s"
     oauth:
       tokenEndpoint:
         host: platform.claude.com
@@ -54,16 +48,6 @@ credentials:
           {"claudeAiOauth":{"accessToken":"{{.AccessToken}}","refreshToken":"{{.RefreshToken}}","expiresAt":{{.ExpiresAt}},"scopes":{{.ScopesJSON}}}{{if .PrimaryApiKey}},"primaryApiKey":"{{.PrimaryApiKey}}"{{end}}}
   - service: openai
     required: false
-    apiKey:
-      name: OPENAI_API_KEY
-      proxyManaged: true
-      inject:
-        - domain: api.openai.com
-          header: Authorization
-          format: Bearer %s
-        - domain: openai.com
-          header: Authorization
-          format: Bearer %s
     oauth:
       tokenEndpoint:
         host: auth.openai.com
@@ -75,18 +59,6 @@ credentials:
         refreshToken: oai-ort01-proxy-managed
   - service: cursor
     required: false
-    apiKey:
-      name: CURSOR_API_KEY
-      proxyManaged: true
-      inject:
-        - domain: api2.cursor.sh
-          scheme: bearer
-        - domain: api3.cursor.sh
-          scheme: bearer
-        - domain: repo42.cursor.sh
-          scheme: bearer
-        - domain: cursor.com
-          scheme: bearer
     oauth:
       tokenEndpoint:
         host: api2.cursor.sh
