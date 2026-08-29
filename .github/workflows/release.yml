@@ -235,7 +235,9 @@ jobs:
           cosign sign "ghcr.io/nelsonkam/phi-sandbox@${{ steps.image.outputs.digest }}"
           for kit in phi phi-claude phi-codex phi-cursor; do
             ref="ghcr.io/nelsonkam/${kit}-kit:$version"
-            digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
-            test -n "$digest"
+            # Kit manifests use a Docker Sandbox artifact type that Buildx can
+            # fetch but cannot decode through its Go template formatter. Hash
+            # the exact raw manifest bytes, which is how OCI defines a digest.
+            digest="sha256:$(docker buildx imagetools inspect "$ref" --raw | sha256sum | cut -d ' ' -f 1)"
             cosign sign "$ref@$digest"
           done
