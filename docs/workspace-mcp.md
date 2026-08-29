@@ -6,6 +6,14 @@ Claude: a stdio server has `command`, a remote server has `url`. Those servers
 are announced to every agent session in addition to Phi's internal `phi` MCP
 server.
 
+Inside a Docker sandbox (`PHI_IN_SANDBOX=1`), Phi also auto-registers the
+sandbox's MCP gateway as an HTTP server named `sbx` when sandboxd injects
+`MCP_GATEWAY_URL` and `MCP_SENTINEL_TOKEN_NAME`. The sentinel name is not a
+credential; the host proxy substitutes the real token per request. A harness
+without HTTP MCP support silently skips this one server instead of failing the
+session, and a user-defined `sbx` entry in `.agents/mcp.json` overrides the
+auto-registration entirely.
+
 ```json
 {
   "mcpServers": {

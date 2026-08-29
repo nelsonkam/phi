@@ -13,10 +13,79 @@ function writeConfig(value: unknown): string {
 }
 
 test("an absent MCP config produces no workspace servers", async () => {
-  expect(await loadWorkspaceMcpConfig(tempDir())).toEqual({
+  expect(await loadWorkspaceMcpConfig(tempDir(), {})).toEqual({
     servers: [],
     fingerprint: "absent",
+    sandboxGateway: false,
   });
+});
+
+const GATEWAY_ENV = {
+  PHI_IN_SANDBOX: "1",
+  MCP_GATEWAY_URL: "http://127.0.0.1:8811/mcp",
+  MCP_SENTINEL_TOKEN_NAME: "sbx-mcp-sentinel-1",
+};
+
+test("registers the sandbox MCP gateway from the sandbox environment", async () => {
+  const result = await loadWorkspaceMcpConfig(tempDir(), GATEWAY_ENV);
+  expect(result.sandboxGateway).toBe(true);
+  expect(result.servers).toEqual([
+    {
+      type: "http",
+      name: "sbx",
+      url: "http://127.0.0.1:8811/mcp",
+      headers: [
+        { name: "Authorization", value: "Bearer sbx-mcp-sentinel-1" },
+      ],
+    },
+  ]);
+  expect(result.fingerprint).toHaveLength(64);
+
+  const withoutGateway = await loadWorkspaceMcpConfig(tempDir(), {
+    ...GATEWAY_ENV,
+    MCP_GATEWAY_URL: undefined,
+  });
+  expect(withoutGateway.sandboxGateway).toBe(false);
+  expect(withoutGateway.servers).toEqual([]);
+  expect(withoutGateway.fingerprint).not.toBe(result.fingerprint);
+});
+
+test("requires the sandbox marker before registering the gateway", async () => {
+  const result = await loadWorkspaceMcpConfig(tempDir(), {
+    ...GATEWAY_ENV,
+    PHI_IN_SANDBOX: undefined,
+  });
+  expect(result.sandboxGateway).toBe(false);
+  expect(result.servers).toEqual([]);
+});
+
+test("a user-configured sbx server overrides the sandbox gateway", async () => {
+  const root = writeConfig({
+    mcpServers: {
+      sbx: { url: "https://example.com/other-gateway" },
+    },
+  });
+  const result = await loadWorkspaceMcpConfig(root, GATEWAY_ENV);
+  expect(result.sandboxGateway).toBe(false);
+  expect(result.servers).toEqual([
+    {
+      type: "http",
+      name: "sbx",
+      url: "https://example.com/other-gateway",
+      headers: [],
+    },
+  ]);
+});
+
+test("a disabled user sbx server disables automatic registration", async () => {
+  const root = writeConfig({
+    mcpServers: {
+      sbx: { url: "https://example.com/other-gateway", disabled: true },
+    },
+  });
+  const result = await loadWorkspaceMcpConfig(root, GATEWAY_ENV);
+  expect(result.sandboxGateway).toBe(false);
+  expect(result.servers).toEqual([]);
 });
 
 test("loads Cursor-style HTTP and stdio servers without type", async () => {

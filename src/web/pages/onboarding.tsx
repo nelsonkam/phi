@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { ArrowRight, LoaderCircle, TriangleAlert } from "lucide-react";
 import { ThemeToggle } from "@/web/components/theme-toggle";
@@ -25,13 +25,6 @@ import {
 import type { CreateDefaultAgentInput } from "@/web/lib/api";
 import { cn } from "@/web/lib/utils";
 
-const HARNESS_OPTIONS = [
-  { value: "claude-code", label: "Claude Code" },
-  { value: "cursor", label: "Cursor CLI" },
-  { value: "gemini", label: "Gemini CLI" },
-  { value: "codex", label: "Codex" },
-] as const;
-
 export function Onboarding() {
   const navigate = useNavigate();
   const [form, setForm] = useState<CreateDefaultAgentInput>({
@@ -42,6 +35,15 @@ export function Onboarding() {
   const [error, setError] = useState<string | null>(null);
   const { data: harnessData } = useHarnesses();
   const harnesses = harnessData?.harnesses ?? [];
+
+  useEffect(() => {
+    if (
+      harnesses.length > 0 &&
+      !harnesses.some((harness) => harness.id === form.harness)
+    ) {
+      setForm({ harness: harnesses[0]!.id, model: "", config: {} });
+    }
+  }, [form.harness, harnesses]);
 
   const selectedHarness = harnesses.find((h) => h.id === form.harness);
   const harnessInstalled = selectedHarness?.installed ?? false;
@@ -106,8 +108,9 @@ export function Onboarding() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {HARNESS_OPTIONS.map(({ value, label }) => {
-                  const status = harnesses.find((h) => h.id === value);
+                {harnesses.map((status) => {
+                  const value = status.id;
+                  const label = status.name;
                   return (
                     <SelectItem
                       key={value}

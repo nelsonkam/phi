@@ -8,7 +8,13 @@ export function parseRestoreScope(value: unknown): RestoreScope | null {
   return null;
 }
 
-const AGENT_FILES = new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore"]);
+const AGENT_FILES = new Set([
+  "AGENTS.md",
+  "CLAUDE.md",
+  // Historical compatibility: old workspaces/checkpoints may still own it.
+  "GEMINI.md",
+  ".gitignore",
+]);
 
 export function isAgentsPath(path: string): boolean {
   if (path === ".git" || path === ".git/" || path.startsWith(".git/")) {

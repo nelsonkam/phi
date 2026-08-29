@@ -5,7 +5,11 @@ import { tempDir } from "@/testing/tmpdir";
 import { PhiStore } from "@/core/store/store";
 import { ensureWorkspace } from "@/core/workspace";
 import { writeAgent, writeDefaultAgent } from "@/core/agents/registry";
-import { AgentRuntime, messagingPreamble } from "@/core/agents/runtime";
+import {
+  AgentRuntime,
+  messagingPreamble,
+  workspaceMcpServersForHarness,
+} from "@/core/agents/runtime";
 import type { MessageRouting } from "@/core/agents/routing";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
@@ -28,7 +32,7 @@ interface Fixture {
 async function fixture(options?: {
   agent?: false;
   agentArgs?: string[];
-  harness?: "claude-code" | "codex" | "cursor" | "gemini";
+  harness?: "claude-code" | "codex" | "cursor";
   sessionIdleMs?: number;
   hostIdleMs?: number;
   hopBudget?: number;
@@ -93,13 +97,15 @@ async function fixture(options?: {
 }
 
 test("the messaging preamble opens with the agent's own handle", () => {
-  const preamble = messagingPreamble("reviewer");
+  const preamble = messagingPreamble("reviewer", "product");
   expect(preamble.startsWith("You are @reviewer — ")).toBe(true);
   // The fake agent's "[intro]" marker keys on this sentence; every content
   // assertion carrying "[intro]" also proves the identity reached the prompt.
   expect(preamble).toContain("that handle is your own name in this thread");
   expect(preamble).toContain("attachment:att_");
   expect(preamble).toContain("Comment-thread turns");
+  expect(preamble).toContain("channel #product");
+  expect(preamble).toContain("read channels/product/AGENTS.md");
   // Narrow guards on the style rules, so a future prompt edit can't drop
   // them silently: earned structure, the judgment-based doc condition, and
   // the result-vs-acknowledgement distinction.
@@ -109,6 +115,31 @@ test("the messaging preamble opens with the agent's own handle", () => {
   );
   expect(preamble).toContain(
     "in an initial acknowledgement, name the first concrete step",
+  );
+});
+
+test("drops only the automatic sbx gateway for a harness without HTTP MCP", () => {
+  const automatic = {
+    servers: [
+      {
+        type: "http" as const,
+        name: "sbx",
+        url: "http://sandboxd/mcp",
+        headers: [],
+      },
+      { name: "local", command: "/usr/bin/env", args: [], env: [] },
+    ],
+    fingerprint: "gateway-fingerprint",
+    sandboxGateway: true,
+  };
+  expect(workspaceMcpServersForHarness(automatic, false)).toEqual([
+    { name: "local", command: "/usr/bin/env", args: [], env: [] },
+  ]);
+  expect(workspaceMcpServersForHarness(automatic, true)).toBe(automatic.servers);
+
+  const userConfigured = { ...automatic, sandboxGateway: false };
+  expect(workspaceMcpServersForHarness(userConfigured, false)).toBe(
+    automatic.servers,
   );
 });
 
@@ -234,6 +265,7 @@ test("user attachments are listed in the prompt and images embed when supported"
   await runtime.settled(thread.id);
   const reply = store.listMessages(thread.id)[1]!;
   expect(reply.content).toContain("[attach]");
+  expect(reply.content).toContain("read_attachment");
   expect(reply.content).toContain("[image:image/png]");
   expect(reply.content).toContain("what is this");
   await done();

@@ -6,7 +6,6 @@ import { Check, ChevronsUpDown } from "lucide-react";
 import ClaudeCodeIcon from "@lobehub/icons/es/ClaudeCode/components/Mono";
 import CodexIcon from "@lobehub/icons/es/Codex/components/Mono";
 import CursorIcon from "@lobehub/icons/es/Cursor/components/Mono";
-import GeminiCliIcon from "@lobehub/icons/es/GeminiCLI/components/Mono";
 import {
   Command,
   CommandEmpty,
@@ -43,7 +42,6 @@ export const HARNESS_ICONS: Record<
 > = {
   "claude-code": ClaudeCodeIcon,
   cursor: CursorIcon,
-  gemini: GeminiCliIcon,
   codex: CodexIcon,
 };
 

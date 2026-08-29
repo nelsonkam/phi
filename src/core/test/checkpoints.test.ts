@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CheckpointHttpError, CheckpointService } from "@/core/checkpoints";
 import { GitWorkspace, runGit } from "@/core/git";
@@ -129,6 +129,27 @@ test("restore no-op when mixed tree equals HEAD", async () => {
   });
   expect(result.noop).toBe(true);
   expect(store.listCheckpoints(workspace.id)).toHaveLength(1);
+  store.close();
+});
+
+test("restore reconciles channel folders that remain in the database", async () => {
+  const { store, workspace, checkpoints } = fixture();
+  await checkpoints.initialize();
+  const target = store.latestCheckpoint(workspace.id)!;
+  store.createChannel(workspace.id, { name: "later" });
+  await checkpoints.checkpoint({ trigger: "turn" });
+
+  const result = await checkpoints.restore({
+    checkpointId: target.id,
+    scope: "scratch",
+  });
+  expect(result.noop).toBe(false);
+  expect(store.listChannels(workspace.id).some((channel) => channel.name === "later")).toBe(
+    true,
+  );
+  expect(
+    existsSync(join(workspace.rootPath, "channels", "later", "AGENTS.md")),
+  ).toBe(true);
   store.close();
 });
 

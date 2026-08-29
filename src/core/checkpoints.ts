@@ -183,6 +183,7 @@ export class CheckpointService {
           checkpointId: restoreId,
         });
         if (!sha) {
+          this.store.reconcileChannelFolders();
           return {
             checkpoint: this.store.latestCheckpoint(this.workspaceId()),
             noop: true,
@@ -199,6 +200,7 @@ export class CheckpointService {
             this.healthState.error ?? "degraded",
           );
         }
+        this.store.reconcileChannelFolders();
         return { checkpoint: row, noop: false };
       } catch (error) {
         if (error instanceof CheckpointHttpError) throw error;

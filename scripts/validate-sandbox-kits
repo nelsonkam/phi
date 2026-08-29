@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+command -v sbx >/dev/null 2>&1 || {
+  echo "sbx is required" >&2
+  exit 1
+}
+
+for kit in \
+  docker/sandbox/phi \
+  docker/sandbox/phi-claude \
+  docker/sandbox/phi-codex \
+  docker/sandbox/phi-cursor
+do
+  sbx kit validate "$kit"
+  sbx kit inspect "$kit"
+done

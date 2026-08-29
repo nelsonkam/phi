@@ -107,6 +107,33 @@ export interface WorkspaceMcpConfig {
   // change refreshes the ACP session. Persist only this hash, never the
   // resolved servers, and never log it.
   fingerprint: string;
+  // True when `servers` includes the auto-registered sandbox MCP gateway.
+  // The runtime may drop that one server for a harness without HTTP MCP
+  // support instead of failing the session, unlike user-configured servers.
+  sandboxGateway: boolean;
+}
+
+export const SANDBOX_GATEWAY_SERVER_NAME = "sbx";
+
+// Docker Sandboxes reserves an MCP gateway per sandbox and injects
+// MCP_GATEWAY_URL + MCP_SENTINEL_TOKEN_NAME into the environment. The
+// sentinel name is not a credential: the host proxy substitutes the real
+// token at request time keyed by that name, which is why it is safe to put
+// in a bearer header here.
+export function sandboxMcpGatewayServer(
+  environment: Record<string, string | undefined> = process.env,
+): McpServer | null {
+  if (environment.PHI_IN_SANDBOX !== "1") return null;
+  const url = environment.MCP_GATEWAY_URL?.trim();
+  const sentinel = environment.MCP_SENTINEL_TOKEN_NAME?.trim();
+  if (!url || !sentinel) return null;
+  if (!URL.canParse(url) || !/^https?:/i.test(url)) return null;
+  return {
+    type: "http",
+    name: SANDBOX_GATEWAY_SERVER_NAME,
+    url,
+    headers: [{ name: "Authorization", value: `Bearer ${sentinel}` }],
+  };
 }
 
 export async function loadWorkspaceMcpConfig(
@@ -119,7 +146,7 @@ export async function loadWorkspaceMcpConfig(
     source = await readFile(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { servers: [], fingerprint: "absent" };
+      return withSandboxGateway([], environment, "absent");
     }
     throw new Error(
       `could not read .agents/mcp.json: ${(error as Error).message}`,
@@ -162,16 +189,46 @@ export async function loadWorkspaceMcpConfig(
     userHome: homedir(),
   };
   const servers: McpServer[] = [];
+  const sandboxGatewayOverridden = Object.hasOwn(
+    parsed.data.mcpServers,
+    SANDBOX_GATEWAY_SERVER_NAME,
+  );
   for (const [name, server] of Object.entries(parsed.data.mcpServers)) {
     if (server.disabled === true) continue;
     servers.push(toAcpServer(name, server, interpolateCtx));
   }
 
-  return {
+  return withSandboxGateway(
     servers,
+    environment,
+    undefined,
+    sandboxGatewayOverridden,
+  );
+}
+
+// A user-configured server named "sbx" wins over the auto-registered
+// gateway so the workspace can point that name elsewhere or disable it.
+function withSandboxGateway(
+  servers: McpServer[],
+  environment: Record<string, string | undefined>,
+  emptyFingerprint?: string,
+  explicitlyOverridden = false,
+): WorkspaceMcpConfig {
+  const gateway = sandboxMcpGatewayServer(environment);
+  const overridden =
+    explicitlyOverridden ||
+    servers.some((server) => server.name === SANDBOX_GATEWAY_SERVER_NAME);
+  const resolved = gateway && !overridden ? [...servers, gateway] : servers;
+  const sandboxGateway = resolved !== servers;
+  if (resolved.length === 0 && emptyFingerprint !== undefined) {
+    return { servers: [], fingerprint: emptyFingerprint, sandboxGateway };
+  }
+  return {
+    servers: resolved,
     fingerprint: new Bun.CryptoHasher("sha256")
-      .update(JSON.stringify(servers))
+      .update(JSON.stringify(resolved))
       .digest("hex"),
+    sandboxGateway,
   };
 }
 

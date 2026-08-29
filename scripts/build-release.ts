@@ -9,6 +9,7 @@ const root = resolve(import.meta.dir, "..");
 const outDir = resolve(root, "dist", "release");
 const cliPath = resolve(root, "src", "cli.ts");
 const workerPath = resolve(root, "src", "core", "search", "vector-worker.ts");
+const acpProbePath = resolve(root, "src", "commands", "acp-probe.ts");
 const workerJs = resolve(outDir, "vector-worker.js");
 const onnxBindingMarker =
   "require(`../bin/napi-v3/${process.platform}/${process.arch}/onnxruntime_binding.node`)";
@@ -49,29 +50,53 @@ const sharpStub: Bun.BunPlugin = {
   },
 };
 
-function nativeFilesForTarget(target: string): { binding: string; dylib: string } {
-  const arch = target === "bun-darwin-arm64" ? "arm64" : "x64";
+interface NativeFile {
+  source: string;
+  name: string;
+}
+
+function nativeFilesForTarget(target: string): NativeFile[] {
+  const platform = target.includes("-linux-") ? "linux" : "darwin";
+  const arch = target.endsWith("-arm64") ? "arm64" : "x64";
   const directory = resolve(
     root,
     "node_modules",
     "onnxruntime-node",
     "bin",
     "napi-v3",
-    "darwin",
+    platform,
     arch,
   );
-  const binding = resolve(directory, "onnxruntime_binding.node");
-  const dylib = resolve(directory, "libonnxruntime.1.21.0.dylib");
-  if (!existsSync(binding) || !existsSync(dylib)) {
+  const names = platform === "darwin"
+    ? ["onnxruntime_binding.node", "libonnxruntime.1.21.0.dylib"]
+    : [
+        "onnxruntime_binding.node",
+        "libonnxruntime.so.1",
+        "libonnxruntime.so.1.21.0",
+        ...(arch === "x64" ? ["libonnxruntime_providers_shared.so"] : []),
+      ];
+  const files = names.map((name) => ({ source: resolve(directory, name), name }));
+  if (files.some((file) => !existsSync(file.source))) {
     throw new Error(`Missing onnxruntime-node native files for ${target} in ${directory}`);
   }
-  return { binding, dylib };
+  return files;
 }
 
-function releaseEntrySource(binding: string, dylib: string, worker: string): string {
+function releaseEntrySource(nativeFiles: NativeFile[], worker: string): string {
+  const imports = nativeFiles
+    .map(
+      (file, index) =>
+        `import native${index} from ${JSON.stringify(file.source)} with { type: "file" };\n`,
+    )
+    .join("");
+  const writes = nativeFiles
+    .map(
+      (file, index) =>
+        `await Bun.write(join(nativeDir, ${JSON.stringify(file.name)}), Bun.file(native${index}));\n`,
+    )
+    .join("");
   return (
-    `import nativeBinding from ${JSON.stringify(binding)} with { type: "file" };\n` +
-    `import nativeDylib from ${JSON.stringify(dylib)} with { type: "file" };\n` +
+    imports +
     `import vectorWorker from ${JSON.stringify(worker)} with { type: "file" };\n` +
     `import { mkdtempSync, rmSync } from "node:fs";\n` +
     `import { tmpdir } from "node:os";\n` +
@@ -80,8 +105,7 @@ function releaseEntrySource(binding: string, dylib: string, worker: string): str
     `process.once("exit", () => {\n` +
     `  rmSync(nativeDir, { recursive: true, force: true });\n` +
     `});\n` +
-    `await Bun.write(join(nativeDir, "onnxruntime_binding.node"), Bun.file(nativeBinding));\n` +
-    `await Bun.write(join(nativeDir, "libonnxruntime.1.21.0.dylib"), Bun.file(nativeDylib));\n` +
+    writes +
     `await Bun.write(join(nativeDir, "vector-worker.js"), Bun.file(vectorWorker));\n` +
     `process.env.PHI_ONNX_NATIVE_DIR = nativeDir;\n` +
     `process.env.PHI_VECTOR_WORKER_URL = join(nativeDir, "vector-worker.js");\n` +
@@ -89,6 +113,12 @@ function releaseEntrySource(binding: string, dylib: string, worker: string): str
     `if (process.env.PHI_ONNX_PROBE === "1") {\n` +
     `  await import("onnxruntime-node");\n` +
     `  console.log("onnxruntime-node native binding loaded");\n` +
+    `  process.exit(0);\n` +
+    `}\n` +
+    `if (process.env.PHI_ACP_PROBE === "1") {\n` +
+    `  delete process.env.PHI_ACP_PROBE;\n` +
+    `  const { runAcpProbe } = await import(${JSON.stringify(acpProbePath)});\n` +
+    `  await runAcpProbe();\n` +
     `  process.exit(0);\n` +
     `}\n` +
     `const { runCli } = await import(${JSON.stringify(cliPath)});\n` +
@@ -132,9 +162,9 @@ if (!workerBundle.success || !existsSync(workerJs)) {
 console.log(`Building phi v${VERSION} for ${targets.length} target(s)...`);
 for (const { target, asset } of targets) {
   const outfile = resolve(outDir, asset);
-  const { binding, dylib } = nativeFilesForTarget(target);
+  const nativeFiles = nativeFilesForTarget(target);
   const entrypoint = resolve(outDir, `.entry-${target}.ts`);
-  writeFileSync(entrypoint, releaseEntrySource(binding, dylib, workerJs));
+  writeFileSync(entrypoint, releaseEntrySource(nativeFiles, workerJs));
   let result: Awaited<ReturnType<typeof Bun.build>>;
   try {
     result = await Bun.build({

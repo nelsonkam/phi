@@ -1,0 +1,17 @@
+schemaVersion: "2"
+kind: mixin
+name: phi-codex
+version: 0.1.0
+displayName: Phi Codex network policy
+description: Codex service egress for Phi
+requires:
+  agent: phi
+
+permissions:
+  network:
+    allow:
+      - api.openai.com
+      - auth.openai.com
+      - openai.com
+      - chatgpt.com
+      - www.chatgpt.com

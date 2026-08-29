@@ -29,6 +29,7 @@ function unusedDependencies(
   return {
     serve: async () => 0,
     update: async () => 0,
+    sandbox: async () => 0,
     ...overrides,
   };
 }
@@ -143,6 +144,21 @@ describe("runCli", () => {
 
     expect(await runCli(["update"], capture.output, dependencies)).toBe(1);
     expect(capture.stderr()).toBe("phi update failed: release unavailable\n");
+  });
+
+  test("forwards sandbox subcommands and reports failures", async () => {
+    const capture = captureOutput();
+    let received: readonly string[] | undefined;
+    const dependencies = unusedDependencies({
+      sandbox: async (_output, args) => {
+        received = args;
+        throw new Error("sbx is too old");
+      },
+    });
+
+    expect(await runCli(["sandbox", "status", "phi"], capture.output, dependencies)).toBe(1);
+    expect(received).toEqual(["status", "phi"]);
+    expect(capture.stderr()).toBe("phi sandbox failed: sbx is too old\n");
   });
 
   test("rejects an unknown command", async () => {

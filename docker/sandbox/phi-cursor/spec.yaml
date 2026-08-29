@@ -1,0 +1,16 @@
+schemaVersion: "2"
+kind: mixin
+name: phi-cursor
+version: 0.1.0
+displayName: Phi Cursor network policy
+description: Cursor service egress for Phi
+requires:
+  agent: phi
+
+permissions:
+  network:
+    allow:
+      - api2.cursor.sh
+      - api3.cursor.sh
+      - repo42.cursor.sh
+      - cursor.com

@@ -1,6 +1,10 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dbPath, phiRoot, workspaceRoot } from "@/core/paths";
+import {
+  ensureChannelWorkspace,
+  reconcileChannelWorkspaces,
+} from "@/core/workspace";
 import { migrate } from "@/db/migrate";
 import { messageContainsFileLink } from "@/shared/file-link-match";
 import type {
@@ -111,6 +115,7 @@ export class PhiStore {
     this.db.run("PRAGMA busy_timeout = 5000;");
     migrate(this.db);
     this.seedDefaults();
+    this.reconcileChannelFolders();
   }
 
   get rootPath(): string {
@@ -194,6 +199,14 @@ export class PhiStore {
       .map(channelFromRow);
   }
 
+  reconcileChannelFolders(): void {
+    const workspace = this.defaultWorkspace();
+    reconcileChannelWorkspaces(
+      workspace.rootPath,
+      this.listChannels(workspace.id).map((channel) => channel.name),
+    );
+  }
+
   getChannel(channelId: string): Channel | null {
     const row = this.db
       .query<ChannelRow, [string]>("SELECT * FROM channels WHERE id = ?")
@@ -203,9 +216,16 @@ export class PhiStore {
 
   createChannel(workspaceId: string, input: CreateChannelInput): Channel {
     const workspace = this.db
-      .query<{ id: string }, [string]>("SELECT id FROM workspaces WHERE id = ?")
+      .query<{ id: string; root_path: string }, [string]>(
+        "SELECT id, root_path FROM workspaces WHERE id = ?",
+      )
       .get(workspaceId);
     if (!workspace) throw new Error(`no workspace "${workspaceId}"`);
+
+    // Filesystem first: a successful channel row always has durable context.
+    // If the insert later fails, the orphan folder is harmless and a retry
+    // preserves it.
+    ensureChannelWorkspace(workspace.root_path, input.name);
 
     const id = newId("ch");
     const now = new Date().toISOString();

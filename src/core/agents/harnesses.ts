@@ -1,10 +1,10 @@
 import type { HarnessStatus } from "@/shared/types";
+import { isCompiledBinary } from "@/version";
 
 // Harnesses phi knows how to launch over ACP. Launch commands land with the
 // runtime slice; until then the catalog drives validation and detection.
 export const KNOWN_HARNESSES = [
   "claude-code",
-  "gemini",
   "codex",
   "cursor",
 ] as const;
@@ -32,21 +32,15 @@ const CATALOG: HarnessCatalogEntry[] = [
     loginHint: "claude /login",
     // The adapter is a phi dependency; resolve its entry file directly so we
     // run our pinned version, never a same-named package fetched from npm.
-    acpCommand: () => [
-      process.execPath,
-      Bun.resolveSync(
-        "@agentclientprotocol/claude-agent-acp/dist/index.js",
-        import.meta.dir,
-      ),
-    ],
-  },
-  {
-    id: "gemini",
-    name: "Gemini CLI",
-    cli: "gemini",
-    installHint: "npm install -g @google/gemini-cli",
-    loginHint: "gemini",
-    acpCommand: () => ["gemini", "--experimental-acp"],
+    acpCommand: () => isCompiledBinary()
+      ? [process.execPath, "__acp-claude"]
+      : [
+          process.execPath,
+          Bun.resolveSync(
+            "@agentclientprotocol/claude-agent-acp/dist/index.js",
+            import.meta.dir,
+          ),
+        ],
   },
   {
     id: "codex",
@@ -54,13 +48,15 @@ const CATALOG: HarnessCatalogEntry[] = [
     cli: "codex",
     installHint: "npm install -g @openai/codex",
     loginHint: "codex login",
-    acpCommand: () => [
-      process.execPath,
-      Bun.resolveSync(
-        "@agentclientprotocol/codex-acp/dist/index.js",
-        import.meta.dir,
-      ),
-    ],
+    acpCommand: () => isCompiledBinary()
+      ? [process.execPath, "__acp-codex"]
+      : [
+          process.execPath,
+          Bun.resolveSync(
+            "@agentclientprotocol/codex-acp/dist/index.js",
+            import.meta.dir,
+          ),
+        ],
   },
   {
     id: "cursor",
@@ -99,8 +95,31 @@ export function acpClientCapabilities(harnessId: string) {
 
 // Availability is a live fact about the machine, so it is probed on demand
 // and never stored.
-export function detectHarnesses(): HarnessStatus[] {
-  return CATALOG.map((entry) => ({
+export function configuredHarnesses(
+  env: NodeJS.ProcessEnv = process.env,
+): HarnessId[] {
+  const configured = env.PHI_HARNESSES;
+  if (configured === undefined) return [...KNOWN_HARNESSES];
+  const ids = [
+    ...new Set(configured.split(",").map((id) => id.trim()).filter(Boolean)),
+  ];
+  const unknown = ids.filter(
+    (id) => !(KNOWN_HARNESSES as readonly string[]).includes(id),
+  );
+  if (ids.length === 0 || unknown.length > 0) {
+    throw new Error(
+      `PHI_HARNESSES must select one or more of ${KNOWN_HARNESSES.join(", ")}`
+        + (unknown.length > 0 ? `; unknown: ${unknown.join(", ")}` : ""),
+    );
+  }
+  return ids as HarnessId[];
+}
+
+export function detectHarnesses(
+  env: NodeJS.ProcessEnv = process.env,
+): HarnessStatus[] {
+  const selected = new Set(configuredHarnesses(env));
+  return CATALOG.filter((entry) => selected.has(entry.id)).map((entry) => ({
     id: entry.id,
     name: entry.name,
     installed: Bun.which(entry.cli) !== null,

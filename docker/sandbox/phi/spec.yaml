@@ -1,0 +1,127 @@
+schemaVersion: "2"
+kind: sandbox
+name: phi
+version: 0.1.0
+displayName: Phi
+description: Persistent multi-agent workspace coordinator and web UI
+sourceURL: https://github.com/nelsonkam/phi
+licenses:
+  - MIT
+locked:
+  - sandbox.image
+
+sandbox:
+  image: docker.io/nelsonkam/phi-sandbox:0.1.0
+  entrypoint:
+    - /usr/local/bin/phi-sandbox-entrypoint
+  resources:
+    cpu: 4
+    memory: 8g
+
+environment:
+  variables:
+    AGENT_CLI_CREDENTIAL_STORE: memory
+    BROWSER: xdg-open
+    CODEX_HOME: /home/agent/.codex
+    GIT_TERMINAL_PROMPT: "0"
+    PHI_ROOT: /home/agent/.phi
+    PHI_HOST: 0.0.0.0
+    PHI_PORT: "3141"
+    PHI_IN_SANDBOX: "1"
+
+credentials:
+  - service: anthropic
+    required: false
+    apiKey:
+      name: ANTHROPIC_API_KEY
+      proxyManaged: true
+      inject:
+        - domain: api.anthropic.com
+          header: x-api-key
+          format: "%s"
+    oauth:
+      tokenEndpoint:
+        host: platform.claude.com
+        path: /v1/oauth/token
+      resourceHosts:
+        - api.anthropic.com
+      sentinels:
+        accessToken: sk-ant-oat01-proxy-managed
+        refreshToken: sk-ant-ort01-proxy-managed
+      credentialFile:
+        path: ~/.claude/.credentials.json
+        template: >-
+          {"claudeAiOauth":{"accessToken":"{{.AccessToken}}","refreshToken":"{{.RefreshToken}}","expiresAt":{{.ExpiresAt}},"scopes":{{.ScopesJSON}}}{{if .PrimaryApiKey}},"primaryApiKey":"{{.PrimaryApiKey}}"{{end}}}
+  - service: openai
+    required: false
+    apiKey:
+      name: OPENAI_API_KEY
+      proxyManaged: true
+      inject:
+        - domain: api.openai.com
+          header: Authorization
+          format: Bearer %s
+        - domain: openai.com
+          header: Authorization
+          format: Bearer %s
+    oauth:
+      tokenEndpoint:
+        host: auth.openai.com
+        path: /oauth/token
+      resourceHosts:
+        - chatgpt.com
+      sentinels:
+        accessToken: oai-oat01-proxy-managed
+        refreshToken: oai-ort01-proxy-managed
+  - service: cursor
+    required: false
+    apiKey:
+      name: CURSOR_API_KEY
+      proxyManaged: true
+      inject:
+        - domain: api2.cursor.sh
+          scheme: bearer
+        - domain: api3.cursor.sh
+          scheme: bearer
+        - domain: repo42.cursor.sh
+          scheme: bearer
+        - domain: cursor.com
+          scheme: bearer
+    oauth:
+      tokenEndpoint:
+        host: api2.cursor.sh
+        path: /auth/poll
+      resourceHosts:
+        - api2.cursor.sh
+        - api3.cursor.sh
+        - repo42.cursor.sh
+        - cursor.com
+      sentinels:
+        accessToken: cursor-oat-proxy-managed
+        refreshToken: cursor-ort-proxy-managed
+      responseFields:
+        accessToken: accessToken
+        refreshToken: refreshToken
+
+ports:
+  - container: 3141
+    protocol: tcp
+    name: phi-web
+
+volumes:
+  - path: /home/agent/work
+    size: 50g
+    mode: "0755"
+
+setup:
+  files:
+    - path: /home/agent/.cursor/cli-config.json
+      content: '{"network":{"useHttp1ForAgent":true}}'
+      onlyIfMissing: true
+  install:
+    - command: "chown 1000:1000 /home/agent/work && install -d -o 1000 -g 1000 /home/agent/work/repos /home/agent/work/worktrees"
+      user: "0"
+      description: Prepare Phi repository and worktree storage
+    - command: "HOME=/home/agent CODEX_HOME=/home/agent/.codex /usr/local/bin/configure-sandbox-auth all"
+      user: "1000"
+      description: Configure proxy-managed Claude and Codex authentication

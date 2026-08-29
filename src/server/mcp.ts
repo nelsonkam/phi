@@ -16,11 +16,13 @@ import type { AgentHarnessCapabilityList } from "@/core/agents/capabilities";
 import type { MessageSearchApi } from "@/core/search/message-search";
 import type { PhiStore } from "@/core/store/store";
 import type { McpTokenRegistry } from "@/server/mcp-token-registry";
-import type { Message } from "@/shared/types";
+import { attachmentsFromMetadata, resolveUploadFile } from "@/server/uploads";
+import type { Attachment, Message } from "@/shared/types";
 
 export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Hand off to peer agents only through the optional to list; message text never routes, and a message that leads with an @agent-handle without to is rejected so an intended handoff cannot silently reach no one. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report; for durable or reviewable material, a doc under the channel plus a linked summary beats a long report in chat. Structure (bullets, headers) is earned by enumerable content, never the default. Omit thread_id to stay in the current thread. On a doc-comment turn, do not post a follow-up or recap into the parent; set thread_id to the comment's parent only if the user asked you to post in the sharing conversation, or a decision must be recorded there. Other thread ids are rejected.`;
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across other threads in your phi workspace using exact phrase/keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace and current thread come from your session; do not ask the user for a thread or channel ID. You may optionally include the current thread, narrow results using a channel name, or filter by author.`;
 export const READ_THREAD_DESCRIPTION = `Read messages in a thread by id. Use this to pull a parent conversation linked from a doc-comment turn. The id must be your current thread or, when this turn is a comment, that comment's parent thread.`;
+export const READ_ATTACHMENT_DESCRIPTION = `Read a text attachment referenced by a message in your current thread or, for a doc-comment turn, its parent thread. Use the attachment id shown in the prompt or returned by read_thread. Binary attachments are not readable through this tool, and large text files are truncated to a bounded response.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
@@ -184,6 +186,22 @@ export function createMcpHandler(
               },
             },
             required: ["thread_id"],
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "read_attachment",
+          description: READ_ATTACHMENT_DESCRIPTION,
+          inputSchema: {
+            type: "object",
+            properties: {
+              attachment_id: {
+                type: "string",
+                pattern: "^att_[a-f0-9]{32}$",
+                description: "Server-owned attachment id",
+              },
+            },
+            required: ["attachment_id"],
             additionalProperties: false,
           },
         },
@@ -583,6 +601,54 @@ export function createMcpHandler(
           },
         );
       }
+      if (request.params.name === "read_attachment") {
+        const rawId = request.params.arguments?.attachment_id;
+        const attachmentId = typeof rawId === "string" ? rawId.trim() : "";
+        if (!attachmentId) return toolError("attachment_id is required");
+        const attachment = allowedAttachment(
+          store,
+          caller.threadId,
+          attachmentId,
+        );
+        if (!attachment) {
+          return toolError("attachment is not available in this thread");
+        }
+        if (!isTextAttachment(attachment)) {
+          return toolError("attachment is not a supported text file");
+        }
+        return tokens.runOnce(
+          token,
+          `read_attachment:${attachmentId}`,
+          extra.requestId,
+          async () => {
+            const filePath = resolveUploadFile(store.rootPath, attachmentId);
+            if (!filePath) return toolError("attachment file is unavailable");
+            const bytes = await Bun.file(filePath)
+              .slice(0, READ_ATTACHMENT_MAX_BYTES + 1)
+              .bytes();
+            const truncated = bytes.byteLength > READ_ATTACHMENT_MAX_BYTES;
+            const body = truncated
+              ? bytes.subarray(0, READ_ATTACHMENT_MAX_BYTES)
+              : bytes;
+            let content: string;
+            try {
+              content = new TextDecoder("utf-8", { fatal: true }).decode(body, {
+                stream: truncated,
+              });
+            } catch {
+              return toolError("attachment is not valid UTF-8 text");
+            }
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({ attachment, content, truncated }),
+                },
+              ],
+            };
+          },
+        );
+      }
       if (request.params.name !== "send_message") {
         return {
           isError: true,
@@ -737,6 +803,7 @@ function toolError(message: string) {
 }
 
 const READ_THREAD_MAX = 50;
+const READ_ATTACHMENT_MAX_BYTES = 256 * 1024;
 
 function allowedReadThreadId(
   store: PhiStore,
@@ -781,6 +848,7 @@ function resolveSendThreadId(
 }
 
 function serializeReadMessage(message: Message) {
+  const attachments = attachmentsFromMetadata(message.metadata);
   return {
     id: message.id,
     author: message.author,
@@ -789,7 +857,46 @@ function serializeReadMessage(message: Message) {
     ...(typeof message.metadata.agent === "string"
       ? { agent: message.metadata.agent }
       : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
   };
+}
+
+function allowedAttachment(
+  store: PhiStore,
+  callerThreadId: string,
+  attachmentId: string,
+): Attachment | null {
+  const threadIds = [callerThreadId];
+  const caller = store.getThread(callerThreadId);
+  const parent =
+    caller?.kind === "doc_comment"
+      ? store.getDocCommentAnchor(callerThreadId)?.parentThreadId
+      : null;
+  if (parent) threadIds.push(parent);
+  const referenced = threadIds.some((threadId) =>
+    store
+      .listMessages(threadId)
+      .some((message) =>
+        attachmentsFromMetadata(message.metadata).some(
+          (attachment) => attachment.id === attachmentId,
+        ),
+      ),
+  );
+  return referenced ? store.getAttachment(attachmentId) : null;
+}
+
+function isTextAttachment(attachment: Attachment): boolean {
+  const type = attachment.contentType.split(";")[0]!.trim().toLowerCase();
+  return (
+    type.startsWith("text/") ||
+    type === "application/json" ||
+    type.endsWith("+json") ||
+    type === "application/xml" ||
+    type.endsWith("+xml") ||
+    type === "application/yaml" ||
+    type === "application/x-yaml" ||
+    type === "application/toml"
+  );
 }
 
 function canonicalExternalFolders(

@@ -47,11 +47,21 @@ You are the architect.
 
 test("applies defaults for optional fields", async () => {
   const root = tempWorkspace();
-  writeAgent(root, "minimal.md", "---\nharness: gemini\n---\nBody.\n");
+  writeAgent(root, "minimal.md", "---\nharness: codex\n---\nBody.\n");
 
   const { agents } = await loadAgents(root);
   expect(agents[0]!.description).toBeNull();
   expect(agents[0]!.model).toBeNull();
+});
+
+test("keeps a stale Gemini definition loadable with a migration warning", async () => {
+  const root = tempWorkspace();
+  writeAgent(root, "legacy.md", "---\nharness: gemini\n---\nBody.\n");
+
+  const { agents, errors } = await loadAgents(root);
+  expect(errors).toEqual([]);
+  expect(agents[0]!.harness).toBe("gemini");
+  expect(agents[0]!.warnings).toEqual(['unknown harness "gemini"']);
 });
 
 test("rejects files without a harness or without frontmatter", async () => {

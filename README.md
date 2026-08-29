@@ -5,9 +5,9 @@ delegated workers in a shared workspace.
 
 ## Install
 
-Each release publishes standalone macOS binaries — no Bun installation
-required. [scripts/install.sh](./scripts/install.sh) picks the binary for this
-Mac, installs it to `~/.local/bin/phi`, and tells you if that directory is not
+Each release publishes standalone macOS and Linux binaries — no Bun installation
+required. [scripts/install.sh](./scripts/install.sh) picks the binary for the
+host, installs it to `~/.local/bin/phi`, and tells you if that directory is not
 on your `PATH`:
 
 ```bash
@@ -21,7 +21,7 @@ login`); the installer does not send `GITHUB_TOKEN`. Piping a script into a
 shell runs it unread — `curl -fsSL …` on its own prints exactly what would
 run.
 
-Otherwise, download `phi-darwin-arm64` or `phi-darwin-x64` from GitHub
+Otherwise, download the matching `phi-<platform>-<architecture>` from GitHub
 Releases, make it executable, and run it.
 
 Start the server and UI:
@@ -30,8 +30,32 @@ Start the server and UI:
 phi serve
 ```
 
-`phi` with no command does the same. It listens on http://localhost:3141
-(`PHI_PORT` overrides).
+`phi` with no command does the same. It listens on http://127.0.0.1:3141.
+`PHI_HOST` and `PHI_PORT` override the bind address and port. Phi previously
+relied on Bun's wildcard bind default; the explicit loopback default is a
+security hardening change for native installations that were reachable from
+the local network.
+
+## Docker Sandbox
+
+Phi can run as a persistent computer inside Docker Sandboxes. Install `sbx`
+v0.42.0-rc1 or newer, choose API-key or subscription authentication for the
+providers you use, then create the version-matched Phi kit. For example, use a
+ChatGPT subscription for Codex and an API key for Claude:
+
+```bash
+sbx secret set openai --oauth
+sbx secret set anthropic
+phi sandbox create --name phi
+```
+
+Claude and Cursor subscription logins are completed from their CLIs inside the
+sandbox after creation. Phi never reads provider secrets or OAuth tokens;
+Docker's host-side credential proxy owns them. `phi sandbox open`, `status`,
+`stop`, and `start` manage the sandbox;
+`phi sandbox remove phi --confirm` permanently deletes the VM, Phi database,
+repositories, worktrees, and volumes. Repeat `--kit <mixin-ref>` on create to
+add inspected custom feature kits. See [docs/docker-sandbox.md](./docs/docker-sandbox.md).
 
 ## Source checkout
 
@@ -45,7 +69,7 @@ bun run dev
 
 ## Standalone installations
 
-Compiled macOS binaries update themselves from the latest GitHub release:
+Compiled macOS and Linux binaries update themselves from the latest GitHub release:
 
 ```bash
 phi update
@@ -61,11 +85,12 @@ does not: a private install source needs `gh auth login`.
 ## Releasing
 
 Pushing a `v*` tag runs the release workflow: it typechecks, tests, compiles
-and signs standalone macOS arm64/x64 binaries, and publishes them to a GitHub
-release. Tags containing `-` are marked prerelease so they stay off
+standalone macOS and Linux arm64/x64 binaries, probes their native ONNX and ACP
+runtime paths, and publishes them to a GitHub release. macOS binaries are
+ad-hoc signed. Tags containing `-` are marked prerelease so they stay off
 `releases/latest`. Build one or both artifacts locally with:
 
 ```bash
-bun run build:release -- bun-darwin-arm64 bun-darwin-x64
+bun run build:release -- bun-darwin-arm64 bun-darwin-x64 bun-linux-arm64 bun-linux-x64
 PHI_ONNX_PROBE=1 ./dist/release/phi-darwin-arm64
 ```

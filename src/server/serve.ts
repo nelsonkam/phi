@@ -41,6 +41,17 @@ import { createMessageSearch } from "@/core/search/message-search";
 import { healthPayload } from "@/server/health";
 
 const DEFAULT_PORT = 3141;
+const DEFAULT_HOST = "127.0.0.1";
+
+export function serverAddress(env: NodeJS.ProcessEnv = process.env): {
+  host: string;
+  port: number;
+} {
+  return {
+    host: env.PHI_HOST?.trim() || DEFAULT_HOST,
+    port: Number(env.PHI_PORT ?? DEFAULT_PORT),
+  };
+}
 
 export async function startServer(): Promise<void> {
   const store = new PhiStore();
@@ -48,7 +59,7 @@ export async function startServer(): Promise<void> {
   ensureWorkspace(workspace.rootPath);
   const checkpoints = new CheckpointService(store, workspace.rootPath);
   await checkpoints.initialize();
-  const port = Number(process.env.PHI_PORT ?? DEFAULT_PORT);
+  const { host, port } = serverAddress();
   const mcpTokens = new McpTokenRegistry();
   const harnessCapabilities = new HarnessCapabilityService(workspace.rootPath);
   const messageSearch = createMessageSearch(store, store.rootPath);
@@ -81,6 +92,7 @@ export async function startServer(): Promise<void> {
 
   let shuttingDown = false;
   const server = Bun.serve({
+    hostname: host,
     port,
     development: process.env.NODE_ENV !== "production" && {
       hmr: true,
@@ -554,7 +566,7 @@ export async function startServer(): Promise<void> {
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
 
-  console.log(`phi serving on http://localhost:${server.port}`);
+  console.log(`phi serving on http://${host}:${server.port}`);
 }
 
 async function parseUserPost(

@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+selection=${PHI_HARNESSES:-}
+[ -n "$selection" ] || {
+  echo "PHI_HARNESSES must not be empty" >&2
+  exit 2
+}
+
+has_harness() {
+  case ",$selection," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+old_ifs=$IFS
+IFS=,
+set -- $selection
+IFS=$old_ifs
+for harness in "$@"; do
+  case "$harness" in
+    claude-code|codex|cursor) ;;
+    *) echo "unknown sandbox harness: $harness" >&2; exit 2 ;;
+  esac
+done
+
+if has_harness claude-code; then
+  npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+fi
+
+if has_harness codex; then
+  npm install --global --no-audit --no-fund "@openai/codex@${CODEX_VERSION}"
+fi
+
+if has_harness cursor; then
+  case "$TARGETARCH" in
+    amd64) cursor_arch=x64 ;;
+    arm64) cursor_arch=arm64 ;;
+    *) echo "unsupported TARGETARCH for Cursor: $TARGETARCH" >&2; exit 2 ;;
+  esac
+  cursor_dir="/usr/local/lib/cursor-agent/${CURSOR_VERSION}"
+  install -d "$cursor_dir"
+  curl -fsSL \
+    "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/${cursor_arch}/agent-cli-package.tar.gz" \
+    | tar --strip-components=1 -xzf - -C "$cursor_dir"
+  ln -s "$cursor_dir/cursor-agent" /usr/local/bin/cursor-agent.real
+  install -m 0755 /usr/local/libexec/phi/cursor-agent-wrapper /usr/local/bin/cursor-agent
+fi
+
+install -d /etc/phi
+printf '%s\n' "$selection" > /etc/phi/harnesses

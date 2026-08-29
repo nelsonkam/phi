@@ -343,7 +343,7 @@ export async function attachmentPromptParts(
     const extra = tooBig ? " (too large to embed in the prompt)" : "";
     return `- ${item.filename} (${item.contentType}, ${item.byteSize} bytes) attachment:${item.id}${extra}`;
   });
-  const note = `The user attached ${attachments.length === 1 ? "a file" : `${attachments.length} files`}. These are server-owned attachments, not workspace paths — do not treat a client filesystem path as a server path.\n${lines.join("\n")}`;
+  const note = `The user attached ${attachments.length === 1 ? "a file" : `${attachments.length} files`}. These are server-owned attachments, not workspace paths — do not treat a client filesystem path as a server path. Use the read_attachment tool with the attachment id to read supported text files.\n${lines.join("\n")}`;
   const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
   if (!canSendImages) return { note, images };
   for (const item of attachments) {

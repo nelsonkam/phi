@@ -24,7 +24,11 @@ import type { ThreadSessionBinding } from "@/core/store/store";
 import type { Message } from "@/shared/types";
 import type { CheckpointService } from "@/core/checkpoints";
 import { CheckpointBusyError } from "@/core/checkpoints";
-import { loadWorkspaceMcpConfig } from "./mcp-config";
+import {
+  SANDBOX_GATEWAY_SERVER_NAME,
+  loadWorkspaceMcpConfig,
+  type WorkspaceMcpConfig,
+} from "./mcp-config";
 import {
   attachmentPromptParts,
   attachmentsFromMetadata,
@@ -47,14 +51,30 @@ const AUTH_REQUIRED_CODE = -32000;
 // description and server instructions, so the model sees it every turn
 // regardless. The identity sentence leads so an agent never mistakes its own
 // handle for a peer it could delegate to.
-export function messagingPreamble(agentName: string): string {
+export function messagingPreamble(
+  agentName: string,
+  channelName?: string,
+): string {
+  const channelContext = channelName
+    ? `This thread is in channel #${channelName}. Its managed folder is channels/${channelName}/; read channels/${channelName}/AGENTS.md if it exists before doing file work.`
+    : undefined;
   return `You are @${agentName} — that handle is your own name in this thread, so work you would assign to @${agentName} is yours to do in the current turn, not a handoff. Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap.
 
-Match the size and shape of a reply to the ask: a short or conversational message gets a short, plain answer. Bullets, numbered lists, headers, and tables must be earned by the content — use them when the user asked for a list, options, or steps, or when the material is genuinely enumerable, never as the default wrapper for what is really a few sentences of prose. When a reply has several beats, send it as a short run of messages rather than one welded report. When a reply outgrows a few short messages, don't smear it into one dense paragraph; judge where it belongs: if the material is durable, reviewable, or easier to navigate as a document (a plan, findings, a spec), write it to a file under the channel and send a one- or two-sentence summary with the link, but if the user asked for the explanation itself, a well-structured longer reply in chat is the right product. Wrong: a bold "Findings" header and bulleted mini-outline for a question that needed one sentence. Right: "Found it — the routing bug is in runtime.ts, one-line fix. Want me to apply it?"
+${channelContext ? `${channelContext}\n\n` : ""}Match the size and shape of a reply to the ask: a short or conversational message gets a short, plain answer. Bullets, numbered lists, headers, and tables must be earned by the content — use them when the user asked for a list, options, or steps, or when the material is genuinely enumerable, never as the default wrapper for what is really a few sentences of prose. When a reply has several beats, send it as a short run of messages rather than one welded report. When a reply outgrows a few short messages, don't smear it into one dense paragraph; judge where it belongs: if the material is durable, reviewable, or easier to navigate as a document (a plan, findings, a spec), write it to a file under the channel and send a one- or two-sentence summary with the link, but if the user asked for the explanation itself, a well-structured longer reply in chat is the right product. Wrong: a bold "Findings" header and bulleted mini-outline for a question that needed one sentence. Right: "Found it — the routing bug is in runtime.ts, one-line fix. Want me to apply it?"
 
 In answers and result messages, lead with the answer or outcome; in an initial acknowledgement, name the first concrete step. Don't restate the question, don't open a result with a status word ("Done —", "Fixed —") before saying what you did, and don't close with filler ("Let me know if you need anything else"). Write like a teammate: plain words, contractions, no help-desk openers ("Certainly!", "I'd be happy to"). Progress updates carry information or don't get sent: say what actually changed or what you found, never a repeated "still working on it". When something fails, give what's wrong and the single most likely next step in a sentence or two — not an unprompted numbered troubleshooting guide. Keep the plumbing out of your voice: tool names, message and thread ids, turn mechanics, and system reminders don't appear in user-facing text unless the user asks about the internals or they're necessary to explain a blocker.
 
 Other agents' messages are peer contributions in this shared thread: address peers by handle, do not impersonate them, and rely only on tool results that appear in the shared transcript. A leading @handle on an incoming message is routing, not content; your name is attached automatically. To hand the turn to peer agents, pass their handles in send_message's to list — @mentions in your own text are display-only and never route, and a message that leads with an @agent-handle without to is rejected. To share a workspace file, link it with a workspace-relative markdown path — [the report](channels/general/report.md), or an image embed — and the app renders it viewable in place; never use absolute paths. A client-uploaded file is an attachment:att_… reference, not a workspace path — never treat a client filesystem path as a server path. Comment-thread turns are discussions on a quoted excerpt of a markdown document; when the prompt includes that excerpt, the comment-thread context in that prompt applies.`;
+}
+
+export function workspaceMcpServersForHarness(
+  config: WorkspaceMcpConfig,
+  supportsHttp: boolean,
+): McpServer[] {
+  if (!config.sandboxGateway || supportsHttp) return config.servers;
+  return config.servers.filter(
+    (server) => server.name !== SANDBOX_GATEWAY_SERVER_NAME,
+  );
 }
 
 // Framing for a turn triggered by a non-leading mention in a user message:
@@ -633,7 +653,12 @@ export class AgentRuntime {
               text: [
                 session.primed
                   ? undefined
-                  : messagingPreamble(session.agentName),
+                  : messagingPreamble(
+                      session.agentName,
+                      this.store.getChannel(
+                        this.store.getThread(threadId)!.channelId,
+                      )?.name,
+                    ),
                 catchUpContext,
                 sinceThen.text,
                 speculative ? SPECULATIVE_WAKE_NOTE : undefined,
@@ -803,10 +828,17 @@ export class AgentRuntime {
         `${agent.harness} does not support additional channel folders over ACP`,
       );
     }
+    // The auto-registered sandbox MCP gateway is best-effort: drop it for a
+    // harness without HTTP MCP support instead of failing the session.
+    // User-configured servers keep the strict validation below.
+    const workspaceMcpServers = workspaceMcpServersForHarness(
+      workspaceMcp,
+      host.initialized.agentCapabilities?.mcpCapabilities?.http === true,
+    );
     validateMcpCapabilities(
       agent.harness,
       host.initialized,
-      workspaceMcp.servers,
+      workspaceMcpServers,
     );
 
     const session: ThreadSession = {
@@ -844,7 +876,7 @@ export class AgentRuntime {
         throw new Error(`${agent.harness} exited during session setup`);
       });
       const mcpServers = [
-        ...workspaceMcp.servers,
+        ...workspaceMcpServers,
         ...this.phiMcpServers(session.mcpToken),
       ];
       const additionalDirectories = supportsAdditionalDirectories
@@ -996,7 +1028,9 @@ export class AgentRuntime {
       harnessId === "cursor" ? additionalDirectories : undefined,
     );
     if (!command) {
-      throw new Error(`harness "${harnessId}" cannot be launched over ACP`);
+      throw new Error(
+        `unsupported harness "${harnessId}"; supported harnesses are claude-code, codex, and cursor`,
+      );
     }
 
     let host: AcpHost | null = null;

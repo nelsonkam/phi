@@ -1,0 +1,59 @@
+FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae3212a0310b2e5a0349c54e29249e45e919
+
+ARG TARGETARCH
+ARG PHI_VERSION=0.1.0
+ARG PHI_RELEASE_REPO=nelsonkam/phi
+ARG PHI_HARNESSES=claude-code,codex,cursor
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG CODEX_VERSION=0.148.0
+ARG CURSOR_VERSION=2026.08.25-3e8eec8
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chmod=755 scripts/install-sandbox-harnesses /usr/local/bin/install-sandbox-harnesses
+COPY --chmod=755 scripts/cursor-agent-wrapper /usr/local/libexec/phi/cursor-agent-wrapper
+RUN PHI_HARNESSES="$PHI_HARNESSES" \
+    CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
+    CODEX_VERSION="$CODEX_VERSION" \
+    CURSOR_VERSION="$CURSOR_VERSION" \
+    TARGETARCH="$TARGETARCH" \
+    /usr/local/bin/install-sandbox-harnesses
+
+RUN case "$TARGETARCH" in \
+      amd64) phi_arch=x64 ;; \
+      arm64) phi_arch=arm64 ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 2 ;; \
+    esac \
+    && phi_asset="phi-linux-${phi_arch}" \
+    && curl -fsSL \
+      "https://github.com/${PHI_RELEASE_REPO}/releases/download/v${PHI_VERSION}/${phi_asset}" \
+      -o "/tmp/${phi_asset}" \
+    && curl -fsSL \
+      "https://github.com/${PHI_RELEASE_REPO}/releases/download/v${PHI_VERSION}/${phi_asset}.sha256" \
+      -o "/tmp/${phi_asset}.sha256" \
+    && cd /tmp \
+    && sha256sum -c "${phi_asset}.sha256" \
+    && install -m 0755 "$phi_asset" /usr/local/bin/phi \
+    && rm -f "$phi_asset" "${phi_asset}.sha256"
+
+RUN PHI_ACP_PROBE=1 PHI_HARNESSES="$PHI_HARNESSES" /usr/local/bin/phi
+
+COPY --chmod=755 scripts/phi-sandbox-entrypoint /usr/local/bin/phi-sandbox-entrypoint
+COPY --chmod=755 scripts/configure-sandbox-auth.mjs /usr/local/bin/configure-sandbox-auth
+
+RUN install -d -o 1000 -g 1000 /home/agent/.phi /home/agent/.phi/workspace
+
+ENV PHI_ROOT=/home/agent/.phi \
+    PHI_HOST=0.0.0.0 \
+    PHI_PORT=3141 \
+    PHI_IN_SANDBOX=1 \
+    PHI_HARNESSES=${PHI_HARNESSES}
+
+USER agent
+WORKDIR /home/agent/.phi/workspace
+
+ENTRYPOINT ["/usr/local/bin/phi-sandbox-entrypoint"]

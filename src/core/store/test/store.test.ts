@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { copyFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "@/testing/tmpdir";
 import { PhiStore } from "../store";
@@ -21,6 +21,9 @@ test("migrates a fresh database and seeds defaults", () => {
 
   const channels = store.listChannels(workspace.id);
   expect(channels.map((c) => c.name)).toEqual(["general"]);
+  const guide = join(workspace.rootPath, "channels", "general", "AGENTS.md");
+  expect(existsSync(guide)).toBe(true);
+  expect(readFileSync(guide, "utf8")).toContain("Channel context");
   store.close();
 });
 
@@ -94,7 +97,28 @@ test("creates channels with ordered attached folders", () => {
     channel,
   );
   expect(changes).toEqual(["channel.updated"]);
+  expect(
+    existsSync(join(workspace.rootPath, "channels", "product-work", "AGENTS.md")),
+  ).toBe(true);
   store.close();
+});
+
+test("reopening the store reconciles a missing channel folder", () => {
+  const root = tempDir();
+  const store = new PhiStore(root);
+  const workspace = store.defaultWorkspace();
+  store.createChannel(workspace.id, { name: "repaired" });
+  store.close();
+  rmSync(join(workspace.rootPath, "channels", "repaired"), {
+    recursive: true,
+    force: true,
+  });
+
+  const reopened = new PhiStore(root);
+  expect(
+    existsSync(join(workspace.rootPath, "channels", "repaired", "AGENTS.md")),
+  ).toBe(true);
+  reopened.close();
 });
 
 test("appendMessage allocates monotonic seqs and bumps the thread", () => {

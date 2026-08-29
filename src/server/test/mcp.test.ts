@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { PhiStore } from "@/core/store/store";
+import { uploadsPath } from "@/core/paths";
 import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { tempDir } from "@/testing/tmpdir";
@@ -285,6 +287,25 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
   };
 }
 
+function attachFile(
+  store: PhiStore,
+  id: string,
+  filename: string,
+  contentType: string,
+  body: string | Uint8Array,
+) {
+  const bytes = typeof body === "string" ? Buffer.from(body) : body;
+  mkdirSync(uploadsPath(store.rootPath), { recursive: true });
+  writeFileSync(join(uploadsPath(store.rootPath), id), bytes);
+  return store.createAttachment({
+    id,
+    workspaceId: store.defaultWorkspace().id,
+    filename,
+    contentType,
+    byteSize: bytes.byteLength,
+  });
+}
+
 test("rejects missing and unknown bearer tokens", async () => {
   const { store, handler } = fixture();
   expect((await toolCall(handler, null, 1)).status).toBe(401);
@@ -322,7 +343,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(6);
+  expect(body.result.tools).toHaveLength(7);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.description).toContain(
@@ -347,7 +368,10 @@ test("advertises messaging and workspace search without a thread argument", asyn
   const readThread = body.result.tools[4]!;
   expect(readThread.name).toBe("read_thread");
   expect(readThread.inputSchema.properties.thread_id).toBeDefined();
-  const search = body.result.tools[5]!;
+  const readAttachment = body.result.tools[5]!;
+  expect(readAttachment.name).toBe("read_attachment");
+  expect(readAttachment.inputSchema.properties.attachment_id).toBeDefined();
+  const search = body.result.tools[6]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
@@ -763,6 +787,19 @@ test("send_message rejects a leading peer handle without to", async () => {
 test("read_thread returns the current thread or a comment's parent", async () => {
   const { store, thread, token, tokens, handler } = fixture();
   const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
+  const attachment = attachFile(
+    store,
+    `att_${"a".repeat(32)}`,
+    "spec.yaml",
+    "text/yaml",
+    "name: phi\n",
+  );
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Attached spec",
+    metadata: { attachments: [attachment] },
+  });
   const own = await callTool(handler, token, 50, "read_thread", {
     thread_id: thread.id,
   });
@@ -771,10 +808,11 @@ test("read_thread returns the current thread or a comment's parent", async () =>
   };
   const ownPayload = JSON.parse(ownBody.result.content[0]!.text) as {
     threadId: string;
-    messages: Array<{ content: string }>;
+    messages: Array<{ content: string; attachments?: unknown[] }>;
   };
   expect(ownPayload.threadId).toBe(thread.id);
   expect(ownPayload.messages[0]!.content).toBe("Start");
+  expect(ownPayload.messages[1]!.attachments).toEqual([attachment]);
 
   const other = store.createThread(channel.id, {
     author: "user",
@@ -816,6 +854,236 @@ test("read_thread returns the current thread or a comment's parent", async () =>
     threadId: string;
   };
   expect(parentPayload.threadId).toBe(thread.id);
+  store.close();
+});
+
+test("read_attachment returns bounded text from the current thread", async () => {
+  const { store, thread, token, handler } = fixture();
+  const attachment = attachFile(
+    store,
+    `att_${"b".repeat(32)}`,
+    "spec.yaml",
+    "application/yaml",
+    "service:\n  port: 8080\n",
+  );
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Use this spec",
+    metadata: { attachments: [attachment] },
+  });
+
+  const response = await callTool(handler, token, 53, "read_attachment", {
+    attachment_id: attachment.id,
+  });
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(body.result.content[0]!.text)).toEqual({
+    attachment,
+    content: "service:\n  port: 8080\n",
+    truncated: false,
+  });
+  store.close();
+});
+
+test("read_attachment accepts parameterized text-like MIME types", async () => {
+  const { store, thread, token, handler } = fixture();
+  const attachment = attachFile(
+    store,
+    `att_${"1".repeat(32)}`,
+    "config.json",
+    "application/json;charset=utf-8",
+    '{"enabled":true}\n',
+  );
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "JSON attachment",
+    metadata: { attachments: [attachment] },
+  });
+
+  const response = await callTool(handler, token, 58, "read_attachment", {
+    attachment_id: attachment.id,
+  });
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(body.result.content[0]!.text).content).toBe(
+    '{"enabled":true}\n',
+  );
+  store.close();
+});
+
+test("read_attachment truncates text responses at the byte cap", async () => {
+  const { store, thread, token, handler } = fixture();
+  const attachment = attachFile(
+    store,
+    `att_${"f".repeat(32)}`,
+    "large.txt",
+    "text/plain",
+    "x".repeat(256 * 1024 + 1),
+  );
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Large attachment",
+    metadata: { attachments: [attachment] },
+  });
+
+  const response = await callTool(handler, token, 57, "read_attachment", {
+    attachment_id: attachment.id,
+  });
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  const payload = JSON.parse(body.result.content[0]!.text) as {
+    content: string;
+    truncated: boolean;
+  };
+  expect(payload.content).toHaveLength(256 * 1024);
+  expect(payload.truncated).toBe(true);
+  store.close();
+});
+
+test("read_attachment enforces thread scope and rejects binary files", async () => {
+  const { store, thread, token, handler } = fixture();
+  const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
+  const other = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Other thread",
+  });
+  const secret = attachFile(
+    store,
+    `att_${"c".repeat(32)}`,
+    "secret.txt",
+    "text/plain",
+    "do not leak",
+  );
+  store.appendMessage(other.thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Secret",
+    metadata: { attachments: [secret] },
+  });
+  const denied = await callTool(handler, token, 54, "read_attachment", {
+    attachment_id: secret.id,
+  });
+  const deniedBody = (await denied.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(deniedBody.result.isError).toBe(true);
+  expect(deniedBody.result.content[0]!.text).toContain(
+    "not available in this thread",
+  );
+
+  const malformed = await callTool(handler, token, 59, "read_attachment", {
+    attachment_id: "../../secret",
+  });
+  const malformedBody = (await malformed.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(malformedBody.result.isError).toBe(true);
+  expect(malformedBody.result.content[0]!.text).toContain(
+    "not available in this thread",
+  );
+
+  const image = attachFile(
+    store,
+    `att_${"d".repeat(32)}`,
+    "image.png",
+    "image/png",
+    new Uint8Array([0, 1, 2, 3]),
+  );
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Image",
+    metadata: { attachments: [image] },
+  });
+  const binary = await callTool(handler, token, 55, "read_attachment", {
+    attachment_id: image.id,
+  });
+  const binaryBody = (await binary.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(binaryBody.result.isError).toBe(true);
+  expect(binaryBody.result.content[0]!.text).toContain("not a supported text file");
+  store.close();
+});
+
+test("read_attachment reports a referenced attachment whose file is missing", async () => {
+  const { store, thread, token, handler } = fixture();
+  const attachment = store.createAttachment({
+    id: `att_${"2".repeat(32)}`,
+    workspaceId: store.defaultWorkspace().id,
+    filename: "missing.txt",
+    contentType: "text/plain",
+    byteSize: 10,
+  });
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Missing attachment",
+    metadata: { attachments: [attachment] },
+  });
+
+  const response = await callTool(handler, token, 60, "read_attachment", {
+    attachment_id: attachment.id,
+  });
+  const body = (await response.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBe(true);
+  expect(body.result.content[0]!.text).toContain("file is unavailable");
+  store.close();
+});
+
+test("read_attachment allows a doc comment to read its parent's attachment", async () => {
+  const { store, thread, tokens, handler } = fixture();
+  const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
+  const attachment = attachFile(
+    store,
+    `att_${"e".repeat(32)}`,
+    "notes.txt",
+    "text/plain",
+    "parent context",
+  );
+  store.appendMessage(thread.id, {
+    author: "user",
+    kind: "message",
+    content: "Parent attachment",
+    metadata: { attachments: [attachment] },
+  });
+  const comment = store.createDocComment(
+    channel.id,
+    { author: "user", kind: "message", content: "Review this" },
+    {
+      rootId: "workspace",
+      path: "channels/general/notes.md",
+      quote: "hello",
+      prefix: "",
+      suffix: "",
+      headingSlug: null,
+      parentThreadId: thread.id,
+    },
+  );
+  const commentToken = tokens.mint({
+    threadId: comment.thread.id,
+    agentName: "default",
+  });
+  const response = await callTool(
+    handler,
+    commentToken,
+    56,
+    "read_attachment",
+    { attachment_id: attachment.id },
+  );
+  const body = (await response.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(body.result.content[0]!.text).content).toBe("parent context");
   store.close();
 });
 

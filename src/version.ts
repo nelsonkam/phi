@@ -10,6 +10,8 @@ export const UPDATE_REPO: string = process.env.PHI_UPDATE_REPO ?? "nelsonkam/phi
 export const RELEASE_TARGETS = [
   { target: "bun-darwin-arm64", asset: "phi-darwin-arm64" },
   { target: "bun-darwin-x64", asset: "phi-darwin-x64" },
+  { target: "bun-linux-arm64", asset: "phi-linux-arm64" },
+  { target: "bun-linux-x64", asset: "phi-linux-x64" },
 ] as const;
 
 export function releaseAssetName(

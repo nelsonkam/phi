@@ -60,7 +60,8 @@ command -v curl >/dev/null 2>&1 || die "curl is required."
 
 case "$(uname -s)" in
   Darwin) platform=darwin ;;
-  *) die "No release binary is published for $(uname -s). Phi currently ships macOS binaries only." ;;
+  Linux) platform=linux ;;
+  *) die "No release binary is published for $(uname -s)." ;;
 esac
 case "$(uname -m)" in
   arm64 | aarch64) arch=arm64 ;;

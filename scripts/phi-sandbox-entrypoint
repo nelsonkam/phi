@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+export PHI_ROOT="${PHI_ROOT:-/home/agent/.phi}"
+export PHI_HOST="${PHI_HOST:-0.0.0.0}"
+export PHI_PORT="${PHI_PORT:-3141}"
+export PHI_IN_SANDBOX=1
+
+if [ -z "${PHI_HARNESSES:-}" ] && [ -f /etc/phi/harnesses ]; then
+  PHI_HARNESSES=$(sed -n '1p' /etc/phi/harnesses)
+  export PHI_HARNESSES
+fi
+
+# Credential bindings can change after the sandbox was created (Claude and
+# Cursor complete OAuth interactively). Rebuild only the proxy-managed files
+# on every start so a stop/start applies the new sbx credential mode.
+HOME=/home/agent CODEX_HOME=/home/agent/.codex \
+  /usr/local/bin/configure-sandbox-auth all
+
+exec /usr/local/bin/phi serve

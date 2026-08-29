@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   acpClientCapabilities,
+  configuredHarnesses,
   detectHarnesses,
   harnessEntry,
   KNOWN_HARNESSES,
@@ -14,6 +15,22 @@ test("detects every known harness with an install state and hint", () => {
     expect(status.name.length).toBeGreaterThan(0);
     expect(status.installHint.length).toBeGreaterThan(0);
   }
+});
+
+test("uses the image harness manifest as the advertised catalog", () => {
+  expect(configuredHarnesses({ PHI_HARNESSES: "codex,cursor" })).toEqual([
+    "codex",
+    "cursor",
+  ]);
+  expect(detectHarnesses({ PHI_HARNESSES: "codex" }).map((item) => item.id)).toEqual([
+    "codex",
+  ]);
+  expect(() => configuredHarnesses({ PHI_HARNESSES: "gemini" })).toThrow(
+    "unknown: gemini",
+  );
+  expect(() => configuredHarnesses({ PHI_HARNESSES: "" })).toThrow(
+    "must select one or more",
+  );
 });
 
 test("launches Cursor ACP with repeated additional directory flags", () => {

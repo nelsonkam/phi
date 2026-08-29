@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { runUpdate } from "@/commands/update";
+import { runSandbox } from "@/commands/sandbox";
 import { VERSION } from "@/version";
 
 export interface CliOutput {
@@ -18,6 +19,7 @@ const help = `Usage: phi [command]
 Commands:
   serve    Start the phi server and UI (default)
   update   Update the compiled binary to the latest GitHub release
+  sandbox  Manage Phi's Docker Sandbox
   help     Show this help message
   version  Show the phi version
 
@@ -29,6 +31,7 @@ Options:
 export interface CliDependencies {
   serve(): Promise<number>;
   update(output: CliOutput, args: readonly string[]): Promise<number>;
+  sandbox(output: CliOutput, args: readonly string[]): Promise<number>;
 }
 
 const defaultDependencies: CliDependencies = {
@@ -38,6 +41,7 @@ const defaultDependencies: CliDependencies = {
     return 0;
   },
   update: (output, args) => runUpdate(output, {}, [...args]),
+  sandbox: (output, args) => runSandbox(output, args),
 };
 
 export async function runCli(
@@ -46,6 +50,20 @@ export async function runCli(
   dependencies: CliDependencies = defaultDependencies,
 ): Promise<number> {
   const [command] = args;
+
+  // A compiled Phi executable cannot be reused as the Bun interpreter for
+  // adapter entry files. These private modes keep both ACP adapters bundled
+  // and let the harness catalog launch them through the same executable.
+  if (command === "__acp-claude") {
+    process.env.CLAUDE_CODE_EXECUTABLE ??= Bun.which("claude") ?? "claude";
+    await import("@agentclientprotocol/claude-agent-acp/dist/index.js");
+    return 0;
+  }
+  if (command === "__acp-codex") {
+    process.env.CODEX_PATH ??= Bun.which("codex") ?? "codex";
+    await import("@agentclientprotocol/codex-acp/dist/index.js");
+    return 0;
+  }
 
   if (command === "help" || command === "-h" || command === "--help") {
     output.stdout(help);
@@ -73,6 +91,16 @@ export async function runCli(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       output.stderr(`phi update failed: ${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === "sandbox") {
+    try {
+      return await dependencies.sandbox(output, args.slice(1));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.stderr(`phi sandbox failed: ${message}\n`);
       return 1;
     }
   }

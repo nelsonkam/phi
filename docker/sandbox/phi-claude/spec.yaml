@@ -1,0 +1,17 @@
+schemaVersion: "2"
+kind: mixin
+name: phi-claude
+version: 0.1.0
+displayName: Phi Claude network policy
+description: Claude Code service egress for Phi
+requires:
+  agent: phi
+
+permissions:
+  network:
+    allow:
+      - api.anthropic.com
+      - console.anthropic.com
+      - claude.ai
+      - mcp-proxy.anthropic.com
+      - platform.claude.com

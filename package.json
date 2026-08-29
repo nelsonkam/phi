@@ -8,7 +8,8 @@
     "start": "bun src/cli.ts serve",
     "test": "bun test src",
     "typecheck": "tsc --noEmit",
-    "build:release": "bun run ./scripts/build-release.ts"
+    "build:release": "bun run ./scripts/build-release.ts",
+    "validate:sandbox-kits": "sh ./scripts/validate-sandbox-kits"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.70.0",

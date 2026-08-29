@@ -10,3 +10,7 @@ declare module "*.md" {
 
 // Side-effect stylesheet imports, bundled by Bun's CSS bundler.
 declare module "*.css" {}
+
+// The Codex ACP executable is intentionally imported for its stdio side
+// effects in the compiled-binary adapter mode; the package ships no .d.ts.
+declare module "@agentclientprotocol/codex-acp/dist/index.js" {}

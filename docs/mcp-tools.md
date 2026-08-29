@@ -401,8 +401,10 @@ repositories, so they are not git-checkpointed and cannot be confused with
   attachments API — not `/api/v1/files/*`.
 - When a harness advertises ACP `promptCapabilities.image`, image
   attachments under 4 MiB are embedded as prompt image blocks. Other files
-  are listed in the prompt text; an MCP `read_attachment` tool is a
-  follow-up.
+  are listed in the prompt text. Harnesses can read bounded UTF-8 text
+  attachments with the thread-scoped MCP `read_attachment` tool; binary
+  attachments remain available only through the device-authenticated HTTP
+  route.
 
 Rejected for this slice: writing uploads into the workspace; treating a
 client filesystem path as a server path; putting bytes on `/ws`; resumable

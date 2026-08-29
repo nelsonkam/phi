@@ -1,13 +1,19 @@
 import { expect, test } from "bun:test";
 import {
+  existsSync,
+  mkdirSync,
   lstatSync,
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { ensureWorkspace } from "@/core/workspace";
+import {
+  ensureChannelWorkspace,
+  ensureWorkspace,
+} from "@/core/workspace";
 import { tempDir } from "@/testing/tmpdir";
 
 test("seeds the default agent-management skill without overwriting it", () => {
@@ -68,7 +74,7 @@ test("links harness instruction filenames to AGENTS.md without clobbering", () =
   const root = tempDir();
 
   ensureWorkspace(root);
-  for (const alias of ["CLAUDE.md", "GEMINI.md"]) {
+  for (const alias of ["CLAUDE.md"]) {
     const link = join(root, alias);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readlinkSync(link)).toBe("AGENTS.md");
@@ -81,4 +87,59 @@ test("links harness instruction filenames to AGENTS.md without clobbering", () =
   ensureWorkspace(root);
   expect(lstatSync(claude).isSymbolicLink()).toBe(false);
   expect(readFileSync(claude, "utf8")).toBe("hand-written\n");
+  expect(existsSync(join(root, "GEMINI.md"))).toBe(false);
+});
+
+test("preserves a historical GEMINI.md without creating new ones", () => {
+  const root = tempDir();
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "GEMINI.md"), "historical\n");
+  ensureWorkspace(root);
+  expect(readFileSync(join(root, "GEMINI.md"), "utf8")).toBe("historical\n");
+});
+
+test("uses the sandbox topology guide only for a new sandbox workspace", () => {
+  const root = tempDir();
+  ensureWorkspace(root, { PHI_IN_SANDBOX: "1" });
+  const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
+  expect(guide).toContain("/home/agent/work/repos");
+  expect(guide).toContain("isolated Docker Engine");
+  expect(guide).toContain("`sbx rm`");
+
+  writeFileSync(join(root, "AGENTS.md"), "custom\n");
+  ensureWorkspace(root, { PHI_IN_SANDBOX: "1" });
+  expect(readFileSync(join(root, "AGENTS.md"), "utf8")).toBe("custom\n");
+});
+
+test("creates durable channel context without overwriting it", () => {
+  const root = tempDir();
+  ensureWorkspace(root);
+  ensureChannelWorkspace(root, "research");
+  const guide = join(root, "channels", "research", "AGENTS.md");
+  const seeded = readFileSync(guide, "utf8");
+  expect(seeded).toContain("Channel context");
+  expect(seeded).not.toContain("/home/agent");
+
+  writeFileSync(guide, "custom context\n");
+  ensureChannelWorkspace(root, "research");
+  expect(readFileSync(guide, "utf8")).toBe("custom context\n");
+});
+
+test("rejects a channel path that is not a real directory", () => {
+  const root = tempDir();
+  mkdirSync(join(root, "channels"), { recursive: true });
+  writeFileSync(join(root, "channels", "blocked"), "not a directory\n");
+  expect(() => ensureChannelWorkspace(root, "blocked")).toThrow(
+    "must be a real directory",
+  );
+});
+
+test("rejects a symlink at the channel path", () => {
+  const root = tempDir();
+  const target = tempDir();
+  mkdirSync(join(root, "channels"), { recursive: true });
+  symlinkSync(target, join(root, "channels", "linked"), "dir");
+  expect(() => ensureChannelWorkspace(root, "linked")).toThrow(
+    "must be a real directory",
+  );
 });
