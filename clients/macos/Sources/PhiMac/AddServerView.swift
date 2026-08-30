@@ -3,7 +3,7 @@ import PhiClientCore
 
 struct ServerEditorView: View {
   enum Mode {
-    case add
+    case add(AddServerRequest)
     case edit(ServerConnection)
 
     var title: String {
@@ -42,9 +42,9 @@ struct ServerEditorView: View {
     self.mode = mode
     self.onSave = onSave
     switch mode {
-    case .add:
-      _name = State(initialValue: "")
-      _origin = State(initialValue: "https://")
+    case .add(let request):
+      _name = State(initialValue: request.name)
+      _origin = State(initialValue: request.origin)
     case .edit(let connection):
       _name = State(initialValue: connection.name)
       _origin = State(initialValue: connection.origin.absoluteString)

@@ -40,7 +40,16 @@ test("create composes pinned official kits and a custom mixin as exact argv", as
   const refs = officialKitRefs({ PHI_SANDBOX_REGISTRY: "registry.test/phi" });
   const exitCode = await runSandbox(
     captureOutput.output,
-    ["create", "--name", "desk", "--kit", "./custom-kit", "--confirm"],
+    [
+      "create",
+      "--name",
+      "desk",
+      "--port",
+      "43141",
+      "--kit",
+      "./custom-kit",
+      "--confirm",
+    ],
     {
       env: { PHI_SANDBOX_REGISTRY: "registry.test/phi" },
       which: () => "/fake/sbx",
@@ -81,6 +90,8 @@ test("create composes pinned official kits and a custom mixin as exact argv", as
     "create",
     "--name",
     "desk",
+    "--publish",
+    "127.0.0.1:43141:3141/tcp4",
     refs.root,
     "--kit",
     refs.mixins[0]!,
@@ -95,6 +106,21 @@ test("create composes pinned official kits and a custom mixin as exact argv", as
   expect(leases).toEqual([["/fake/sbx", "exec", "desk", "sleep", "infinity"]]);
   expect(captureOutput.stdout()).toContain("http://127.0.0.1:45123");
   expect(captureOutput.stdout()).toContain("overrides");
+});
+
+test("create validates a requested stable host port before invoking sbx", async () => {
+  for (const value of ["", "0", "65536", "3.14", "nope"]) {
+    const calls: string[][] = [];
+    await expect(runSandbox(capture().output, ["create", "--port", value], {
+      env: {},
+      which: () => "/fake/sbx",
+      runCommand: async (args) => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "v0.42.0\n", stderr: "" };
+      },
+    })).rejects.toThrow("--port must be an integer from 1 to 65535");
+    expect(calls.some((call) => call[1] === "create")).toBe(false);
+  }
 });
 
 test("create continues when JSON kit inspection is unavailable", async () => {

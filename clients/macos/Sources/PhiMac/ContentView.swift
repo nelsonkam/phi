@@ -3,7 +3,6 @@ import PhiClientCore
 
 struct ContentView: View {
   @ObservedObject var controller: ConnectionController
-  @State private var showingAddServer = false
   @State private var editingServer: ServerConnection?
   @State private var navigationError: String?
   @State private var pendingRemoval: ServerConnection?
@@ -29,7 +28,7 @@ struct ContentView: View {
       .navigationSplitViewColumnWidth(min: 180, ideal: 220)
       .toolbar {
         Button {
-          showingAddServer = true
+          controller.presentAddServer()
         } label: {
           Label("Add Server", systemImage: "plus")
         }
@@ -37,8 +36,8 @@ struct ContentView: View {
     } detail: {
       detail
     }
-    .sheet(isPresented: $showingAddServer) {
-      ServerEditorView(mode: .add) { name, origin, token in
+    .sheet(item: addServerRequest) { request in
+      ServerEditorView(mode: .add(request)) { name, origin, token in
         try await controller.add(name: name, origin: origin, token: token)
       }
     }
@@ -78,6 +77,10 @@ struct ContentView: View {
       navigationError = nil
       await controller.connectSelected()
     }
+    .background {
+      MainWindowReader { controller.registerMainWindow($0) }
+        .frame(width: 0, height: 0)
+    }
   }
 
   @ViewBuilder
@@ -88,6 +91,8 @@ struct ContentView: View {
           ServerWebView(
             connection: connection,
             token: controller.selectedToken,
+            navigationRequest: controller.navigationRequest,
+            onNavigationConsumed: { controller.consumeNavigationRequest($0) },
             onNavigationError: { navigationError = $0 }
           )
         } else if case .connecting = controller.status {
@@ -153,6 +158,13 @@ struct ContentView: View {
     Binding(
       get: { controller.selectedID },
       set: { controller.select($0) }
+    )
+  }
+
+  private var addServerRequest: Binding<AddServerRequest?> {
+    Binding(
+      get: { controller.addServerRequest },
+      set: { if $0 == nil { controller.dismissAddServer() } }
     )
   }
 }

@@ -2,6 +2,7 @@
 
 import { runUpdate } from "@/commands/update";
 import { runSandbox } from "@/commands/sandbox";
+import { runPair } from "@/commands/pair";
 import { VERSION } from "@/version";
 
 export interface CliOutput {
@@ -20,6 +21,7 @@ Commands:
   serve    Start the phi server and UI (default)
   update   Update the compiled binary to the latest GitHub release
   sandbox  Manage Phi's Docker Sandbox
+  pair     Show a device token and macOS Add Server link
   help     Show this help message
   version  Show the phi version
 
@@ -32,6 +34,7 @@ export interface CliDependencies {
   serve(): Promise<number>;
   update(output: CliOutput, args: readonly string[]): Promise<number>;
   sandbox(output: CliOutput, args: readonly string[]): Promise<number>;
+  pair(output: CliOutput, args: readonly string[]): Promise<number> | number;
 }
 
 const defaultDependencies: CliDependencies = {
@@ -42,6 +45,7 @@ const defaultDependencies: CliDependencies = {
   },
   update: (output, args) => runUpdate(output, {}, [...args]),
   sandbox: (output, args) => runSandbox(output, args),
+  pair: (output, args) => runPair(output, args),
 };
 
 export async function runCli(
@@ -101,6 +105,16 @@ export async function runCli(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       output.stderr(`phi sandbox failed: ${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === "pair") {
+    try {
+      return await dependencies.pair(output, args.slice(1));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.stderr(`phi pair failed: ${message}\n`);
       return 1;
     }
   }

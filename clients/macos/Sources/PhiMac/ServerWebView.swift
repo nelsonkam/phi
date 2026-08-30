@@ -6,10 +6,15 @@ import PhiClientCore
 struct ServerWebView: NSViewRepresentable {
   let connection: ServerConnection
   let token: String?
+  let navigationRequest: ServerNavigationRequest?
+  let onNavigationConsumed: (UUID) -> Void
   let onNavigationError: (String) -> Void
 
   func makeCoordinator() -> Coordinator {
-    Coordinator(onNavigationError: onNavigationError)
+    Coordinator(
+      onNavigationConsumed: onNavigationConsumed,
+      onNavigationError: onNavigationError
+    )
   }
 
   func makeNSView(context: Context) -> WKWebView {
@@ -19,35 +24,70 @@ struct ServerWebView: NSViewRepresentable {
     webView.navigationDelegate = context.coordinator
     webView.uiDelegate = context.coordinator
     webView.allowsMagnification = true
+    webView.allowsBackForwardNavigationGestures = true
     webView.customUserAgent = "PhiMac/0.1"
-    context.coordinator.load(connection: connection, token: token, in: webView)
+    context.coordinator.load(
+      connection: connection,
+      token: token,
+      navigationRequest: navigationRequest,
+      in: webView
+    )
     return webView
   }
 
   func updateNSView(_ webView: WKWebView, context: Context) {
+    context.coordinator.onNavigationConsumed = onNavigationConsumed
     context.coordinator.onNavigationError = onNavigationError
-    context.coordinator.load(connection: connection, token: token, in: webView)
+    context.coordinator.load(
+      connection: connection,
+      token: token,
+      navigationRequest: navigationRequest,
+      in: webView
+    )
   }
 
   @MainActor
   final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    var onNavigationConsumed: (UUID) -> Void
     var onNavigationError: (String) -> Void
     private var loadedOrigin: URL?
     private var loadedToken: String?
     private var origin: URL?
+    private var lastNavigationRequestID: UUID?
 
-    init(onNavigationError: @escaping (String) -> Void) {
+    init(
+      onNavigationConsumed: @escaping (UUID) -> Void,
+      onNavigationError: @escaping (String) -> Void
+    ) {
+      self.onNavigationConsumed = onNavigationConsumed
       self.onNavigationError = onNavigationError
     }
 
-    func load(connection: ServerConnection, token: String?, in webView: WKWebView) {
-      guard loadedOrigin != connection.origin || loadedToken != token else { return }
+    func load(
+      connection: ServerConnection,
+      token: String?,
+      navigationRequest: ServerNavigationRequest?,
+      in webView: WKWebView
+    ) {
+      let target = navigationRequest?.destinationURL(for: connection)
+        ?? connection.origin
+      let credentialsChanged = loadedOrigin != connection.origin
+        || loadedToken != token
+      let navigationChanged = navigationRequest?.id != lastNavigationRequestID
+        && navigationRequest?.serverID == connection.id
+      guard credentialsChanged || navigationChanged else { return }
       loadedOrigin = connection.origin
       loadedToken = token
       origin = connection.origin
+      if navigationChanged { lastNavigationRequestID = navigationRequest?.id }
+
+      let navigationWasAccepted = navigationChanged ? navigationRequest?.id : nil
 
       guard let token, !token.isEmpty else {
-        webView.load(URLRequest(url: connection.origin))
+        webView.load(URLRequest(url: target))
+        if let navigationWasAccepted {
+          onNavigationConsumed(navigationWasAccepted)
+        }
         return
       }
       guard let cookie = DeviceCookie.make(origin: connection.origin, token: token) else {
@@ -55,7 +95,10 @@ struct ServerWebView: NSViewRepresentable {
         return
       }
       webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
-        webView.load(URLRequest(url: connection.origin))
+        webView.load(URLRequest(url: target))
+        if let navigationWasAccepted {
+          self.onNavigationConsumed(navigationWasAccepted)
+        }
       }
     }
 

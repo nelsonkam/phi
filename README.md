@@ -45,7 +45,7 @@ for Codex:
 
 ```bash
 sbx secret set openai --oauth
-phi sandbox create --name phi
+phi sandbox create --name phi --port 43141
 ```
 
 Claude subscription login is completed from its CLI inside the sandbox after
@@ -56,7 +56,9 @@ secrets or OAuth tokens—Docker's host-side credential proxy owns them.
 `phi sandbox open`, `status`, `stop`, and `start` manage the sandbox;
 `phi sandbox remove phi --confirm` permanently deletes the VM, Phi database,
 repositories, worktrees, and volumes. Repeat `--kit <mixin-ref>` on create to
-add inspected custom feature kits. See [docs/docker-sandbox.md](./docs/docker-sandbox.md).
+add inspected custom feature kits. `--port` binds Phi's internal port 3141 to a
+stable IPv4 loopback port on the host, so saved browser and desktop-app URLs
+survive sandbox stop/start. See [docs/docker-sandbox.md](./docs/docker-sandbox.md).
 
 ## Source checkout
 
@@ -76,6 +78,18 @@ Keychain, and loads each server's own UI in `WKWebView`; it never owns the
 server process. Build an ad-hoc-signed local app with
 `bun run build:macos-app`. The build generates its app icon from the Phi brand
 asset in `assets/brand`.
+
+On the server machine, print its device token and a secret-free macOS Add
+Server link with:
+
+```bash
+phi pair --server https://machine.tailnet.ts.net --name "Home Phi"
+```
+
+Open the printed `phi://add-server?...` link, then paste the separately printed
+token into the prefilled form. The durable token is deliberately never embedded
+in the URL. HTTP server URLs are accepted only for loopback/SSH-forwarded
+origins; remote origins require HTTPS.
 
 ## Standalone installations
 

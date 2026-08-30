@@ -111,12 +111,67 @@ import Testing
   #expect(cookies.deletedOrigins.isEmpty)
 }
 
+@MainActor
+@Test func editingALoopbackSandboxPreservesAndReplacesItsCredential() async throws {
+  let suite = "PhiLoopbackCredentialTests.\(UUID().uuidString)"
+  let defaults = UserDefaults(suiteName: suite)!
+  defer { defaults.removePersistentDomain(forName: suite) }
+  let repository = ConnectionRepository(defaults: defaults)
+  let credentials = RecordingCredentialStore()
+  let cookies = RecordingCookieStore()
+  let sandbox = try ServerConnection(
+    name: "Sandbox",
+    origin: "http://127.0.0.1:43141"
+  )
+  try repository.saveConnections([sandbox])
+  repository.saveSelection(sandbox.id)
+  try credentials.save(token: "sandbox-secret", for: sandbox.id)
+
+  let controller = ConnectionController(
+    repository: repository,
+    credentials: credentials,
+    api: AcceptingAPI(),
+    cookieStore: cookies,
+    settings: defaults
+  )
+
+  try await controller.edit(
+    sandbox,
+    name: "Renamed sandbox",
+    origin: sandbox.origin.absoluteString,
+    token: ""
+  )
+  #expect(try credentials.token(for: sandbox.id) == "sandbox-secret")
+
+  let renamed = try #require(controller.selectedConnection)
+  try await controller.edit(
+    renamed,
+    name: renamed.name,
+    origin: renamed.origin.absoluteString,
+    token: "replacement-secret"
+  )
+  #expect(try credentials.token(for: sandbox.id) == "replacement-secret")
+  #expect(cookies.deletedOrigins == [sandbox.origin])
+}
+
 private final class RecordingCredentialStore: CredentialStore {
   private var tokens: [UUID: String] = [:]
 
   func token(for connectionID: UUID) throws -> String? { tokens[connectionID] }
   func save(token: String, for connectionID: UUID) throws { tokens[connectionID] = token }
   func deleteToken(for connectionID: UUID) throws { tokens[connectionID] = nil }
+}
+
+private struct AcceptingAPI: PhiAPIProviding {
+  func validate(connection: ServerConnection, token: String?) async throws {}
+
+  func fetchActivity(
+    connection: ServerConnection,
+    token: String?,
+    limit: Int
+  ) async throws -> PhiActivityPage {
+    PhiActivityPage(activity: [], waitingCount: 0)
+  }
 }
 
 @MainActor

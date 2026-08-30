@@ -30,6 +30,7 @@ function unusedDependencies(
     serve: async () => 0,
     update: async () => 0,
     sandbox: async () => 0,
+    pair: async () => 0,
     ...overrides,
   };
 }
@@ -159,6 +160,27 @@ describe("runCli", () => {
     expect(await runCli(["sandbox", "status", "phi"], capture.output, dependencies)).toBe(1);
     expect(received).toEqual(["status", "phi"]);
     expect(capture.stderr()).toBe("phi sandbox failed: sbx is too old\n");
+  });
+
+  test("forwards pairing arguments and reports failures", async () => {
+    const capture = captureOutput();
+    let received: readonly string[] | undefined;
+    const dependencies = unusedDependencies({
+      pair: async (_output, args) => {
+        received = args;
+        throw new Error("--server is required");
+      },
+    });
+
+    expect(
+      await runCli(
+        ["pair", "--server", "https://phi.example.com"],
+        capture.output,
+        dependencies,
+      ),
+    ).toBe(1);
+    expect(received).toEqual(["--server", "https://phi.example.com"]);
+    expect(capture.stderr()).toBe("phi pair failed: --server is required\n");
   });
 
   test("rejects an unknown command", async () => {

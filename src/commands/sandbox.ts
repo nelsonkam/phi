@@ -209,16 +209,27 @@ async function defaultOpenUrl(url: string): Promise<void> {
 
 function parseCreateArgs(args: readonly string[]): {
   name: string;
+  port?: number;
   customKits: string[];
   confirmed: boolean;
 } {
   let name = "phi";
+  let port: number | undefined;
   let confirmed = false;
   const customKits: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === "--name") {
       name = args[++index] ?? "";
+    } else if (arg === "--port") {
+      const value = args[++index] ?? "";
+      if (!/^\d+$/.test(value)) {
+        throw new Error("--port must be an integer from 1 to 65535");
+      }
+      port = Number(value);
+      if (port < 1 || port > 65_535) {
+        throw new Error("--port must be an integer from 1 to 65535");
+      }
     } else if (arg === "--kit") {
       customKits.push(args[++index] ?? "");
     } else if (arg === "--confirm") {
@@ -231,7 +242,7 @@ function parseCreateArgs(args: readonly string[]): {
     throw new Error("sandbox name must contain only letters, numbers, dots, pluses, and hyphens");
   }
   if (customKits.some((kit) => !kit.trim())) throw new Error("--kit requires a reference");
-  return { name, customKits, confirmed };
+  return { name, port, customKits, confirmed };
 }
 
 export async function runSandbox(
@@ -242,7 +253,7 @@ export async function runSandbox(
   const env = dependencies.env ?? process.env;
   const [subcommand = "help", ...rest] = args;
   if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
-    output.stdout(`Usage: phi sandbox <command>\n\nCommands:\n  create [--name NAME] [--kit MIXIN]...\n  status [NAME]\n  open [NAME]\n  stop [NAME]\n  start [NAME]\n  remove NAME --confirm\n`);
+    output.stdout(`Usage: phi sandbox <command>\n\nCommands:\n  create [--name NAME] [--port HOST_PORT] [--kit MIXIN]...\n  status [NAME]\n  open [NAME]\n  stop [NAME]\n  start [NAME]\n  remove NAME --confirm\n`);
     return 0;
   }
   if (env.PHI_IN_SANDBOX === "1") {
@@ -307,7 +318,7 @@ export async function runSandbox(
   };
 
   if (subcommand === "create") {
-    const { name, customKits, confirmed } = parseCreateArgs(rest);
+    const { name, port, customKits, confirmed } = parseCreateArgs(rest);
     const official = officialKitRefs(env);
     const refs = [official.root, ...official.mixins, ...customKits];
     const inspected: unknown[] = [];
@@ -356,7 +367,11 @@ export async function runSandbox(
     output.stdout(
       "Authentication is managed by sbx. Phi never receives provider API keys or OAuth tokens.\n",
     );
-    const create = ["create", "--name", name, official.root];
+    const create = ["create", "--name", name];
+    if (port !== undefined) {
+      create.push("--publish", `127.0.0.1:${port}:${SANDBOX_PORT}/tcp4`);
+    }
+    create.push(official.root);
     for (const kit of [...official.mixins, ...customKits]) create.push("--kit", kit);
     await run(create, interactive);
     const url = await leaseUrl(name, true);

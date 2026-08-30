@@ -16,11 +16,40 @@ public struct PhiAPIClient: @unchecked Sendable {
       throw PhiAPIError.missingCredential
     }
 
-    var request = URLRequest(url: connection.sessionURL)
+    let data = try await get(
+      connection.sessionURL,
+      token: trimmedToken
+    )
+
+    let result = try? JSONDecoder().decode(SessionResponse.self, from: data)
+    guard result?.ok == true else { throw PhiAPIError.invalidResponse }
+  }
+
+  public func fetchActivity(
+    connection: ServerConnection,
+    token: String?,
+    limit: Int = 50
+  ) async throws -> PhiActivityPage {
+    let url = connection.origin
+      .appending(path: "api/v1/activity")
+      .appending(queryItems: [URLQueryItem(name: "limit", value: String(limit))])
+    let data = try await get(url, token: token)
+    do {
+      return try JSONDecoder().decode(PhiActivityPage.self, from: data)
+    } catch {
+      throw PhiAPIError.invalidResponse
+    }
+  }
+
+  private func get(
+    _ url: URL,
+    token: String?
+  ) async throws -> Data {
+    var request = URLRequest(url: url)
     request.timeoutInterval = 12
     request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-    if let trimmedToken, !trimmedToken.isEmpty {
-      request.setValue("Bearer \(trimmedToken)", forHTTPHeaderField: "Authorization")
+    if let token, !token.isEmpty {
+      request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
 
     let (data, response): (Data, URLResponse)
@@ -38,8 +67,7 @@ public struct PhiAPIClient: @unchecked Sendable {
       throw PhiAPIError.serverStatus(http.statusCode)
     }
 
-    let result = try? JSONDecoder().decode(SessionResponse.self, from: data)
-    guard result?.ok == true else { throw PhiAPIError.invalidResponse }
+    return data
   }
 }
 

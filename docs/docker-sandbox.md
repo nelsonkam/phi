@@ -21,7 +21,7 @@ For a ChatGPT subscription, complete OpenAI OAuth on the host before creation:
 
 ```bash
 sbx secret set openai --oauth
-phi sandbox create --name phi
+phi sandbox create --name phi --port 43141
 ```
 
 Claude completes its subscription login from its own CLI. Do not configure an
@@ -102,7 +102,7 @@ the auto-registration. See [workspace-mcp.md](workspace-mcp.md).
 ## Lifecycle
 
 ```bash
-phi sandbox create [--name phi] [--kit <mixin-ref>]...
+phi sandbox create [--name phi] [--port 43141] [--kit <mixin-ref>]...
 phi sandbox status [phi]
 phi sandbox open [phi]
 phi sandbox stop [phi]
@@ -115,6 +115,13 @@ disconnects, even when it was started with `sbx run --detached`. Phi therefore
 keeps a detached host-side `sbx exec` session as a service lease. `create`,
 `start`, and `open` establish that lease and wait for the published web port;
 `stop` or `remove` ends it with the VM.
+
+Pass `--port` at creation to keep the host-side URL stable. Phi passes an
+explicit loopback-only mapping to sbx, for example
+`127.0.0.1:43141:3141/tcp4`; the sandbox still listens on port 3141 internally.
+The mapping persists across stop/start but is deleted with the sandbox. Without
+`--port`, sbx allocates an ephemeral host port and `phi sandbox open` discovers
+whatever port is currently published.
 
 The launcher selects the root kit and official Claude, Codex, and Cursor
 mixins tagged with the running Phi version. Custom mixins compose last. Phi
