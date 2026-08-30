@@ -226,6 +226,7 @@ export function ThreadPanel({
       <Composer
         placeholder="Reply…"
         draftKey={`thread:${threadId}`}
+        autoFocus
         onSend={(input) => void send.mutateAsync(input)}
         onSteer={async (input) => {
           await cancel.mutateAsync();

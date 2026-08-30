@@ -158,6 +158,7 @@ export function ChannelPage() {
             placeholder={`Message #${channel?.name ?? ""}`}
             disabled={create.isPending}
             draftKey={`channel:${channelId}`}
+            autoFocus={!openPanel && !browseFile}
             onSend={(input) => void startThread(input)}
           />
         </div>

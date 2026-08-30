@@ -85,6 +85,7 @@ export function Composer({
   mentions = "leading",
   followUpMode = false,
   onSteer,
+  autoFocus = false,
 }: {
   placeholder: string;
   disabled?: boolean;
@@ -98,6 +99,8 @@ export function Composer({
   followUpMode?: boolean;
   /** ↑ Send on a queued item: interrupt the running turn, then post. */
   onSteer?: (input: ComposerSendInput) => void | Promise<void>;
+  /** Focus the textarea on mount and when this becomes true (channel/thread). */
+  autoFocus?: boolean;
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -457,6 +460,21 @@ export function Composer({
     });
   }, [draftKey, runtime]);
 
+  // Input's autoFocus only re-runs when the flag itself flips, so a channel
+  // switch (new draftKey, flag stays true) would leave focus on the sidebar.
+  // Wait a frame so the restored draft is in the DOM before placing the caret.
+  useEffect(() => {
+    if (!autoFocus) return;
+    const frame = requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [autoFocus, draftKey]);
+
   useEffect(() => {
     if (!draftKey || editingId) return;
     persistDraft(
@@ -598,6 +616,7 @@ export function Composer({
             )}
             <ComposerPrimitive.Input
               ref={inputRef}
+              autoFocus={autoFocus}
               rows={1}
               maxRows={8}
               submitMode="enter"
