@@ -55,7 +55,7 @@ export function messagingPreamble(
   channelName?: string,
 ): string {
   const channelContext = channelName
-    ? `This thread is in channel #${channelName}. Its managed folder is channels/${channelName}/; read channels/${channelName}/AGENTS.md if it exists before doing file work.`
+    ? `This thread is in channel #${channelName}. Its managed folder is channels/${channelName}/. Before acting, read the workspace rules.md plus channels/${channelName}/AGENTS.md and channels/${channelName}/rules.md when they exist; read relevant skills under channels/${channelName}/skills/ before that kind of task. Shared durable facts are indexed at .agents/memories/MEMORY.md; check them before asking the user to repeat something or re-deriving workspace knowledge.`
     : undefined;
   return `You are @${agentName} — that handle is your own name in this thread, so work you would assign to @${agentName} is yours to do in the current turn, not a handoff. Use phi's send_message tool for every user-visible message; text outside that tool is private and will normally be discarded. Your first action must be send_message: answer immediately when the request is quick, or briefly acknowledge it and name the first concrete step. The one exception: when a turn's framing says staying silent is acceptable, ending the turn without sending anything is fine. For multi-step work, send concise updates at meaningful beats. An acknowledgement is not the result, so send the actual answer or outcome before ending the turn, then close substantial work with a short recap.
 
@@ -245,6 +245,12 @@ export class AgentRuntime {
     this.enqueueMessage(message, routedTo);
   }
 
+  handleSystemMessage(message: Message, routedTo: string[]): void {
+    if (message.author !== "system" || routedTo.length === 0) return;
+    this.agentHops.set(message.threadId, 0);
+    this.enqueueMessage(message, routedTo);
+  }
+
   // Stops the running turn and drops work already queued behind it. New
   // messages after this call start a fresh epoch and run normally. Idle
   // threads return false so the HTTP handler can stay idempotent.
@@ -375,7 +381,7 @@ export class AgentRuntime {
       this.store.appendMessage(threadId, {
         author: "system",
         kind: "error",
-        content: (error as Error).message,
+        content: errorText(error),
         metadata: { retriable: true },
       });
     } finally {
@@ -708,7 +714,7 @@ export class AgentRuntime {
       this.store.appendMessage(threadId, {
         author: "system",
         kind: "error",
-        content: (error as Error).message,
+        content: errorText(error),
         metadata: { retriable: true },
       });
     } finally {
@@ -1366,6 +1372,9 @@ function routedPrompt(
   recipient: string,
   hasContext: boolean,
 ): string {
+  if (message.author === "system" && message.kind === "reflection") {
+    return message.content;
+  }
   if (message.author !== "user") {
     return `Message from @${String(message.metadata.agent)}:\n${message.content}`;
   }
@@ -1380,6 +1389,27 @@ function agentFromBinding(binding: ThreadSessionBinding): SessionAgent {
     model: binding.model,
     config: binding.config,
   };
+}
+
+// JSON-RPC errors often carry the real cause only in `data` — codex-acp, for
+// example, reports a locked-thread resume as -32603 "Internal error" with the
+// explanation in `data.details`. Fold that detail into the surfaced text so a
+// bare "Internal error" never reaches the thread.
+function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof RequestError)) return message;
+  const detail = requestErrorDetail(error.data);
+  if (!detail || message.includes(detail)) return message;
+  return `${message}: ${detail}`;
+}
+
+function requestErrorDetail(data: unknown): string | null {
+  if (typeof data === "string") return data.trim() || null;
+  if (typeof data === "object" && data !== null && "details" in data) {
+    const details = (data as { details: unknown }).details;
+    if (typeof details === "string") return details.trim() || null;
+  }
+  return null;
 }
 
 function isUnavailableSession(error: unknown): boolean {

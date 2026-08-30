@@ -105,7 +105,11 @@ test("the messaging preamble opens with the agent's own handle", () => {
   expect(preamble).toContain("attachment:att_");
   expect(preamble).toContain("Comment-thread turns");
   expect(preamble).toContain("channel #product");
-  expect(preamble).toContain("read channels/product/AGENTS.md");
+  expect(preamble).toContain("channels/product/AGENTS.md");
+  expect(preamble).toContain("workspace rules.md");
+  expect(preamble).toContain("channels/product/rules.md");
+  expect(preamble).toContain("channels/product/skills/");
+  expect(preamble).toContain(".agents/memories/MEMORY.md");
   // Narrow guards on the style rules, so a future prompt edit can't drop
   // them silently: earned structure, the judgment-based doc condition, and
   // the result-vs-acknowledgement distinction.
@@ -1262,6 +1266,27 @@ test("auth_required surfaces the harness login hint", async () => {
   expect(reply.author).toBe("system");
   expect(reply.content).toContain("not logged in");
   expect(reply.content).toContain("claude /login");
+  await done();
+});
+
+test("a JSON-RPC error surfaces its data.details, not a bare message", async () => {
+  const { store, runtime, channel, done } = await fixture({
+    agentArgs: ["prompt-error"],
+  });
+  const { thread, message } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "hi",
+  });
+  runtime.handleUserMessage(message);
+  await runtime.settled(thread.id);
+
+  const reply = store.listMessages(thread.id).at(-1)!;
+  expect(reply.author).toBe("system");
+  expect(reply.kind).toBe("error");
+  expect(reply.content).toBe(
+    "Internal error: thread fake-thread already has an active writer",
+  );
   await done();
 });
 

@@ -111,6 +111,9 @@ export function ActivityPage() {
             turnAgent={
               selected?.thread.turnAgent ?? urlThread?.thread.turnAgent ?? null
             }
+            outcome={
+              selected?.thread.outcome ?? urlThread?.thread.outcome ?? null
+            }
             closeTo="/"
           />
         )}

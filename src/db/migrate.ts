@@ -12,6 +12,8 @@ import m010 from "./migrations/010_mcp_fingerprint.sql" with { type: "text" };
 import m011 from "./migrations/011_attachments.sql" with { type: "text" };
 import m012 from "./migrations/012_doc_comments.sql" with { type: "text" };
 import m013 from "./migrations/013_doc_comment_parent.sql" with { type: "text" };
+import m014 from "./migrations/014_thread_outcomes.sql" with { type: "text" };
+import m015 from "./migrations/015_reflection_runs.sql" with { type: "text" };
 import m016 from "./migrations/016_scheduled_tasks.sql" with { type: "text" };
 
 // Explicit list keeps migrations ordered and bundle-safe (no directory scan).
@@ -29,6 +31,8 @@ const MIGRATIONS: Array<{ id: string; sql: string }> = [
   { id: "011_attachments", sql: m011 },
   { id: "012_doc_comments", sql: m012 },
   { id: "013_doc_comment_parent", sql: m013 },
+  { id: "014_thread_outcomes", sql: m014 },
+  { id: "015_reflection_runs", sql: m015 },
   { id: "016_scheduled_tasks", sql: m016 },
 ];
 

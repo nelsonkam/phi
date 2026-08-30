@@ -170,6 +170,7 @@ export function ChannelPage() {
             threadId={threadId!}
             turnActive={selectedThread.turnActive}
             turnAgent={selectedThread.turnAgent}
+            outcome={selectedThread.outcome}
           />
         )}
         {browseFile && (

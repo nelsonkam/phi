@@ -21,11 +21,12 @@ import type { Attachment, Message } from "@/shared/types";
 
 export const SEND_MESSAGE_DESCRIPTION = `Send a message in your current phi thread. This tool is your only voice: text you produce outside this tool is not shown. Hand off to peer agents only through the optional to list; message text never routes, and a message that leads with an @agent-handle without to is rejected so an intended handoff cannot silently reach no one. Reply first—either answer immediately or briefly name the first concrete step before doing other work. During multi-step work, send concise updates at meaningful beats without narrating routine mechanics. An acknowledgement does not deliver the result; send the actual answer or outcome through this tool before ending the turn. Close substantial work with a short recap. Each call creates one chat bubble, so prefer a short natural run of messages over one long report; for durable or reviewable material, a doc under the channel plus a linked summary beats a long report in chat. Structure (bullets, headers) is earned by enumerable content, never the default. Omit thread_id to stay in the current thread. On a doc-comment turn, do not post a follow-up or recap into the parent; set thread_id to the comment's parent only if the user asked you to post in the sharing conversation, or a decision must be recorded there. Other thread ids are rejected.`;
 export const SEARCH_MESSAGES_DESCRIPTION = `Search messages across other threads in your phi workspace using exact phrase/keyword matching and semantic similarity. Use this to recover prior decisions, requirements, identifiers, and related discussions. The workspace and current thread come from your session; do not ask the user for a thread or channel ID. You may optionally include the current thread, narrow results using a channel name, or filter by author.`;
-export const READ_THREAD_DESCRIPTION = `Read messages in a thread by id. Use this to pull a parent conversation linked from a doc-comment turn. The id must be your current thread or, when this turn is a comment, that comment's parent thread.`;
-export const READ_ATTACHMENT_DESCRIPTION = `Read a text attachment referenced by a message in your current thread or, for a doc-comment turn, its parent thread. Use the attachment id shown in the prompt or returned by read_thread. Binary attachments are not readable through this tool, and large text files are truncated to a bounded response.`;
+export const READ_THREAD_DESCRIPTION = `Read messages in a thread by id. Any thread in your phi workspace is readable; use ids from your prompt, list_channel_threads, or search_messages. Returns the most recent messages with a truncation flag when the thread is longer than one page.`;
+export const READ_ATTACHMENT_DESCRIPTION = `Read a text attachment by id. Use the attachment id shown in the prompt or returned by read_thread. Binary attachments are not readable through this tool, and large text files are truncated to a bounded response.`;
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
+export const LIST_CHANNEL_THREADS_DESCRIPTION = `List chat threads in a channel with compact previews, outcome tags, and message counts, optionally limited to a message sequence range. Use it to survey a channel before reading specific threads with read_thread. Reflection audit threads and reflection-proposal threads are excluded. The channel defaults to your current thread's channel.`;
 
 export interface AgentHarnessCapabilityApi {
   list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
@@ -173,6 +174,32 @@ export function createMcpHandler(
           },
         },
         {
+          name: "list_channel_threads",
+          description: LIST_CHANNEL_THREADS_DESCRIPTION,
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              channel: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "Channel name to list (defaults to the current thread's channel)",
+              },
+              from_seq: {
+                type: "integer",
+                minimum: 1,
+                description: "Only include messages at or after this sequence",
+              },
+              through_seq: {
+                type: "integer",
+                minimum: 1,
+                description: "Only include messages at or before this sequence",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        {
           name: "read_thread",
           description: READ_THREAD_DESCRIPTION,
           inputSchema: {
@@ -181,8 +208,7 @@ export function createMcpHandler(
               thread_id: {
                 type: "string",
                 minLength: 1,
-                description:
-                  "Thread to read; must be the current thread or this comment's parent",
+                description: "Thread to read; any thread in your workspace",
               },
             },
             required: ["thread_id"],
@@ -470,6 +496,83 @@ export function createMcpHandler(
           },
         );
       }
+      if (request.params.name === "list_channel_threads") {
+        const callerThread = store.getThread(caller.threadId);
+        if (!callerThread) return toolError("Current thread no longer exists");
+        const rawChannel = request.params.arguments?.channel;
+        const channelName =
+          typeof rawChannel === "string" ? rawChannel.trim() : "";
+        const channel = channelName
+          ? store
+              .listChannels(callerThread.workspaceId)
+              .find(
+                (candidate) =>
+                  candidate.name.toLocaleLowerCase() ===
+                  channelName.toLocaleLowerCase(),
+              )
+          : store.getChannel(callerThread.channelId);
+        if (!channel) {
+          return toolError(
+            channelName
+              ? `Unknown channel "${channelName}"`
+              : "Current channel no longer exists",
+          );
+        }
+        const rawFromSeq = request.params.arguments?.from_seq;
+        const rawThroughSeq = request.params.arguments?.through_seq;
+        for (const [label, value] of [
+          ["from_seq", rawFromSeq],
+          ["through_seq", rawThroughSeq],
+        ] as const) {
+          if (
+            value !== undefined &&
+            (!Number.isSafeInteger(value) || Number(value) < 1)
+          ) {
+            return toolError(`${label} must be a positive integer`);
+          }
+        }
+        const fromSeq = typeof rawFromSeq === "number" ? rawFromSeq : 1;
+        const throughSeq =
+          typeof rawThroughSeq === "number"
+            ? rawThroughSeq
+            : Number.MAX_SAFE_INTEGER;
+        if (throughSeq < fromSeq) {
+          return toolError("through_seq must be at least from_seq");
+        }
+        return tokens.runOnce(
+          token,
+          `list_channel_threads:${channel.id}:${fromSeq}:${throughSeq}`,
+          extra.requestId,
+          () => {
+            const threads = store
+              .channelThreadSummaries(channel.id, fromSeq, throughSeq)
+              .map((thread) => ({
+                threadId: thread.threadId,
+                outcome: thread.outcome,
+                fromSeq: thread.fromSeq,
+                throughSeq: thread.throughSeq,
+                messageCount: thread.messageCount,
+                hasEarlierMessages: thread.hasEarlierMessages,
+                hasLaterMessages: thread.hasLaterMessages,
+                firstMessage: serializeMessagePreview(thread.firstMessage),
+                latestMessage: serializeMessagePreview(thread.latestMessage),
+              }));
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({
+                    channel: channel.name,
+                    ...(typeof rawFromSeq === "number" ? { fromSeq } : {}),
+                    ...(typeof rawThroughSeq === "number" ? { throughSeq } : {}),
+                    threads,
+                  }),
+                },
+              ],
+            };
+          },
+        );
+      }
       if (request.params.name === "search_messages" && messageSearch) {
         const rawQuery = request.params.arguments?.query;
         const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
@@ -574,8 +677,15 @@ export function createMcpHandler(
         if (!requested) {
           return toolError("thread_id is required");
         }
-        const allowed = allowedReadThreadId(store, caller.threadId, requested);
-        if (!allowed.ok) return toolError(allowed.error);
+        const callerThread = store.getThread(caller.threadId);
+        const requestedThread = store.getThread(requested);
+        if (
+          !callerThread ||
+          !requestedThread ||
+          requestedThread.workspaceId !== callerThread.workspaceId
+        ) {
+          return toolError("thread_id is not a thread in this workspace");
+        }
         return tokens.runOnce(
           token,
           `read_thread:${requested}`,
@@ -605,13 +715,9 @@ export function createMcpHandler(
         const rawId = request.params.arguments?.attachment_id;
         const attachmentId = typeof rawId === "string" ? rawId.trim() : "";
         if (!attachmentId) return toolError("attachment_id is required");
-        const attachment = allowedAttachment(
-          store,
-          caller.threadId,
-          attachmentId,
-        );
+        const attachment = store.getAttachment(attachmentId);
         if (!attachment) {
-          return toolError("attachment is not available in this thread");
+          return toolError("attachment is not available in this workspace");
         }
         if (!isTextAttachment(attachment)) {
           return toolError("attachment is not a supported text file");
@@ -805,25 +911,6 @@ function toolError(message: string) {
 const READ_THREAD_MAX = 50;
 const READ_ATTACHMENT_MAX_BYTES = 256 * 1024;
 
-function allowedReadThreadId(
-  store: PhiStore,
-  callerThreadId: string,
-  requested: string,
-): { ok: true } | { ok: false; error: string } {
-  if (requested === callerThreadId) return { ok: true };
-  const caller = store.getThread(callerThreadId);
-  const parent =
-    caller?.kind === "doc_comment"
-      ? store.getDocCommentAnchor(callerThreadId)?.parentThreadId
-      : null;
-  if (parent && requested === parent) return { ok: true };
-  return {
-    ok: false,
-    error:
-      "thread_id must be the current thread or this comment's parent thread",
-  };
-}
-
 function resolveSendThreadId(
   store: PhiStore,
   callerThreadId: string,
@@ -861,28 +948,24 @@ function serializeReadMessage(message: Message) {
   };
 }
 
-function allowedAttachment(
-  store: PhiStore,
-  callerThreadId: string,
-  attachmentId: string,
-): Attachment | null {
-  const threadIds = [callerThreadId];
-  const caller = store.getThread(callerThreadId);
-  const parent =
-    caller?.kind === "doc_comment"
-      ? store.getDocCommentAnchor(callerThreadId)?.parentThreadId
-      : null;
-  if (parent) threadIds.push(parent);
-  const referenced = threadIds.some((threadId) =>
-    store
-      .listMessages(threadId)
-      .some((message) =>
-        attachmentsFromMetadata(message.metadata).some(
-          (attachment) => attachment.id === attachmentId,
-        ),
-      ),
-  );
-  return referenced ? store.getAttachment(attachmentId) : null;
+function serializeScopedMessage(message: Message) {
+  return {
+    ...serializeReadMessage(message),
+    kind: message.kind,
+    seq: message.seq,
+  };
+}
+
+function serializeMessagePreview(message: Message) {
+  const serialized = serializeScopedMessage(message);
+  const maxLength = 240;
+  return {
+    ...serialized,
+    content:
+      serialized.content.length > maxLength
+        ? `${serialized.content.slice(0, maxLength - 1)}…`
+        : serialized.content,
+  };
 }
 
 function isTextAttachment(attachment: Attachment): boolean {

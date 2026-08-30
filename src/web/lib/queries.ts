@@ -30,6 +30,7 @@ import {
   sendMessage,
   updateAgent,
   updateThreadStatus,
+  updateThreadOutcome,
 } from "./api";
 import type { UpdateAgentInput } from "./api";
 import { ACTIVITY_PAGE_SIZE, activityNextCursor } from "./activity";
@@ -253,6 +254,20 @@ export function useUpdateThreadStatus(channelId: string) {
       updateThreadStatus(input.threadId, input.status),
     onSuccess: () => {
       invalidateDocComments(channelId);
+    },
+  });
+}
+
+export function useUpdateThreadOutcome(channelId: string, threadId: string) {
+  return useMutation({
+    mutationFn: (outcome: Thread["outcome"]) =>
+      updateThreadOutcome(threadId, outcome),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.channelThreads(channelId),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.thread(threadId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.activity });
     },
   });
 }

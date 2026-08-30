@@ -39,9 +39,16 @@ import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { createMessageSearch } from "@/core/search/message-search";
 import { healthPayload } from "@/server/health";
+import { ReflectionService } from "@/core/reflection";
+import {
+  SchedulerService,
+  type ScheduledTaskDefinition,
+} from "@/core/scheduler";
 
 const DEFAULT_PORT = 3141;
 const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_REFLECTION_CRON = "0 3 * * *";
+const DAY_MS = 24 * 60 * 60 * 1_000;
 
 export function serverAddress(env: NodeJS.ProcessEnv = process.env): {
   host: string;
@@ -50,6 +57,45 @@ export function serverAddress(env: NodeJS.ProcessEnv = process.env): {
   return {
     host: env.PHI_HOST?.trim() || DEFAULT_HOST,
     port: Number(env.PHI_PORT ?? DEFAULT_PORT),
+  };
+}
+
+export function reflectionIntervalMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  const raw = env.PHI_REFLECTION_INTERVAL_MS;
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+export function reflectionTaskDefinition(
+  env: NodeJS.ProcessEnv = process.env,
+): ScheduledTaskDefinition {
+  const interval = reflectionIntervalMs(env);
+  if (interval !== undefined) {
+    return {
+      id: "system.reflection",
+      handler: "reflection",
+      schedule: { kind: "interval", everyMs: interval || DAY_MS },
+      catchUp: "run_once",
+      enabled: interval > 0,
+      initialRun: "now",
+    };
+  }
+  const expression =
+    env.PHI_REFLECTION_CRON?.trim() || DEFAULT_REFLECTION_CRON;
+  const timezone = env.PHI_REFLECTION_TIMEZONE?.trim() || undefined;
+  return {
+    id: "system.reflection",
+    handler: "reflection",
+    schedule: {
+      kind: "cron",
+      expression,
+      ...(timezone ? { timezone } : {}),
+    },
+    catchUp: "run_once",
+    initialRun: "now",
   };
 }
 
@@ -73,6 +119,13 @@ export async function startServer(): Promise<void> {
     checkpoints,
     ...(Number.isInteger(hopBudget) && hopBudget >= 0 ? { hopBudget } : {}),
   });
+  const reflection = new ReflectionService(store, runtime);
+  const scheduler = new SchedulerService(store);
+  scheduler.registerHandler("reflection", async () => {
+    await reflection.runOnce();
+  });
+  scheduler.upsertTask(reflectionTaskDefinition());
+  scheduler.start();
   const fileHandler = createFileHandler(workspace.rootPath, store);
   const deviceAuth = new DeviceAuth(store.rootPath);
   const attachments = createAttachmentHandlers(store, {
@@ -316,12 +369,38 @@ export async function startServer(): Promise<void> {
           }
           const body = (await req.json().catch(() => null)) as {
             status?: unknown;
+            outcome?: unknown;
           } | null;
           const status = body?.status;
-          if (status !== "open" && status !== "settled" && status !== "archived") {
+          const outcome = body?.outcome;
+          if (
+            status !== undefined &&
+            status !== "open" &&
+            status !== "settled" &&
+            status !== "archived"
+          ) {
             return Response.json({ error: "invalid status" }, { status: 400 });
           }
-          const updated = store.setThreadStatus(thread.id, status);
+          if (
+            outcome !== undefined &&
+            outcome !== null &&
+            outcome !== "worked" &&
+            outcome !== "needed_rework" &&
+            outcome !== "user_corrected"
+          ) {
+            return Response.json({ error: "invalid outcome" }, { status: 400 });
+          }
+          if (status === undefined && outcome === undefined) {
+            return Response.json(
+              { error: "status or outcome is required" },
+              { status: 400 },
+            );
+          }
+          if (status !== undefined) store.setThreadStatus(thread.id, status);
+          const updated =
+            outcome !== undefined
+              ? store.setThreadOutcome(thread.id, outcome)
+              : store.getThread(thread.id);
           return Response.json({ thread: updated });
         },
       },
@@ -545,6 +624,7 @@ export async function startServer(): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    scheduler.close();
     await server.stop();
     await runtime.shutdown();
     await messageSearch.close().catch((error) => {

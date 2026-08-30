@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { FileText, LoaderCircle, RotateCcw, Square, X } from "lucide-react";
+import { CircleGauge, FileText, LoaderCircle, RotateCcw, Square, X } from "lucide-react";
 import { Composer } from "@/web/components/composer";
 import { FileViewerDialog } from "@/web/components/file-link";
 import { JumpToLatest } from "@/web/components/jump-to-latest";
@@ -19,6 +19,7 @@ import {
   useRetryTurn,
   useSendMessage,
   useThreadTurn,
+  useUpdateThreadOutcome,
 } from "@/web/lib/queries";
 import { latestCommittedMessageId } from "@/web/lib/activity";
 import { useFileViewerOutlet } from "@/web/lib/file-link-context";
@@ -34,6 +35,7 @@ export function ThreadPanel({
   threadId,
   turnActive,
   turnAgent,
+  outcome,
   closeTo,
 }: {
   channelId: string;
@@ -41,6 +43,7 @@ export function ThreadPanel({
   threadId: string;
   turnActive: boolean;
   turnAgent: string | null;
+  outcome: "worked" | "needed_rework" | "user_corrected" | null;
   // Where the close button navigates; defaults to the thread's channel.
   closeTo?: string;
 }) {
@@ -48,6 +51,7 @@ export function ThreadPanel({
   const { data: agentData } = useAgents();
   const send = useSendMessage(threadId);
   const cancel = useCancelTurn(threadId);
+  const updateOutcome = useUpdateThreadOutcome(channelId, threadId);
   const messages = data?.messages ?? [];
   const [root, ...replies] = messages;
   const untaggedAgent = threadUntaggedAgent(messages, agentData?.agents);
@@ -127,6 +131,11 @@ export function ThreadPanel({
           </Link>
         )}
         <div className="ml-auto flex shrink-0 items-center">
+          <OutcomeButton
+            outcome={outcome}
+            disabled={updateOutcome.isPending}
+            onSelect={(next) => updateOutcome.mutate(next)}
+          />
           <CommentedDocsButton channelId={channelId} threadId={threadId} />
           <Link
             to={closeTo ?? `/c/${channelId}`}
@@ -226,6 +235,60 @@ export function ThreadPanel({
         className="px-4 pb-4"
       />
     </aside>
+  );
+}
+
+const OUTCOME_LABELS = {
+  worked: "Worked",
+  needed_rework: "Needed rework",
+  user_corrected: "User corrected",
+} as const;
+
+function OutcomeButton({
+  outcome,
+  disabled,
+  onSelect,
+}: {
+  outcome: keyof typeof OUTCOME_LABELS | null;
+  disabled: boolean;
+  onSelect: (outcome: keyof typeof OUTCOME_LABELS | null) => void;
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        title={outcome ? `Outcome: ${OUTCOME_LABELS[outcome]}` : "Tag outcome"}
+        disabled={disabled}
+        className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+      >
+        <CircleGauge className={cn("size-3.5", outcome && "text-sky-600")} />
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-44 gap-1 p-1">
+        {(Object.entries(OUTCOME_LABELS) as Array<
+          [keyof typeof OUTCOME_LABELS, string]
+        >).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onSelect(value)}
+            className={cn(
+              "w-full rounded px-2 py-1.5 text-left text-xs hover:bg-accent",
+              outcome === value && "bg-accent font-medium",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+        {outcome && (
+          <button
+            type="button"
+            onClick={() => onSelect(null)}
+            className="w-full rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent"
+          >
+            Clear outcome
+          </button>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 

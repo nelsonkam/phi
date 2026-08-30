@@ -203,13 +203,15 @@ Following `send_message`, the read slice:
 | ---- | ------------------ | ----- |
 | `list_channels` | `listChannels(workspaceId)` | workspace resolved server-side |
 | `list_threads` | resolve channel name, then `listThreads(channelId)` | agents pass a channel name, never its ID |
-| `read_thread` | `listMessages(threadId)` | current thread, or the comment's parent |
+| `read_thread` | `listMessages(threadId)` | any thread in the caller's workspace |
 | `search_messages` | hybrid FTS5 + local embeddings | workspace/current thread resolved server-side; optional channel name, author, and current-thread opt-in; never channel/thread IDs |
+| `list_channel_threads` | `channelThreadSummaries(channelId, fromSeq, throughSeq)` | compact previews, outcomes, and counts; optional sequence bounds; excludes reflection and proposal threads |
 
-Cross-thread reads via `read_thread` are limited to the caller's thread and
-a doc comment's recorded parent — enough to pull the sharing conversation
-without a general thread browser. `send_message` may post to that same
-parent (`thread_id`); arbitrary thread ids are rejected.
+`read_thread` accepts any thread in the caller's workspace. Phi is
+single-user and `search_messages` already exposes all message content, so a
+narrower read scope would be complexity without a boundary. Writes stay
+scoped: `send_message` may post only to the current thread or a doc
+comment's recorded parent (`thread_id`); arbitrary thread ids are rejected.
 
 `search_messages` is the first read tool implemented. It excludes the caller's
 current thread by default; `includeCurrentThread: true` opts it back in without
@@ -225,6 +227,12 @@ candidate pool for that thread. `matchedBy` reports keyword and/or semantic
 matching; internal rank scores are not exposed. If local model inference is
 unavailable, the tool degrades to lexical results and reports
 `semanticAvailable: false`.
+
+Scheduled reflection uses the same tools as every other run: its prompt
+names the source channel and `fromSeq`/`throughSeq` window, and the agent is
+instructed — not capability-forced — to base changes on evidence inside it.
+Cursor advancement is computed server-side from the durable window, so an
+agent reading outside the bounds cannot corrupt scheduling state.
 
 ### 5.4 `create_channel` and attached folders
 

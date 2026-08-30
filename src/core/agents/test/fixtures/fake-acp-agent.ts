@@ -177,6 +177,17 @@ async function handle(line: string): Promise<void> {
       };
       const session = sessions.get(params.sessionId)!;
       session.turn += 1;
+      if (has("prompt-error")) {
+        send({
+          id: msg.id,
+          error: {
+            code: -32603,
+            message: "Internal error",
+            data: { details: "thread fake-thread already has an active writer" },
+          },
+        });
+        break;
+      }
       if (has("slow")) {
         pendingPrompts.set(params.sessionId, msg.id!);
         break;

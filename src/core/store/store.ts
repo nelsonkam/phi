@@ -50,6 +50,24 @@ export interface CreateChannelInput {
   folders?: string[];
 }
 
+export interface ReflectionWindow {
+  fromSeq: number;
+  throughSeq: number;
+  messageCount: number;
+}
+
+export interface ChannelThreadSummary {
+  threadId: string;
+  outcome: Thread["outcome"];
+  fromSeq: number;
+  throughSeq: number;
+  messageCount: number;
+  hasEarlierMessages: boolean;
+  hasLaterMessages: boolean;
+  firstMessage: Message;
+  latestMessage: Message;
+}
+
 export interface ThreadSessionBinding {
   threadId: string;
   harnessId: string;
@@ -197,6 +215,131 @@ export class PhiStore {
       )
       .all(workspaceId)
       .map(channelFromRow);
+  }
+
+  reflectionWindow(
+    channelId: string,
+    options: { minMessages: number; limit: number },
+  ): ReflectionWindow | null {
+    const cursor = this.db
+      .query<{ through_seq: number }, [string]>(
+        `SELECT through_seq FROM reflection_runs
+         WHERE channel_id = ? ORDER BY through_seq DESC LIMIT 1`,
+      )
+      .get(channelId)?.through_seq ?? 0;
+    const rows = this.db
+      .query<{ seq: number }, [string, number, number]>(
+        `SELECT m.seq
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.channel_id = ? AND m.seq > ?
+           AND t.kind = 'chat'
+           AND NOT EXISTS (
+             SELECT 1 FROM messages root
+             WHERE root.thread_id = t.id
+               AND (
+                 root.kind = 'reflection'
+                 OR root.content LIKE '%<!-- phi:reflection-proposal -->%'
+               )
+           )
+         ORDER BY m.seq ASC
+         LIMIT ?`,
+      )
+      .all(channelId, cursor, options.limit);
+    if (rows.length < options.minMessages) return null;
+    return {
+      fromSeq: rows[0]!.seq,
+      throughSeq: rows.at(-1)!.seq,
+      messageCount: rows.length,
+    };
+  }
+
+  channelThreadSummaries(
+    channelId: string,
+    fromSeq: number,
+    throughSeq: number,
+  ): ChannelThreadSummary[] {
+    type ReflectionMessageRow = MessageRow & {
+      thread_outcome: string | null;
+    };
+    const rows = this.db
+      .query<ReflectionMessageRow, [string, number, number]>(
+        `SELECT m.*, t.outcome AS thread_outcome
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.channel_id = ? AND m.seq BETWEEN ? AND ?
+           AND t.kind = 'chat'
+           AND NOT EXISTS (
+             SELECT 1 FROM messages root
+             WHERE root.thread_id = t.id
+               AND (
+                 root.kind = 'reflection'
+                 OR root.content LIKE '%<!-- phi:reflection-proposal -->%'
+               )
+           )
+         ORDER BY m.seq ASC`,
+      )
+      .all(channelId, fromSeq, throughSeq);
+    const threadBounds = new Map(
+      this.listThreads(channelId).map((thread) => [
+        thread.id,
+        {
+          firstSeq: thread.rootMessage?.seq ?? thread.lastSeq,
+          lastSeq: thread.lastSeq,
+        },
+      ]),
+    );
+    const grouped = new Map<
+      string,
+      { rows: ReflectionMessageRow[]; outcome: Thread["outcome"] }
+    >();
+    for (const row of rows) {
+      const existing = grouped.get(row.thread_id);
+      if (existing) {
+        existing.rows.push(row);
+      } else {
+        grouped.set(row.thread_id, {
+          rows: [row],
+          outcome: row.thread_outcome as Thread["outcome"],
+        });
+      }
+    }
+    return [...grouped.entries()].map(([threadId, group]) => {
+      const first = group.rows[0]!;
+      const latest = group.rows.at(-1)!;
+      const bounds = threadBounds.get(threadId);
+      return {
+        threadId,
+        outcome: group.outcome,
+        fromSeq: first.seq,
+        throughSeq: latest.seq,
+        messageCount: group.rows.length,
+        hasEarlierMessages: (bounds?.firstSeq ?? first.seq) < first.seq,
+        hasLaterMessages: (bounds?.lastSeq ?? latest.seq) > latest.seq,
+        firstMessage: messageFromRow(first),
+        latestMessage: messageFromRow(latest),
+      };
+    });
+  }
+
+  recordReflectionRun(
+    channelId: string,
+    throughSeq: number,
+    threadId: string,
+  ): void {
+    this.db
+      .query(
+        `INSERT INTO reflection_runs
+           (id, channel_id, through_seq, thread_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        newId("reflection"),
+        channelId,
+        throughSeq,
+        threadId,
+        new Date().toISOString(),
+      );
   }
 
   reconcileChannelFolders(): void {
@@ -424,6 +567,17 @@ export class PhiStore {
     this.db
       .query("UPDATE threads SET status = ?, updated_at = ? WHERE id = ?",)
       .run(status, now, threadId);
+    const thread = this.getThread(threadId)!;
+    this.emit({ type: "thread.updated", thread });
+    return thread;
+  }
+
+  setThreadOutcome(threadId: string, outcome: Thread["outcome"]): Thread | null {
+    if (!this.getThread(threadId)) return null;
+    const now = new Date().toISOString();
+    this.db
+      .query("UPDATE threads SET outcome = ?, updated_at = ? WHERE id = ?")
+      .run(outcome, now, threadId);
     const thread = this.getThread(threadId)!;
     this.emit({ type: "thread.updated", thread });
     return thread;
@@ -1000,6 +1154,7 @@ interface ThreadRow {
   created_at: string;
   updated_at: string;
   kind: string;
+  outcome: string | null;
 }
 
 interface DocCommentAnchorRow {
@@ -1067,6 +1222,7 @@ function threadFromRow(row: ThreadRow): Thread {
     title: row.title,
     status: row.status as Thread["status"],
     kind: row.kind === "doc_comment" ? "doc_comment" : "chat",
+    outcome: row.outcome as Thread["outcome"],
     lastSeq: row.last_seq,
     turnActive: row.turn_active === 1,
     turnAgent: row.turn_agent,

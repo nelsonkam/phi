@@ -163,6 +163,13 @@ export function updateThreadStatus(
   return patch(`/threads/${threadId}`, { status });
 }
 
+export function updateThreadOutcome(
+  threadId: string,
+  outcome: Thread["outcome"],
+): Promise<{ thread: Thread }> {
+  return patch(`/threads/${threadId}`, { outcome });
+}
+
 export async function uploadAttachment(file: File): Promise<Attachment> {
   const body = new FormData();
   body.append("file", file, file.name);

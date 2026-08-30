@@ -44,10 +44,26 @@ test("createThread writes the thread and its first message atomically", () => {
 
   expect(thread.title).toBe("Ship the chat slice");
   expect(thread.status).toBe("open");
+  expect(thread.outcome).toBeNull();
   expect(thread.lastSeq).toBe(1);
   expect(message.seq).toBe(1);
   expect(message.threadId).toBe(thread.id);
   expect(store.listMessages(thread.id)).toHaveLength(1);
+  store.close();
+});
+
+test("records and clears thread outcome signal", () => {
+  const { store, channel } = chatFixture();
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Try this",
+  });
+
+  expect(store.setThreadOutcome(thread.id, "needed_rework")?.outcome).toBe(
+    "needed_rework",
+  );
+  expect(store.setThreadOutcome(thread.id, null)?.outcome).toBeNull();
   store.close();
 });
 

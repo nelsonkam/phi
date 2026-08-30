@@ -201,6 +201,7 @@ the final fallback.
 
 ```text
 workspace/
+├── rules.md              # workspace-wide user rules and preferences
 ├── .agents/              # shared: skills, memories, instructions, personas
 │   ├── agents.md
 │   ├── skills/
@@ -208,7 +209,9 @@ workspace/
 │   └── personas/
 ├── channels/
 │   ├── backend/
-│   │   └── AGENTS.md     # channel conventions, working knowledge
+│   │   ├── AGENTS.md     # harness/channel context; links to rules and skills
+│   │   ├── rules.md      # channel-scoped user rules and preferences
+│   │   └── skills/       # reviewed channel-scoped procedures
 │   └── frontend/
 └── shared/               # optional cross-channel artifact handoff
 ```
@@ -221,9 +224,11 @@ workspace/
   relied upon.
 - `read_workspace` confinement tightens from whole-workspace to
   channel-scratch + read-only `.agents/` + `shared/`.
-- Memories scope by location: general knowledge goes to
-  `.agents/memories/`, channel-specific knowledge to that channel's
-  `AGENTS.md`. The filesystem distinction is the scoping policy.
+- Memories scope by location: general knowledge goes to `.agents/memories/`;
+  workspace-wide user rules and preferences go to `rules.md`; channel-specific
+  rules go to `channels/<name>/rules.md`; and reviewed channel procedures go
+  under `channels/<name>/skills/`. `AGENTS.md` remains harness-owned context and
+  only links to learned/user-owned material.
 
 ## 7. Git policy
 
@@ -325,7 +330,39 @@ Deferred: coordinator-layer named agents (separate persistent coordinators,
 separate memories/authorities). Only justified by genuinely different
 authorities, which correlates more with multi-workspace than naming.
 
-## 9. Server transport and clients
+## 9. Durable scheduler and automations
+
+Scheduled work uses one process-wide `SchedulerService`; features do not own
+private intervals. Task definitions and runtime state live in SQLite
+(`scheduled_tasks`): handler key, JSON payload, interval or cron schedule,
+timezone, catch-up policy, next/last run, and retry state. The scheduler keeps
+only one unreferenced timer for the earliest due task, dispatches registered
+handlers without overlap, and recomputes the next wake after every mutation.
+
+Croner is deliberately only the cron expression/timezone calculator. SQLite
+remains the authority, so restarts preserve overdue work, failures retry with
+bounded backoff, and `run_once` versus `skip` catch-up is explicit. A future
+automation tool creates and manages rows through this service rather than
+adding another timer or cron runtime.
+
+Reflection is the first built-in scheduled task (`system.reflection`). It runs
+at `0 3 * * *` by default, may be configured by cron/timezone, and retains the
+legacy interval override. Its handler owns reflection semantics only; schedule,
+wake-up, persistence, and retry belong to the shared scheduler.
+
+Reflection runs are centralized as auditable threads in an automatically
+created `#reflection` channel, which is itself excluded as a reflection source.
+Each run records the source channel and message-sequence bounds in its root
+metadata; per-source-channel cursors still advance only after a durable agent
+reply. The source transcript is not copied into the system message. Instead,
+the prompt names the window and the run uses the ordinary read tools —
+`list_channel_threads` with the window's sequence bounds, then `read_thread`
+on the threads worth inspecting. The bounds are guidance, not an enforced
+capability: phi is single-user, every agent can already search all message
+content, and cursor advancement is computed server-side, so a scoped token
+would add machinery without adding safety.
+
+## 10. Server transport and clients
 
 - New primary command: `phi serve` using `Bun.serve` (HTTP + WebSocket in
   one listener). `doctor` and `once` remain; direct mode stays the
@@ -356,7 +393,7 @@ Security posture changes character from filesystem trust to network identity:
   URL, client opens browser, polls status) since localhost callbacks fail
   from phones.
 
-## 10. Implementation sequence
+## 11. Implementation sequence
 
 1. Extract an app-service interface (the operations the UI controller uses)
    from `PhiApp`; TUI consumes the interface. No behavior change.
@@ -382,7 +419,7 @@ Step ordering note: per-thread sessions and channel directories must land
 with or before client work — without them channels are cosmetic, because all
 coordinator responses still drain through one serial queue.
 
-## 11. Invariants carried forward unchanged
+## 12. Invariants carried forward unchanged
 
 Everything that makes Phi durable survives this evolution untouched:
 

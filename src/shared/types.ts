@@ -23,6 +23,8 @@ export type ThreadStatus = "open" | "settled" | "archived";
 
 export type ThreadKind = "chat" | "doc_comment";
 
+export type ThreadOutcome = "worked" | "needed_rework" | "user_corrected";
+
 export interface Thread {
   id: string;
   workspaceId: string;
@@ -30,6 +32,7 @@ export interface Thread {
   title: string | null;
   status: ThreadStatus;
   kind: ThreadKind;
+  outcome: ThreadOutcome | null;
   lastSeq: number;
   turnActive: boolean;
   turnAgent: string | null;

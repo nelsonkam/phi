@@ -343,7 +343,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(7);
+  expect(body.result.tools).toHaveLength(8);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.description).toContain(
@@ -365,19 +365,175 @@ test("advertises messaging and workspace search without a thread argument", asyn
   expect(createThreadTool.name).toBe("create_thread");
   expect(createThreadTool.inputSchema.properties.channel).toBeDefined();
   expect(createThreadTool.inputSchema.properties.to).toBeDefined();
-  const readThread = body.result.tools[4]!;
+  const listChannelThreads = body.result.tools[4]!;
+  expect(listChannelThreads.name).toBe("list_channel_threads");
+  expect(listChannelThreads.inputSchema.properties.channel).toBeDefined();
+  const readThread = body.result.tools[5]!;
   expect(readThread.name).toBe("read_thread");
   expect(readThread.inputSchema.properties.thread_id).toBeDefined();
-  const readAttachment = body.result.tools[5]!;
+  const readAttachment = body.result.tools[6]!;
   expect(readAttachment.name).toBe("read_attachment");
   expect(readAttachment.inputSchema.properties.attachment_id).toBeDefined();
-  const search = body.result.tools[6]!;
+  const search = body.result.tools[7]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
   expect(search.inputSchema.properties.channel).toBeDefined();
   expect(search.inputSchema.properties.includeCurrentThread).toBeDefined();
   expect(search.inputSchema.properties.author).toBeDefined();
+  store.close();
+});
+
+test("list_channel_threads surveys a channel and read_thread reads any workspace thread", async () => {
+  const { store, thread, tokens, handler, workspace } = fixture();
+  const channel = store.getChannel(thread.channelId)!;
+  const attachment = attachFile(
+    store,
+    `att_${"9".repeat(32)}`,
+    "decision.txt",
+    "text/plain",
+    "durable decision\n",
+  );
+  store.appendMessage(thread.id, {
+    author: "agent",
+    kind: "message",
+    content: "Acknowledged",
+    metadata: { agent: "default", attachments: [attachment] },
+  });
+  store.setThreadOutcome(thread.id, "worked");
+  const second = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Use compact titles",
+  });
+  const otherChannel = store.createChannel(workspace.id, { name: "private" });
+  const outside = store.createThread(otherChannel.id, {
+    author: "user",
+    kind: "message",
+    content: "Outside the source channel",
+  });
+  const reflectionChannel = store.createChannel(workspace.id, {
+    name: "reflection",
+  });
+  const run = store.createThread(reflectionChannel.id, {
+    author: "system",
+    kind: "reflection",
+    content: "Inspect the source window",
+    metadata: { reflection: true },
+  });
+  const runToken = tokens.mint({
+    threadId: run.thread.id,
+    agentName: "default",
+  });
+
+  const listedTools = (await (await listTools(handler, runToken)).json()) as {
+    result: { tools: Array<{ name: string }> };
+  };
+  const toolNames = listedTools.result.tools.map((tool) => tool.name);
+  expect(toolNames).toContain("list_channel_threads");
+  expect(toolNames).toContain("search_messages");
+  expect(toolNames).not.toContain("read_channel_thread");
+
+  const listed = await callTool(
+    handler,
+    runToken,
+    60,
+    "list_channel_threads",
+    {
+      channel: channel.name,
+      from_seq: store.rootMessage(thread.id)!.seq,
+      through_seq: second.message.seq,
+    },
+  );
+  const listedBody = (await listed.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  const payload = JSON.parse(listedBody.result.content[0]!.text) as {
+    channel: string;
+    threads: Array<{
+      threadId: string;
+      outcome: string | null;
+      messageCount: number;
+    }>;
+  };
+  expect(payload.channel).toBe(channel.name);
+  expect(payload.threads).toHaveLength(2);
+  expect(payload.threads[0]).toMatchObject({
+    threadId: thread.id,
+    outcome: "worked",
+    messageCount: 2,
+  });
+
+  // The run's own channel is surveyable but its reflection thread is excluded.
+  const ownChannel = await callTool(
+    handler,
+    runToken,
+    61,
+    "list_channel_threads",
+    {},
+  );
+  const ownBody = (await ownChannel.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(
+    (JSON.parse(ownBody.result.content[0]!.text) as {
+      threads: unknown[];
+    }).threads,
+  ).toHaveLength(0);
+
+  const seqBounded = await callTool(
+    handler,
+    runToken,
+    62,
+    "list_channel_threads",
+    {
+      channel: channel.name,
+      through_seq: store.rootMessage(thread.id)!.seq,
+    },
+  );
+  const seqBody = (await seqBounded.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(
+    (JSON.parse(seqBody.result.content[0]!.text) as {
+      threads: Array<{ messageCount: number }>;
+    }).threads,
+  ).toEqual([expect.objectContaining({ threadId: thread.id, messageCount: 1 })]);
+
+  const crossChannel = await callTool(handler, runToken, 63, "read_thread", {
+    thread_id: outside.thread.id,
+  });
+  const crossBody = (await crossChannel.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(
+    (JSON.parse(crossBody.result.content[0]!.text) as {
+      messages: Array<{ content: string }>;
+    }).messages.map((message) => message.content),
+  ).toEqual(["Outside the source channel"]);
+
+  const unknownThread = await callTool(handler, runToken, 64, "read_thread", {
+    thread_id: "th_missing",
+  });
+  expect(
+    ((await unknownThread.json()) as { result: { isError: boolean } }).result
+      .isError,
+  ).toBe(true);
+
+  const attachmentRead = await callTool(
+    handler,
+    runToken,
+    65,
+    "read_attachment",
+    { attachment_id: attachment.id },
+  );
+  const attachmentBody = (await attachmentRead.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(
+    (JSON.parse(attachmentBody.result.content[0]!.text) as { content: string })
+      .content,
+  ).toBe("durable decision\n");
   store.close();
 });
 
@@ -784,7 +940,7 @@ test("send_message rejects a leading peer handle without to", async () => {
   store.close();
 });
 
-test("read_thread returns the current thread or a comment's parent", async () => {
+test("read_thread reads any workspace thread", async () => {
   const { store, thread, token, tokens, handler } = fixture();
   const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
   const attachment = attachFile(
@@ -817,15 +973,19 @@ test("read_thread returns the current thread or a comment's parent", async () =>
   const other = store.createThread(channel.id, {
     author: "user",
     kind: "message",
-    content: "secret",
+    content: "another topic",
   });
-  const denied = await callTool(handler, token, 51, "read_thread", {
+  const sibling = await callTool(handler, token, 51, "read_thread", {
     thread_id: other.thread.id,
   });
-  const deniedBody = (await denied.json()) as {
-    result: { isError: boolean; content: Array<{ text: string }> };
+  const siblingBody = (await sibling.json()) as {
+    result: { content: Array<{ text: string }> };
   };
-  expect(deniedBody.result.isError).toBe(true);
+  expect(
+    (JSON.parse(siblingBody.result.content[0]!.text) as {
+      messages: Array<{ content: string }>;
+    }).messages.map((message) => message.content),
+  ).toEqual(["another topic"]);
 
   const comment = store.createDocComment(
     channel.id,
@@ -946,7 +1106,7 @@ test("read_attachment truncates text responses at the byte cap", async () => {
   store.close();
 });
 
-test("read_attachment enforces thread scope and rejects binary files", async () => {
+test("read_attachment reads cross-thread attachments and rejects binary files", async () => {
   const { store, thread, token, handler } = fixture();
   const channel = store.listChannels(store.defaultWorkspace().id)[0]!;
   const other = store.createThread(channel.id, {
@@ -954,29 +1114,29 @@ test("read_attachment enforces thread scope and rejects binary files", async () 
     kind: "message",
     content: "Other thread",
   });
-  const secret = attachFile(
+  const shared = attachFile(
     store,
     `att_${"c".repeat(32)}`,
-    "secret.txt",
+    "notes.txt",
     "text/plain",
-    "do not leak",
+    "cross-thread notes",
   );
   store.appendMessage(other.thread.id, {
     author: "user",
     kind: "message",
-    content: "Secret",
-    metadata: { attachments: [secret] },
+    content: "Notes",
+    metadata: { attachments: [shared] },
   });
-  const denied = await callTool(handler, token, 54, "read_attachment", {
-    attachment_id: secret.id,
+  const crossThread = await callTool(handler, token, 54, "read_attachment", {
+    attachment_id: shared.id,
   });
-  const deniedBody = (await denied.json()) as {
-    result: { isError: boolean; content: Array<{ text: string }> };
+  const crossBody = (await crossThread.json()) as {
+    result: { content: Array<{ text: string }> };
   };
-  expect(deniedBody.result.isError).toBe(true);
-  expect(deniedBody.result.content[0]!.text).toContain(
-    "not available in this thread",
-  );
+  expect(
+    (JSON.parse(crossBody.result.content[0]!.text) as { content: string })
+      .content,
+  ).toBe("cross-thread notes");
 
   const malformed = await callTool(handler, token, 59, "read_attachment", {
     attachment_id: "../../secret",
@@ -986,7 +1146,7 @@ test("read_attachment enforces thread scope and rejects binary files", async () 
   };
   expect(malformedBody.result.isError).toBe(true);
   expect(malformedBody.result.content[0]!.text).toContain(
-    "not available in this thread",
+    "not available in this workspace",
   );
 
   const image = attachFile(
