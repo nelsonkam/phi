@@ -4,10 +4,10 @@ import appleTouchIcon from "@/web/apple-touch-icon.png" with { type: "file" };
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
 
-test("html shell points at the brand favicon routes", async () => {
+test("html shell links the brand favicon assets", async () => {
   const html = await Bun.file(new URL("../index.html", import.meta.url)).text();
-  expect(html).toContain('rel="icon" href="/favicon.png"');
-  expect(html).toContain('rel="apple-touch-icon" href="/apple-touch-icon.png"');
+  expect(html).toContain('rel="icon" href="./favicon.png"');
+  expect(html).toContain('rel="apple-touch-icon" href="./apple-touch-icon.png"');
 });
 
 test("favicon assets are pngs derived from the brand logo", async () => {
