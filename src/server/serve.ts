@@ -1,4 +1,6 @@
 import index from "@/web/index.html";
+import faviconPng from "@/web/favicon.png" with { type: "file" };
+import appleTouchIcon from "@/web/apple-touch-icon.png" with { type: "file" };
 import { PhiStore } from "@/core/store/store";
 import { detectHarnesses } from "@/core/agents/harnesses";
 import { HarnessCapabilityService } from "@/core/agents/capabilities";
@@ -152,6 +154,9 @@ export async function startServer(): Promise<void> {
       console: true,
     },
     routes: haltRoutes({
+      "/favicon.ico": () => pngAsset(faviconPng),
+      "/favicon.png": () => pngAsset(faviconPng),
+      "/apple-touch-icon.png": () => pngAsset(appleTouchIcon),
       "/*": index,
       "/mcp": {
         GET: mcpHandler,
@@ -719,6 +724,12 @@ const HTTP_METHODS = new Set([
   "HEAD",
   "OPTIONS",
 ]);
+
+function pngAsset(path: string): Response {
+  return new Response(Bun.file(path), {
+    headers: { "Content-Type": "image/png" },
+  });
+}
 
 function haltRoutes<T extends NonNullable<Parameters<typeof Bun.serve>[0]["routes"]>>(
   routes: T,
