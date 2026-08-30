@@ -42,7 +42,7 @@ function newCheckpointId(): string {
 export class CheckpointService {
   private readonly store: PhiStore;
   private readonly git: GitWorkspace;
-  private readonly remoteConfig: GitRemoteConfig;
+  private remoteConfig: GitRemoteConfig;
   private chain: Promise<unknown> = Promise.resolve();
   private healthState: CheckpointHealth = {
     status: "ok",
@@ -72,6 +72,45 @@ export class CheckpointService {
 
   remoteHealth(): RemoteHealth {
     return { ...this.remoteState };
+  }
+
+  // Hot-swap the in-memory remote after the host config file (or env) changes.
+  // Does not write the file. A URL change resets lastPushedSha; an in-flight
+  // push may still finish against the previous URL, then the worker restarts
+  // with the new config.
+  configureRemote(config: GitRemoteConfig): void {
+    const previousUrl =
+      this.remoteConfig.kind === "ok" ? this.remoteConfig.url : null;
+    const nextUrl = config.kind === "ok" ? config.url : null;
+    this.remoteConfig = config;
+    if (previousUrl !== nextUrl || config.kind !== "ok") {
+      this.remoteState = initialRemoteHealth(config);
+    }
+    this.desiredSha = null;
+    this.scheduleGen += 1;
+    if (
+      config.kind === "ok" &&
+      this.phiOwned &&
+      this.healthState.status === "ok" &&
+      !this.closed
+    ) {
+      const sha = this.healthState.lastSha;
+      if (sha) {
+        if (previousUrl === nextUrl && this.remoteState.status === "degraded") {
+          // Explicit same-URL retry (Settings save). Only re-enter pending
+          // when a push will actually be queued, so observers don't poll
+          // forever. Failure itself still does not restart.
+          this.remoteState = {
+            status: "pending",
+            configured: true,
+            displayUrl: config.displayUrl,
+            lastPushedSha: this.remoteState.lastPushedSha,
+            error: null,
+          };
+        }
+        this.schedulePush(sha);
+      }
+    }
   }
 
   async initialize(): Promise<void> {
@@ -392,6 +431,7 @@ export class CheckpointService {
   }
 
   private markRemotePending(): void {
+    if (this.remoteConfig.kind !== "ok") return;
     if (
       this.remoteState.status === "ok" ||
       this.remoteState.status === "degraded"
@@ -418,18 +458,15 @@ export class CheckpointService {
   private async runRemoteLoop(): Promise<void> {
     this.remoteInFlight = true;
     let attemptGen = this.scheduleGen;
-    const url = this.remoteConfig.kind === "ok" ? this.remoteConfig.url : null;
-    if (!url) {
-      this.remoteInFlight = false;
-      this.resolveRemoteIdle();
-      return;
-    }
     this.markRemotePending();
     try {
       while (true) {
         const sha = this.desiredSha;
         attemptGen = this.scheduleGen;
         if (!sha) break;
+        const url =
+          this.remoteConfig.kind === "ok" ? this.remoteConfig.url : null;
+        if (!url) break;
         const timeoutMs = this.remainingTimeout();
         const signal = this.remoteAbort.signal;
         await this.git.ensureOrigin(url, { timeoutMs, signal });
@@ -448,14 +485,15 @@ export class CheckpointService {
         break;
       }
     } catch (error) {
-      this.remoteState = {
-        status: "degraded",
-        configured: true,
-        displayUrl:
-          this.remoteConfig.kind === "ok" ? this.remoteConfig.displayUrl : null,
-        lastPushedSha: this.remoteState.lastPushedSha,
-        error: this.remoteError(error),
-      };
+      if (this.scheduleGen === attemptGen && this.remoteConfig.kind === "ok") {
+        this.remoteState = {
+          status: "degraded",
+          configured: true,
+          displayUrl: this.remoteConfig.displayUrl,
+          lastPushedSha: this.remoteState.lastPushedSha,
+          error: this.remoteError(error),
+        };
+      }
     } finally {
       if (
         this.scheduleGen !== attemptGen &&

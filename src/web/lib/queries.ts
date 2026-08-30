@@ -17,6 +17,7 @@ import {
   fetchChannels,
   fetchDocComments,
   fetchDocCommentSummary,
+  fetchGitRemoteSettings,
   fetchHarnessConfig,
   fetchHarnesses,
   fetchMessages,
@@ -29,6 +30,7 @@ import {
   searchMessages,
   sendMessage,
   updateAgent,
+  updateGitRemoteSettings,
   updateThreadStatus,
   updateThreadOutcome,
 } from "./api";
@@ -55,6 +57,7 @@ export const queryKeys = {
   harnesses: ["harnesses"] as const,
   setupStatus: ["setup", "status"] as const,
   authSession: ["auth", "session"] as const,
+  gitRemoteSettings: ["settings", "git-remote"] as const,
   harnessConfig: (harnessId: string) => ["harnesses", harnessId, "config"] as const,
   agent: (name: string) => ["agents", name] as const,
   channelThreads: (channelId: string) => ["channels", channelId, "threads"] as const,
@@ -186,6 +189,24 @@ export function useUpdateAgent(name: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.agents });
       void queryClient.invalidateQueries({ queryKey: queryKeys.agent(name) });
+    },
+  });
+}
+
+export function useGitRemoteSettings() {
+  return useQuery({
+    queryKey: queryKeys.gitRemoteSettings,
+    queryFn: fetchGitRemoteSettings,
+    refetchInterval: (query) =>
+      query.state.data?.health.status === "pending" ? 1000 : false,
+  });
+}
+
+export function useUpdateGitRemoteSettings() {
+  return useMutation({
+    mutationFn: updateGitRemoteSettings,
+    onSuccess: (data) => {
+      queryClient.setQueryData(queryKeys.gitRemoteSettings, data);
     },
   });
 }

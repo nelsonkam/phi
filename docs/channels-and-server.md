@@ -239,7 +239,7 @@ Implemented for slice 1 as a linear undo log over the **managed workspace only**
 - Capture uses a workspace start barrier so snapshots are not mid-turn. Shutdown cancels turns, then takes one `shutdown` checkpoint.
 - Phi-owned repos only (Phi-Checkpoint trailers). Foreign `.git` directories degrade and are not modified.
 - List/restore HTTP is loopback-only until pairing-token auth exists.
-- Optional single-writer push backup: `PHI_GIT_REMOTE` or `$PHI_ROOT/git-remote`. Fast-forward only; push failures degrade remote health, not checkpoints. Not multi-machine sync.
+- Optional single-writer push backup: `PHI_GIT_REMOTE` or `$PHI_ROOT/git-remote`. Fast-forward only; push failures degrade remote health, not checkpoints. Not multi-machine sync. Operators can set or clear the file remote from Settings (`PUT /api/v1/settings/git-remote`, device-auth). Env still wins and locks the UI. Authenticated GET returns the literal URL; public `/health` does not.
 
 Historical notes below (two-stream commits, `reset --hard`) are superseded by that slice.
 

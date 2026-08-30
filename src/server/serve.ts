@@ -41,6 +41,10 @@ import { createMcpHandler } from "@/server/mcp";
 import { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { createMessageSearch } from "@/core/search/message-search";
 import { healthPayload } from "@/server/health";
+import {
+  getGitRemoteSettings,
+  putGitRemoteSettings,
+} from "@/server/git-remote-settings";
 import { ReflectionService } from "@/core/reflection";
 import {
   SchedulerService,
@@ -165,6 +169,18 @@ export async function startServer(): Promise<void> {
       },
       "/api/v1/health": () =>
         Response.json(healthPayload(workspace.id, checkpoints)),
+      "/api/v1/settings/git-remote": {
+        GET: (req) => {
+          const denied = requireDeviceAuth(deviceAuth, req);
+          if (denied) return denied;
+          return getGitRemoteSettings(store.rootPath, checkpoints);
+        },
+        PUT: async (req) => {
+          const denied = requireDeviceAuth(deviceAuth, req);
+          if (denied) return denied;
+          return putGitRemoteSettings(req, store.rootPath, checkpoints);
+        },
+      },
       "/api/v1/auth/session": {
         GET: (req, server) =>
           sessionResponse(deviceAuth, req, isLoopback(req, server)),

@@ -146,6 +146,18 @@ export interface RemoteHealth {
   error: string | null;
 }
 
+export type GitRemoteConfigSource = "unset" | "file" | "env";
+
+// Authenticated settings payload. Unlike public /health, this may include the
+// literal configured URL so the operator can edit it.
+export interface GitRemoteSettings {
+  url: string | null;
+  source: GitRemoteConfigSource;
+  locked: boolean;
+  parseError: string | null;
+  health: RemoteHealth;
+}
+
 export type RestoreScope = "scratch" | "all";
 
 export interface ThreadTurn {

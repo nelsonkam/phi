@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   classifyRemoteError,
+  inspectGitRemote,
   parseGitRemoteUrl,
   readGitRemoteConfig,
+  writeGitRemoteFile,
 } from "@/core/git-remote";
 import { gitRemotePath } from "@/core/paths";
 import { tempDir } from "@/testing/tmpdir";
@@ -84,6 +86,37 @@ test("reads the file from the given root, not phiRoot()", () => {
   expect(parsed.kind === "ok" && parsed.url).toBe(
     "git@example.com:store-root/repo.git",
   );
+});
+
+test("inspectGitRemote reports env lock vs file vs unset", () => {
+  const root = tempDir("phi-remote-inspect-");
+  expect(inspectGitRemote(root, {}).source).toBe("unset");
+  writeFileSync(gitRemotePath(root), "git@example.com:from-file/repo.git\n");
+  const fromFile = inspectGitRemote(root, {});
+  expect(fromFile).toMatchObject({
+    source: "file",
+    locked: false,
+    config: { kind: "ok", url: "git@example.com:from-file/repo.git" },
+  });
+  const fromEnv = inspectGitRemote(root, {
+    PHI_GIT_REMOTE: "https://github.com/from-env/repo.git",
+  });
+  expect(fromEnv).toMatchObject({
+    source: "env",
+    locked: true,
+    config: { kind: "ok", url: "https://github.com/from-env/repo.git" },
+  });
+});
+
+test("writeGitRemoteFile writes 0600 then unlinks on clear", () => {
+  const root = tempDir("phi-remote-write-");
+  writeGitRemoteFile(root, "https://github.com/owner/repo.git");
+  const path = gitRemotePath(root);
+  expect(readFileSync(path, "utf8")).toBe("https://github.com/owner/repo.git\n");
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+  writeGitRemoteFile(root, null);
+  expect(existsSync(path)).toBe(false);
+  writeGitRemoteFile(root, null);
 });
 
 test("classifyRemoteError maps stderr to stable classes", () => {

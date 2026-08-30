@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CheckpointHttpError, CheckpointService } from "@/core/checkpoints";
 import { GitWorkspace, runGit } from "@/core/git";
+import { parseGitRemoteUrl } from "@/core/git-remote";
 import { gitRemotePath } from "@/core/paths";
 import { PhiStore } from "@/core/store/store";
 import { ensureWorkspace } from "@/core/workspace";
@@ -528,5 +529,132 @@ test("worker does not push when ensureOrigin cannot clear a stale pushurl", asyn
   const stillA = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
   expect(stillA).toBe(pushedSha);
   expect(store.latestCheckpoint(workspace.id)!.commitSha).not.toBe(pushedSha);
+  store.close();
+});
+
+test("configureRemote starts pushing a newly set file remote", async () => {
+  const { store, workspace, checkpoints } = fixture();
+  await checkpoints.initialize();
+  expect(checkpoints.remoteHealth().status).toBe("unset");
+  const bare = tempDir("phi-bare-cfg-");
+  await runGit(bare, ["init", "--bare", "-b", "main"]);
+  const url = `file://${bare}`;
+  const parsed = parseGitRemoteUrl(url);
+  expect(parsed.kind).toBe("ok");
+  checkpoints.configureRemote(parsed);
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("ok");
+  const head = store.latestCheckpoint(workspace.id)!.commitSha;
+  const remoteHead = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(remoteHead).toBe(head);
+  store.close();
+});
+
+test("configureRemote unset stops later pushes and does not degrade from an in-flight failure", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  const pushed = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  const git = gitOf(checkpoints);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  git.pushSha = async () => {
+    await blocked;
+    throw new Error("push failed after clear");
+  };
+  writeFileSync(join(workspace.rootPath, "channels", "late.md"), "late\n");
+  await checkpoints.checkpoint({ trigger: "turn" });
+  checkpoints.configureRemote({ kind: "unset" });
+  expect(checkpoints.remoteHealth().status).toBe("unset");
+  release();
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("unset");
+  const still = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(still).toBe(pushed);
+  store.close();
+});
+
+test("configureRemote switches the push destination", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  const first = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  const other = tempDir("phi-bare-other-");
+  await runGit(other, ["init", "--bare", "-b", "main"]);
+  const parsed = parseGitRemoteUrl(`file://${other}`);
+  expect(parsed.kind).toBe("ok");
+  checkpoints.configureRemote(parsed);
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("ok");
+  const otherHead = (await runGit(other, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(otherHead).toBe(store.latestCheckpoint(workspace.id)!.commitSha);
+  expect(
+    (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim(),
+  ).toBe(first);
+  store.close();
+});
+
+test("configureRemote same-URL retry re-enters pending then succeeds", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  const git = gitOf(checkpoints);
+  let failNext = true;
+  const original = git.pushSha.bind(git);
+  git.pushSha = async (sha, options) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("rejected non-fast-forward");
+    }
+    return original(sha, options);
+  };
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("degraded");
+  expect(checkpoints.remoteHealth().error).toBe("push failed");
+
+  const parsed = parseGitRemoteUrl(`file://${bare}`);
+  expect(parsed.kind).toBe("ok");
+  checkpoints.configureRemote(parsed);
+  expect(checkpoints.remoteHealth()).toMatchObject({
+    status: "pending",
+    configured: true,
+    error: null,
+  });
+
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("ok");
+  expect(checkpoints.remoteHealth().error).toBeNull();
+  const remoteHead = (await runGit(bare, ["rev-parse", "refs/heads/main"])).stdout.trim();
+  expect(remoteHead).toBe(store.latestCheckpoint(workspace.id)!.commitSha);
+  store.close();
+});
+
+test("configureRemote same-URL retry stays degraded when a push cannot be scheduled", async () => {
+  const { store, workspace, checkpoints, bare } = await remoteFixture();
+  const git = gitOf(checkpoints);
+  let pushes = 0;
+  git.pushSha = async () => {
+    pushes += 1;
+    throw new Error("rejected non-fast-forward");
+  };
+  await checkpoints.initialize();
+  await checkpoints.flushRemote();
+  expect(checkpoints.remoteHealth().status).toBe("degraded");
+  const afterFail = pushes;
+  expect(afterFail).toBeGreaterThanOrEqual(1);
+
+  writeFileSync(join(workspace.rootPath, ".git", "index.lock"), "");
+  expect(await checkpoints.checkpoint({ trigger: "turn" })).toBeNull();
+  expect(checkpoints.health().status).toBe("degraded");
+
+  const parsed = parseGitRemoteUrl(`file://${bare}`);
+  expect(parsed.kind).toBe("ok");
+  checkpoints.configureRemote(parsed);
+  expect(checkpoints.remoteHealth().status).toBe("degraded");
+  expect(checkpoints.remoteHealth().error).toBe("push failed");
+  expect(pushes).toBe(afterFail);
+  await Bun.sleep(50);
+  expect(pushes).toBe(afterFail);
   store.close();
 });

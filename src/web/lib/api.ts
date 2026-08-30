@@ -7,6 +7,7 @@ import type {
   DocCommentAnchor,
   DocCommentDocSummary,
   DocCommentThread,
+  GitRemoteSettings,
   HarnessConfig,
   HarnessStatus,
   Message,
@@ -275,4 +276,27 @@ export async function createDefaultAgent(
     return { ok: false, error: body.error ?? `Request failed (${res.status})` };
   }
   return { ok: true };
+}
+
+export function fetchGitRemoteSettings(): Promise<GitRemoteSettings> {
+  return get("/settings/git-remote");
+}
+
+export function updateGitRemoteSettings(
+  url: string | null,
+): Promise<GitRemoteSettings> {
+  return put("/settings/git-remote", { url });
+}
+
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`/api/v1${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `PUT ${path} failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { Activity, Bot, Hash, MessageSquare } from "lucide-react";
+import { Activity, Bot, Hash, MessageSquare, Settings } from "lucide-react";
 import {
   Command,
   CommandDialog,
@@ -59,6 +59,7 @@ export function SearchDialog({
   const pages = [
     { name: "Activity", to: "/", icon: Activity },
     { name: "Agents", to: "/agents", icon: Bot },
+    { name: "Settings", to: "/settings", icon: Settings },
   ].filter((page) => page.name.toLocaleLowerCase().includes(normalized));
   const results = debounced ? (search?.results ?? []) : [];
 

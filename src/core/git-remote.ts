@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { gitRemotePath } from "@/core/paths";
+import type { GitRemoteSettings, RemoteHealth } from "@/shared/types";
 
 export const GIT_REMOTE_COMMAND_TIMEOUT_MS = 15_000;
 export const GIT_REMOTE_FLUSH_TIMEOUT_MS = 15_000;
@@ -13,6 +14,12 @@ export type GitRemoteConfig =
   | { kind: "unset" }
   | { kind: "invalid"; error: string }
   | { kind: "ok"; url: string; displayUrl: string | null };
+
+export type GitRemoteInspection = {
+  source: GitRemoteSettings["source"];
+  locked: boolean;
+  config: GitRemoteConfig;
+};
 
 export function readGitRemoteConfig(
   root: string,
@@ -37,6 +44,56 @@ export function readGitRemoteConfig(
     return { kind: "invalid", error: "git-remote file must be a single line" };
   }
   return parseGitRemoteUrl(nonempty[0]!);
+}
+
+export function inspectGitRemote(
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+): GitRemoteInspection {
+  const fromEnv = env.PHI_GIT_REMOTE?.trim();
+  if (fromEnv) {
+    return { source: "env", locked: true, config: parseGitRemoteUrl(fromEnv) };
+  }
+  const config = readGitRemoteConfig(root, env);
+  if (config.kind === "unset") {
+    return { source: "unset", locked: false, config };
+  }
+  return { source: "file", locked: false, config };
+}
+
+export function gitRemoteSettings(
+  root: string,
+  health: RemoteHealth,
+  env: NodeJS.ProcessEnv = process.env,
+): GitRemoteSettings {
+  const inspection = inspectGitRemote(root, env);
+  return {
+    url: inspection.config.kind === "ok" ? inspection.config.url : null,
+    source: inspection.source,
+    locked: inspection.locked,
+    parseError:
+      inspection.config.kind === "invalid" ? inspection.config.error : null,
+    health,
+  };
+}
+
+export function writeGitRemoteFile(root: string, url: string | null): void {
+  const path = gitRemotePath(root);
+  if (!url) {
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw error;
+    }
+    return;
+  }
+  writeFileSync(path, `${url}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best-effort on filesystems that ignore mode.
+  }
 }
 
 export function parseGitRemoteUrl(raw: string): GitRemoteConfig {

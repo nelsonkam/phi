@@ -10,6 +10,7 @@ import { AgentsPage } from "./pages/agents";
 import { AgentDetailPage } from "./pages/agent-detail";
 import { ChannelPage } from "./pages/channel";
 import { Onboarding } from "./pages/onboarding";
+import { SettingsPage } from "./pages/settings";
 import { applyTheme, getTheme } from "./lib/theme";
 import "./index.css";
 
@@ -34,6 +35,7 @@ const router = createBrowserRouter([
       { path: "t/:threadId", element: <ActivityPage /> },
       { path: "agents", element: <AgentsPage /> },
       { path: "agents/:name", element: <AgentDetailPage /> },
+      { path: "settings", element: <SettingsPage /> },
       { path: "c/:channelId", element: <ChannelPage /> },
       { path: "c/:channelId/t/:threadId", element: <ChannelPage /> },
       { path: "c/:channelId/doc/:docThreadId", element: <ChannelPage /> },

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
-import { Activity, Bot, Search } from "lucide-react";
+import { Activity, Bot, Search, Settings } from "lucide-react";
 import { SearchDialog } from "@/web/components/search-dialog";
 import { ThemeToggle } from "@/web/components/theme-toggle";
 import { activityWaitingCount } from "@/web/lib/activity";
@@ -81,6 +81,10 @@ export function App() {
           <SidebarLink to="/agents">
             <Bot className="size-4" />
             Agents
+          </SidebarLink>
+          <SidebarLink to="/settings">
+            <Settings className="size-4" />
+            Settings
           </SidebarLink>
 
           <p className="mt-4 px-2 py-1.5 text-xs font-medium text-muted-foreground">
