@@ -64,10 +64,18 @@ test("seeds the workspace AGENTS.md without overwriting it", () => {
   const seeded = readFileSync(guide, "utf8");
   expect(seeded).toContain("phi workspace");
   expect(seeded).toContain("send_message");
+  expect(seeded).toContain("[rules.md](rules.md)");
+  expect(readFileSync(join(root, "rules.md"), "utf8")).toContain(
+    "Workspace rules and preferences",
+  );
 
   writeFileSync(guide, "workspace customization\n");
   ensureWorkspace(root);
-  expect(readFileSync(guide, "utf8")).toBe("workspace customization\n");
+  const customized = readFileSync(guide, "utf8");
+  expect(customized).toStartWith("workspace customization\n");
+  expect(customized).toContain("[rules.md](rules.md)");
+  ensureWorkspace(root);
+  expect(readFileSync(guide, "utf8")).toBe(customized);
 });
 
 test("links harness instruction filenames to AGENTS.md without clobbering", () => {
@@ -105,10 +113,19 @@ test("uses the sandbox topology guide only for a new sandbox workspace", () => {
   expect(guide).toContain("/home/agent/work/repos");
   expect(guide).toContain("isolated Docker Engine");
   expect(guide).toContain("`sbx rm`");
+  expect(guide).toContain("[rules.md](rules.md)");
+  expect(guide).toContain(".agents/memories/MEMORY.md");
+  expect(guide).toContain("channels/<name>/rules.md");
+  expect(guide).toContain("channels/<name>/skills/");
+  expect(readFileSync(join(root, "rules.md"), "utf8")).toContain(
+    "Workspace rules and preferences",
+  );
 
   writeFileSync(join(root, "AGENTS.md"), "custom\n");
   ensureWorkspace(root, { PHI_IN_SANDBOX: "1" });
-  expect(readFileSync(join(root, "AGENTS.md"), "utf8")).toBe("custom\n");
+  const customized = readFileSync(join(root, "AGENTS.md"), "utf8");
+  expect(customized).toStartWith("custom\n");
+  expect(customized).toContain("[rules.md](rules.md)");
 });
 
 test("creates durable channel context without overwriting it", () => {
@@ -118,11 +135,33 @@ test("creates durable channel context without overwriting it", () => {
   const guide = join(root, "channels", "research", "AGENTS.md");
   const seeded = readFileSync(guide, "utf8");
   expect(seeded).toContain("Channel context");
+  expect(seeded).toContain("[rules.md](rules.md)");
+  expect(seeded).toContain("[skills/](skills/)");
   expect(seeded).not.toContain("/home/agent");
+
+  const rules = join(root, "channels", "research", "rules.md");
+  expect(readFileSync(rules, "utf8")).toContain("Channel rules and preferences");
+  expect(existsSync(join(root, "channels", "research", "skills"))).toBe(true);
 
   writeFileSync(guide, "custom context\n");
   ensureChannelWorkspace(root, "research");
-  expect(readFileSync(guide, "utf8")).toBe("custom context\n");
+  const customized = readFileSync(guide, "utf8");
+  expect(customized).toStartWith("custom context\n");
+  expect(customized).toContain("[rules.md](rules.md)");
+  expect(customized).toContain("[skills/](skills/)");
+  ensureChannelWorkspace(root, "research");
+  expect(readFileSync(guide, "utf8")).toBe(customized);
+});
+
+test("seeds shared memory and preserves workspace customizations", () => {
+  const root = tempDir();
+  ensureWorkspace(root);
+  const index = join(root, ".agents", "memories", "MEMORY.md");
+  expect(readFileSync(index, "utf8")).toContain("schema_version: 1");
+
+  writeFileSync(index, "custom memory index\n");
+  ensureWorkspace(root);
+  expect(readFileSync(index, "utf8")).toBe("custom memory index\n");
 });
 
 test("rejects a channel path that is not a real directory", () => {
