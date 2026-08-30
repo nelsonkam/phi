@@ -9,6 +9,8 @@
     "test": "bun test src",
     "typecheck": "tsc --noEmit",
     "build:release": "bun run ./scripts/build-release.ts",
+    "build:macos-app": "./clients/macos/scripts/build-app.sh",
+    "test:macos": "swift test --package-path ./clients/macos",
     "validate:sandbox-kits": "sh ./scripts/validate-sandbox-kits"
   },
   "dependencies": {

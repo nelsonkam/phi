@@ -3,6 +3,8 @@
 node_modules/
 .phi/
 dist/
+clients/macos/.build/
+clients/macos/.swiftpm/
 *.db
 *.db-shm
 *.db-wal

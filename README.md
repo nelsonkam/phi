@@ -68,6 +68,15 @@ bun run dev
 `bun run start` serves without hot reload. Source checkouts update with
 `git pull && bun install`.
 
+## macOS client
+
+The M1 macOS connection shell lives in [clients/macos](./clients/macos). It
+saves and edits local and remote Phi servers, keeps remote device tokens in
+Keychain, and loads each server's own UI in `WKWebView`; it never owns the
+server process. Build an ad-hoc-signed local app with
+`bun run build:macos-app`. The build generates its app icon from the Phi brand
+asset in `assets/brand`.
+
 ## Standalone installations
 
 Compiled macOS and Linux binaries update themselves from the latest GitHub release:
