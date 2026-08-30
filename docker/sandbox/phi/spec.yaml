@@ -1,7 +1,7 @@
 schemaVersion: "2"
 kind: sandbox
 name: phi
-version: 0.2.1
+version: 0.2.2
 displayName: Phi
 description: Persistent multi-agent workspace coordinator and web UI
 sourceURL: https://github.com/nelsonkam/phi
@@ -11,7 +11,7 @@ locked:
   - sandbox.image
 
 sandbox:
-  image: ghcr.io/nelsonkam/phi-sandbox:0.2.1
+  image: ghcr.io/nelsonkam/phi-sandbox:0.2.2
   entrypoint:
     - /usr/local/bin/phi-sandbox-entrypoint
   resources:
@@ -28,7 +28,6 @@ environment:
     PHI_HOST: 0.0.0.0
     PHI_PORT: "3141"
     PHI_IN_SANDBOX: "1"
-    CURSOR_AUTH_TOKEN: cursor-oat-proxy-managed
 
 credentials:
   - service: anthropic
@@ -57,24 +56,6 @@ credentials:
       sentinels:
         accessToken: oai-oat01-proxy-managed
         refreshToken: oai-ort01-proxy-managed
-  - service: cursor
-    required: false
-    oauth:
-      tokenEndpoint:
-        host: api2.cursor.sh
-        path: /auth/poll
-      resourceHosts:
-        - api2.cursor.sh
-        - api3.cursor.sh
-        - repo42.cursor.sh
-        - cursor.com
-      sentinels:
-        accessToken: cursor-oat-proxy-managed
-        refreshToken: cursor-ort-proxy-managed
-      responseFields:
-        accessToken: accessToken
-        refreshToken: refreshToken
-
 ports:
   - container: 3141
     protocol: tcp

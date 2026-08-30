@@ -11,11 +11,11 @@ Claude Code, Codex, and Cursor inside Docker Sandboxes' microVM boundary.
   OAuth callback, and egress fixes.
 - A Phi release with matching OCI kit and multi-architecture image tags.
 
-The official Phi kit declares proxy-managed subscription OAuth only.
-Authentication belongs to sbx: real OAuth tokens stay in its host-side
-credential store and Phi sees only non-secret proxy sentinels. Keeping API-key
-declarations out of the kit prevents an absent credential from becoming a
-placeholder that a CLI mistakes for a real key.
+The official Phi kit declares proxy-managed subscription OAuth for Claude and
+Codex. Authentication belongs to sbx: real OAuth tokens stay in its host-side
+credential store and Phi sees only non-secret proxy sentinels. Cursor uses a
+host-side API key through an sbx custom secret; subscription OAuth is not
+supported for Cursor in a custom Phi root.
 
 For a ChatGPT subscription, complete OpenAI OAuth on the host before creation:
 
@@ -24,40 +24,34 @@ sbx secret set openai --oauth
 phi sandbox create --name phi
 ```
 
-Claude and Cursor complete their subscription logins from their own CLIs. Do
-not configure an API key for a provider whose subscription you want to use,
-create the sandbox, then run:
+Claude completes its subscription login from its own CLI. Do not configure an
+Anthropic API key when using a subscription; create the sandbox, then run:
 
 ```bash
 sbx exec -it phi claude
 # Run /login in Claude, then exit.
-
-sbx exec -it phi cursor-agent
-# Complete Cursor's login, then exit.
-
-# Refresh the sandbox credential-mode environment after first-time login.
-phi sandbox stop phi
-phi sandbox start phi
 ```
 
-Startup reruns Phi's OAuth-aware Claude and Codex configuration. This depends
-on sbx recomputing `SBX_CRED_*_MODE` when a sandbox starts after a new OAuth
-binding; confirming that behavior on v0.42.0-rc1+ is a release validation gate.
+Startup configures Claude's proxy helper and Codex's ChatGPT backend with
+sentinel credentials. Direct root-kit OAuth interception works even though sbx
+reports provider credential modes as `none` for a custom sandbox, so Phi does
+not use the `SBX_CRED_*_MODE` flags. If an `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` custom secret is present, startup instead leaves that CLI on
+its normal API-key path.
 
-The root kit declares the complete OAuth interception contracts directly. It
-writes Claude's sentinel credential file, points Codex at the ChatGPT Codex
-backend with a sentinel bearer token, and gives Cursor its OAuth sentinel
-statically while keeping credentials in memory and forcing traffic through the
-proxy-compatible HTTP/1 path. No custom CA certificate is required; the CA used
-in the original Cursor proof was only for corporate WARP TLS inspection.
+The root kit declares the supported OAuth interception contracts directly. It
+writes Claude's sentinel credential file and points Codex at the ChatGPT Codex
+backend with a sentinel bearer token. No custom CA certificate is required;
+the CA used in the original Cursor experiment was only for corporate WARP TLS
+inspection.
 
 ### API keys through custom secrets
 
-API-key users can create sandbox-scoped custom secrets after creation. The real
-value remains in sbx's host store; the VM receives an `sbx-cs-…` placeholder,
-and the egress proxy substitutes the real value only for the listed hosts.
-With the corresponding key already exported in the host shell, use only the
-providers you need:
+Cursor requires a sandbox-scoped custom-secret API key. Claude and Codex API-key
+users can use the same mechanism. The real value remains in sbx's host store;
+the VM receives an `sbx-cs-…` placeholder, and the egress proxy substitutes the
+real value only for the listed hosts. With the corresponding key already
+exported in the host shell, use only the providers you need:
 
 ```bash
 sbx secret set-custom --sandbox phi \
@@ -81,10 +75,18 @@ phi sandbox start phi
 ```
 
 `set-custom` also accepts `--ref` and `--command` so a secret manager can
-provide the value without putting it directly on the command line. Do not keep
-an OpenAI OAuth binding when using an OpenAI API key: OAuth mode configures
-Codex for the ChatGPT backend instead of the normal API provider. Remove the
-global binding with `sbx secret rm openai` before restarting the sandbox.
+provide the value without putting it directly on the command line. The
+injected `OPENAI_API_KEY` placeholder automatically selects Codex's normal API
+provider instead of the ChatGPT subscription backend.
+
+Cursor subscription login is intentionally unsupported until Docker extends
+OAuth interception to custom sandbox roots. Docker's built-in Cursor agent can
+capture and refresh host-side OAuth, but the same declaration in Phi cannot
+consume that credential. Persisting `cursor-agent login` inside the VM would
+put real subscription tokens across the security boundary, so Phi keeps
+`AGENT_CLI_CREDENTIAL_STORE=memory` and does not offer that fallback. The
+seeded HTTP/1 setting remains required so custom-secret placeholder traffic
+passes through the host proxy.
 
 ## Sandbox MCP gateway
 
@@ -108,6 +110,12 @@ phi sandbox start [phi]
 phi sandbox remove phi --confirm
 ```
 
+Local sandboxd stops a runtime 30 seconds after its last attached session
+disconnects, even when it was started with `sbx run --detached`. Phi therefore
+keeps a detached host-side `sbx exec` session as a service lease. `create`,
+`start`, and `open` establish that lease and wait for the published web port;
+`stop` or `remove` ends it with the VM.
+
 The launcher selects the root kit and official Claude, Codex, and Cursor
 mixins tagged with the running Phi version. Custom mixins compose last. Phi
 always prints the complete plan and requires confirmation for custom setup. If
@@ -116,9 +124,10 @@ detectable overlapping fields; otherwise it warns and continues. `sbx` remains
 the source of truth for lifecycle, kit governance, signatures, credential
 bindings, and network policy; Phi keeps no sandbox registry of its own.
 
-The root kit owns the three credential contracts because direct root OAuth
-declarations are the verified schema-v2 path. The Claude, Codex, and Cursor
-mixins provide their narrowly scoped network policies.
+The root kit owns the verified Claude and Codex OAuth contracts plus Cursor's
+proxy-compatible CLI settings. Cursor credentials come from a sandbox-scoped
+custom secret. The Claude, Codex, and Cursor mixins provide their narrowly
+scoped network policies.
 
 Removal is destructive. Push important repository branches and back up Phi
 state before using it.

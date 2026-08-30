@@ -11,6 +11,8 @@ export interface SandboxDependencies {
   env?: NodeJS.ProcessEnv;
   which?: typeof Bun.which;
   runCommand?: (args: string[], interactive?: boolean) => Promise<CommandResult>;
+  startLease?: (args: string[]) => void;
+  sleep?: (milliseconds: number) => Promise<void>;
   interactive?: boolean;
   confirm?: (question: string) => Promise<boolean>;
   openUrl?: (url: string) => Promise<void>;
@@ -53,6 +55,16 @@ async function defaultRunCommand(
     interactive ? Promise.resolve("") : new Response(child.stderr).text(),
   ]);
   return { exitCode, stdout, stderr };
+}
+
+function defaultStartLease(args: string[]): void {
+  const child = Bun.spawn(args, {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+    detached: true,
+  });
+  child.unref();
 }
 
 function commandError(args: readonly string[], result: CommandResult): Error {
@@ -240,6 +252,8 @@ export async function runSandbox(
   const sbx = which("sbx");
   if (!sbx) throw new Error("sbx is not installed; install Docker Sandboxes v0.42.0-rc1 or newer");
   const runner = dependencies.runCommand ?? defaultRunCommand;
+  const startLease = dependencies.startLease ?? defaultStartLease;
+  const sleep = dependencies.sleep ?? Bun.sleep;
   const run = async (command: string[], interactive = false) => {
     const result = await runner([sbx, ...command], interactive);
     if (result.exitCode !== 0) throw commandError(command, result);
@@ -270,14 +284,26 @@ export async function runSandbox(
         : `multiple Phi sandboxes exist; pass one of: ${names.join(", ")}`,
     );
   };
-  const urlFor = async (name: string): Promise<string> => {
+  const publishedUrl = async (name: string): Promise<string | null> => {
     const ports = parseJson(
       (await run(["ports", name, "--json"])).stdout,
       "sbx ports --json",
     );
     const port = hostPort(ports);
-    if (!port) throw new Error(`sandbox ${JSON.stringify(name)} has no published Phi web port`);
-    return `http://127.0.0.1:${port}`;
+    return port ? `http://127.0.0.1:${port}` : null;
+  };
+  const leaseUrl = async (name: string, forceStart = false): Promise<string> => {
+    if (!forceStart) {
+      const existing = await publishedUrl(name);
+      if (existing) return existing;
+    }
+    startLease([sbx, "exec", name, "sleep", "infinity"]);
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const url = await publishedUrl(name);
+      if (url) return url;
+      await sleep(500);
+    }
+    throw new Error(`sandbox ${JSON.stringify(name)} did not publish the Phi web port after starting`);
   };
 
   if (subcommand === "create") {
@@ -333,7 +359,7 @@ export async function runSandbox(
     const create = ["create", "--name", name, official.root];
     for (const kit of [...official.mixins, ...customKits]) create.push("--kit", kit);
     await run(create, interactive);
-    const url = await urlFor(name);
+    const url = await leaseUrl(name, true);
     output.stdout(`Phi sandbox ${name}: ${url}\n`);
     if (interactive) await (dependencies.openUrl ?? defaultOpenUrl)(url);
     return 0;
@@ -356,7 +382,7 @@ export async function runSandbox(
   if (subcommand === "open") {
     if (rest.length > 1) throw new Error("Usage: phi sandbox open [NAME]");
     const name = await resolveName(rest[0]);
-    const url = await urlFor(name);
+    const url = await leaseUrl(name);
     output.stdout(`${url}\n`);
     await (dependencies.openUrl ?? defaultOpenUrl)(url);
     return 0;
@@ -365,7 +391,11 @@ export async function runSandbox(
   if (subcommand === "stop" || subcommand === "start") {
     if (rest.length > 1) throw new Error(`Usage: phi sandbox ${subcommand} [NAME]`);
     const name = await resolveName(rest[0]);
-    await run(subcommand === "stop" ? ["stop", name] : ["run", "--detached", "--name", name]);
+    if (subcommand === "stop") {
+      await run(["stop", name]);
+    } else {
+      await leaseUrl(name);
+    }
     output.stdout(`Phi sandbox ${name} ${subcommand === "stop" ? "stopped" : "started"}.\n`);
     return 0;
   }

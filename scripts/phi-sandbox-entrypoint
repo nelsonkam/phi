@@ -11,9 +11,8 @@ if [ -z "${PHI_HARNESSES:-}" ] && [ -f /etc/phi/harnesses ]; then
   export PHI_HARNESSES
 fi
 
-# Credential bindings can change after the sandbox was created (Claude and
-# Cursor complete OAuth interactively). Rebuild only the proxy-managed files
-# on every start so a stop/start applies the new sbx credential mode.
+# Keep Codex's proxy provider and sentinel auth in place on every start. A
+# custom OPENAI_API_KEY secret selects Codex's normal API-key path instead.
 HOME=/home/agent CODEX_HOME=/home/agent/.codex \
   /usr/local/bin/configure-sandbox-auth all
 

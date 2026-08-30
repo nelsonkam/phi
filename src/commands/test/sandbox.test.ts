@@ -35,6 +35,7 @@ test("official kits default to the GitHub container registry", () => {
 
 test("create composes pinned official kits and a custom mixin as exact argv", async () => {
   const calls: string[][] = [];
+  const leases: string[][] = [];
   const captureOutput = capture();
   const refs = officialKitRefs({ PHI_SANDBOX_REGISTRY: "registry.test/phi" });
   const exitCode = await runSandbox(
@@ -44,6 +45,7 @@ test("create composes pinned official kits and a custom mixin as exact argv", as
       env: { PHI_SANDBOX_REGISTRY: "registry.test/phi" },
       which: () => "/fake/sbx",
       interactive: false,
+      startLease: (args) => { leases.push(args); },
       runCommand: async (args) => {
         calls.push(args);
         const command = args.slice(1);
@@ -90,6 +92,7 @@ test("create composes pinned official kits and a custom mixin as exact argv", as
     "./custom-kit",
   ]);
   expect(create).not.toContain(".");
+  expect(leases).toEqual([["/fake/sbx", "exec", "desk", "sleep", "infinity"]]);
   expect(captureOutput.stdout()).toContain("http://127.0.0.1:45123");
   expect(captureOutput.stdout()).toContain("overrides");
 });
@@ -104,6 +107,7 @@ test("create continues when JSON kit inspection is unavailable", async () => {
       env: {},
       which: () => "/fake/sbx",
       interactive: false,
+      startLease: () => {},
       runCommand: async (args) => {
         calls.push(args);
         const command = args.slice(1);
@@ -138,6 +142,7 @@ test("a non-interactive create does not require API keys before OAuth login", as
     env: {},
     which: () => "/fake/sbx",
     interactive: false,
+    startLease: () => {},
     runCommand: async (args) => {
       calls.push(args);
       const command = args.slice(1);
@@ -208,6 +213,120 @@ test("open accepts the snake_case port payload from sbx v0.42.0-rc2", async () =
   expect(exitCode).toBe(0);
   expect(captureOutput.stdout()).toBe("http://127.0.0.1:49152\n");
   expect(opened).toEqual(["http://127.0.0.1:49152"]);
+});
+
+test("open starts a service lease when a stopped sandbox has no ports", async () => {
+  const captureOutput = capture();
+  const leases: string[][] = [];
+  let portChecks = 0;
+  const exitCode = await runSandbox(captureOutput.output, ["open", "phi"], {
+    env: {},
+    which: () => "/fake/sbx",
+    openUrl: async () => {},
+    sleep: async () => {},
+    startLease: (args) => { leases.push(args); },
+    runCommand: async (args) => {
+      const command = args.slice(1);
+      if (command[0] === "version") {
+        return { exitCode: 0, stdout: "v0.42.0-rc2\n", stderr: "" };
+      }
+      if (command[0] === "ls") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ sandboxes: [{ name: "phi", agent: "phi", status: "stopped" }] }),
+          stderr: "",
+        };
+      }
+      if (command[0] === "ports") {
+        portChecks += 1;
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(portChecks === 1
+            ? []
+            : [{ sandbox_port: 3141, host_port: 49152 }]),
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  expect(exitCode).toBe(0);
+  expect(leases).toEqual([["/fake/sbx", "exec", "phi", "sleep", "infinity"]]);
+  expect(captureOutput.stdout()).toBe("http://127.0.0.1:49152\n");
+});
+
+test("start uses a persistent service lease instead of a detached agent session", async () => {
+  const captureOutput = capture();
+  const calls: string[][] = [];
+  const leases: string[][] = [];
+  let portChecks = 0;
+  await runSandbox(captureOutput.output, ["start", "phi"], {
+    env: {},
+    which: () => "/fake/sbx",
+    startLease: (args) => { leases.push(args); },
+    runCommand: async (args) => {
+      calls.push(args);
+      const command = args.slice(1);
+      if (command[0] === "version") {
+        return { exitCode: 0, stdout: "v0.42.0-rc2\n", stderr: "" };
+      }
+      if (command[0] === "ls") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ sandboxes: [{ name: "phi", agent: "phi", status: "stopped" }] }),
+          stderr: "",
+        };
+      }
+      if (command[0] === "ports") {
+        portChecks += 1;
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(portChecks === 1
+            ? []
+            : [{ sandbox_port: 3141, host_port: 49152 }]),
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  expect(leases).toEqual([["/fake/sbx", "exec", "phi", "sleep", "infinity"]]);
+  expect(calls.some((call) => call.includes("run"))).toBe(false);
+  expect(captureOutput.stdout()).toContain("Phi sandbox phi started.");
+});
+
+test("start reuses an already-running sandbox without adding another lease", async () => {
+  const leases: string[][] = [];
+  await runSandbox(capture().output, ["start", "phi"], {
+    env: {},
+    which: () => "/fake/sbx",
+    startLease: (args) => { leases.push(args); },
+    runCommand: async (args) => {
+      const command = args.slice(1);
+      if (command[0] === "version") {
+        return { exitCode: 0, stdout: "v0.42.0-rc2\n", stderr: "" };
+      }
+      if (command[0] === "ls") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ sandboxes: [{ name: "phi", agent: "phi", status: "running" }] }),
+          stderr: "",
+        };
+      }
+      if (command[0] === "ports") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([{ sandbox_port: 3141, host_port: 49152 }]),
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  expect(leases).toEqual([]);
 });
 
 test("refuses recursion before invoking sbx", async () => {

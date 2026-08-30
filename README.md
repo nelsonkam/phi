@@ -48,11 +48,12 @@ sbx secret set openai --oauth
 phi sandbox create --name phi
 ```
 
-Claude and Cursor subscription logins are completed from their CLIs inside the
-sandbox after creation. The official kit is OAuth-only; API-key users can add
-an sbx custom secret scoped to the sandbox. In both cases Phi never reads
-provider secrets or OAuth tokens—Docker's host-side credential proxy owns
-them. `phi sandbox open`, `status`, `stop`, and `start` manage the sandbox;
+Claude subscription login is completed from its CLI inside the sandbox after
+creation. Cursor uses a sandbox-scoped `CURSOR_API_KEY` custom secret because
+Docker does not expose built-in Cursor OAuth interception to custom roots.
+Codex and Claude also accept custom-secret API keys. Phi never reads provider
+secrets or OAuth tokens—Docker's host-side credential proxy owns them.
+`phi sandbox open`, `status`, `stop`, and `start` manage the sandbox;
 `phi sandbox remove phi --confirm` permanently deletes the VM, Phi database,
 repositories, worktrees, and volumes. Repeat `--kit <mixin-ref>` on create to
 add inspected custom feature kits. See [docs/docker-sandbox.md](./docs/docker-sandbox.md).

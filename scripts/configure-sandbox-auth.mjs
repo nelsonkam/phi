@@ -23,8 +23,8 @@ function configureClaude() {
   const directory = join(home, ".claude");
   const path = join(directory, "settings.json");
   const settings = readJson(path);
-  const mode = process.env.SBX_CRED_ANTHROPIC_MODE || "none";
-  if (mode === "oauth") {
+  const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+  if (!hasApiKey) {
     settings.apiKeyHelper = "echo proxy-managed";
   } else if (settings.apiKeyHelper === "echo proxy-managed") {
     delete settings.apiKeyHelper;
@@ -37,17 +37,15 @@ function configureCodex() {
   const directory = process.env.CODEX_HOME || join(home, ".codex");
   const configPath = join(directory, "config.toml");
   const authPath = join(directory, "auth.json");
-  const mode = process.env.SBX_CRED_OPENAI_MODE || "none";
+  const hasApiKey = Boolean(process.env.OPENAI_API_KEY?.trim());
   const lines = [
     'approval_policy = "never"',
     'sandbox_mode = "danger-full-access"',
     'mcp_oauth_credentials_store = "file"',
   ];
 
-  if (mode === "oauth") {
+  if (!hasApiKey) {
     lines.push('forced_login_method = "api"');
-  }
-  if (mode === "oauth") {
     lines.push(
       'model_provider = "sandboxd"',
       "",
@@ -61,7 +59,7 @@ function configureCodex() {
 
   ensureDirectory(directory);
   writePrivate(configPath, `${lines.join("\n")}\n`);
-  if (mode === "oauth") {
+  if (!hasApiKey) {
     writePrivate(authPath, '{"OPENAI_API_KEY":"proxy-managed"}\n');
   } else {
     rmSync(authPath, { force: true });

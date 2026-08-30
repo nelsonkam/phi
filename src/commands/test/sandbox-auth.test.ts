@@ -10,7 +10,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-async function configure(modes: { anthropic: string; openai: string }) {
+async function configure(options: { anthropicApiKey?: string; openaiApiKey?: string } = {}) {
   const home = mkdtempSync(join(tmpdir(), "phi-sandbox-auth-"));
   roots.push(home);
   const child = Bun.spawn([process.execPath, script, "all"], {
@@ -18,8 +18,10 @@ async function configure(modes: { anthropic: string; openai: string }) {
       ...process.env,
       HOME: home,
       CODEX_HOME: join(home, ".codex"),
-      SBX_CRED_ANTHROPIC_MODE: modes.anthropic,
-      SBX_CRED_OPENAI_MODE: modes.openai,
+      SBX_CRED_ANTHROPIC_MODE: "none",
+      SBX_CRED_OPENAI_MODE: "none",
+      ANTHROPIC_API_KEY: options.anthropicApiKey,
+      OPENAI_API_KEY: options.openaiApiKey,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -33,8 +35,8 @@ async function configure(modes: { anthropic: string; openai: string }) {
   return home;
 }
 
-test("OAuth mode writes only proxy sentinels and placeholders", async () => {
-  const home = await configure({ anthropic: "oauth", openai: "oauth" });
+test("OAuth setup writes only proxy sentinels without an OpenAI mode flag", async () => {
+  const home = await configure();
   const claude = JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8"));
   const codex = readFileSync(join(home, ".codex/config.toml"), "utf8");
   const auth = readFileSync(join(home, ".codex/auth.json"), "utf8");
@@ -46,8 +48,8 @@ test("OAuth mode writes only proxy sentinels and placeholders", async () => {
   expect(auth).toBe('{"OPENAI_API_KEY":"proxy-managed"}\n');
 });
 
-test("none mode removes stale managed authentication", async () => {
-  const home = await configure({ anthropic: "oauth", openai: "oauth" });
+test("provider mode flags do not disable proxy-managed authentication", async () => {
+  const home = await configure();
   const claudePath = join(home, ".claude/settings.json");
   writeFileSync(claudePath, '{"apiKeyHelper":"echo proxy-managed","theme":"dark"}\n');
 
@@ -66,25 +68,43 @@ test("none mode removes stale managed authentication", async () => {
 
   const claude = JSON.parse(readFileSync(claudePath, "utf8"));
   const codex = readFileSync(join(home, ".codex/config.toml"), "utf8");
-  expect(claude).toEqual({ theme: "dark" });
+  expect(claude).toEqual({ apiKeyHelper: "echo proxy-managed", theme: "dark" });
+  expect(codex).toContain('model_provider = "sandboxd"');
+  expect(readFileSync(join(home, ".codex/auth.json"), "utf8")).toBe(
+    '{"OPENAI_API_KEY":"proxy-managed"}\n',
+  );
+});
+
+test("custom API keys select the CLIs' normal providers", async () => {
+  const home = await configure({
+    anthropicApiKey: "sbx-cs-anthropic-placeholder",
+    openaiApiKey: "sbx-cs-placeholder",
+  });
+  const claude = JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8"));
+  const codex = readFileSync(join(home, ".codex/config.toml"), "utf8");
+
+  expect(claude.apiKeyHelper).toBeUndefined();
   expect(codex).not.toContain("sandboxd");
+  expect(codex).not.toContain("sbx-cs-placeholder");
   expect(() => readFileSync(join(home, ".codex/auth.json"))).toThrow();
 });
 
-test("root kit owns complete OAuth contracts", () => {
+test("root kit owns supported OAuth contracts and Cursor proxy settings", () => {
   const root = readFileSync(resolve(import.meta.dir, "../../../docker/sandbox/phi/spec.yaml"), "utf8");
   expect(root).toContain("sk-ant-oat01-proxy-managed");
   expect(root).toContain("oai-oat01-proxy-managed");
-  expect(root).toContain("cursor-oat-proxy-managed");
   expect(root).toContain("useHttp1ForAgent");
+  expect(root).toContain("AGENT_CLI_CREDENTIAL_STORE: memory");
   expect(root).not.toContain("internal-ca");
-  expect(root.match(/required: false/g)).toHaveLength(3);
+  expect(root.match(/required: false/g)).toHaveLength(2);
   expect(root).not.toContain("required: true");
   expect(root).not.toContain("apiKey:");
-  expect(root).toContain("CURSOR_AUTH_TOKEN: cursor-oat-proxy-managed");
+  expect(root).not.toContain("service: cursor");
+  expect(root).not.toContain("cursor-oat-proxy-managed");
+  expect(root).not.toContain("CURSOR_AUTH_TOKEN");
 });
 
-test("sandbox startup reapplies OAuth modes acquired after creation", () => {
+test("sandbox startup reapplies proxy-managed authentication", () => {
   const entrypoint = readFileSync(
     resolve(import.meta.dir, "../../../scripts/phi-sandbox-entrypoint"),
     "utf8",
