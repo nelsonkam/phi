@@ -269,6 +269,27 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
       };
     },
   };
+  const subscriptionCalls: Array<{
+    threadId: string;
+    resource: string;
+    events?: string[];
+  }> = [];
+  const subscriptions = {
+    async subscribe(threadId: string, resource: string, events?: string[]) {
+      subscriptionCalls.push({ threadId, resource, events });
+      return {
+        created: true,
+        subscription: {
+          id: "sub_test",
+          provider: "github",
+          resourceKind: "pull_request",
+          resourceKey: "openai/phi#42",
+          resourceUrl: "https://github.com/openai/phi/pull/42",
+          events: events ?? ["state_changed"],
+        },
+      };
+    },
+  };
   return {
     store,
     thread,
@@ -276,6 +297,7 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
     token,
     searchCalls,
     harnessCalls,
+    subscriptionCalls,
     workspace,
     handler: createMcpHandler(
       store,
@@ -283,6 +305,7 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
       messageSearch,
       onAgentMessage,
       harnessCapabilities,
+      subscriptions,
     ),
   };
 }
@@ -343,7 +366,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(8);
+  expect(body.result.tools).toHaveLength(9);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.description).toContain(
@@ -381,6 +404,62 @@ test("advertises messaging and workspace search without a thread argument", asyn
   expect(search.inputSchema.properties.channel).toBeDefined();
   expect(search.inputSchema.properties.includeCurrentThread).toBeDefined();
   expect(search.inputSchema.properties.author).toBeDefined();
+  const subscribe = body.result.tools[8]!;
+  expect(subscribe.name).toBe("subscribe");
+  expect(subscribe.description).toContain("GitHub pull requests");
+  expect(subscribe.inputSchema.properties.resource).toBeDefined();
+  expect(subscribe.inputSchema.properties.events).toMatchObject({
+    type: "array",
+    minItems: 1,
+    uniqueItems: true,
+  });
+  expect(
+    (
+      subscribe.inputSchema.properties.events as {
+        items: { enum: string[] };
+      }
+    ).items.enum,
+  ).toEqual([
+    "state_changed",
+    "draft_changed",
+    "review_decision_changed",
+    "checks_failed",
+    "checks_passed",
+    "new_review",
+    "new_comment",
+    "new_commit",
+    "labels_changed",
+    "assignees_changed",
+    "mergeability_changed",
+  ]);
+  store.close();
+});
+
+test("subscribe binds a resource to the caller's current thread", async () => {
+  const { store, thread, token, handler, subscriptionCalls } = fixture();
+  const response = await callTool(handler, token, 2, "subscribe", {
+    resource: "openai/phi#42",
+    events: ["state_changed", "checks_failed"],
+  });
+  const body = (await response.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBeUndefined();
+  expect(subscriptionCalls).toEqual([
+    {
+      threadId: thread.id,
+      resource: "openai/phi#42",
+      events: ["state_changed", "checks_failed"],
+    },
+  ]);
+  expect(JSON.parse(body.result.content[0]!.text)).toMatchObject({
+    created: true,
+    subscription: {
+      id: "sub_test",
+      resourceKey: "openai/phi#42",
+      events: ["state_changed", "checks_failed"],
+    },
+  });
   store.close();
 });
 

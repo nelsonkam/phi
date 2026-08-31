@@ -15,6 +15,7 @@ import { HarnessCapabilityService } from "@/core/agents/capabilities";
 import type { AgentHarnessCapabilityList } from "@/core/agents/capabilities";
 import type { MessageSearchApi } from "@/core/search/message-search";
 import type { PhiStore } from "@/core/store/store";
+import { GITHUB_PULL_REQUEST_EVENT_TYPES } from "@/core/subscriptions";
 import type { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { attachmentsFromMetadata, resolveUploadFile } from "@/server/uploads";
 import type { Attachment, Message } from "@/shared/types";
@@ -27,9 +28,28 @@ export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available 
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
 export const LIST_CHANNEL_THREADS_DESCRIPTION = `List chat threads in a channel with compact previews, outcome tags, and message counts, optionally limited to a message sequence range. Use it to survey a channel before reading specific threads with read_thread. Reflection audit threads and reflection-proposal threads are excluded. The channel defaults to your current thread's channel.`;
+export const SUBSCRIBE_DESCRIPTION = `Subscribe the current thread to selected events from an external resource. The resource is validated and its current state is captured as a baseline, so only later changes create thread events. Events are posted as one batched system message per poll and wake the agent that handles untagged replies in this thread. Currently supports GitHub pull requests, specified as a PR URL or owner/repo#number, using the authenticated gh CLI. Supported events: state_changed (open/closed/reopened/merged), draft_changed, review_decision_changed, checks_failed, checks_passed (the whole rollup becomes green), new_review, new_comment, new_commit, labels_changed, assignees_changed, and mergeability_changed. Omit events for the conservative default: state, draft, review decision, failed/passed checks, new reviews, and new commits. Calling subscribe again for the same resource replaces its selected events.`;
 
 export interface AgentHarnessCapabilityApi {
   list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
+}
+
+export interface ResourceSubscriptionApi {
+  subscribe(
+    threadId: string,
+    resource: string,
+    events?: string[],
+  ): Promise<{
+    subscription: {
+      id: string;
+      provider: string;
+      resourceKind: string;
+      resourceKey: string;
+      resourceUrl: string;
+      events: string[];
+    };
+    created: boolean;
+  }>;
 }
 
 export function createMcpHandler(
@@ -40,6 +60,7 @@ export function createMcpHandler(
   harnessCapabilities: AgentHarnessCapabilityApi = new HarnessCapabilityService(
     store.defaultWorkspace().rootPath,
   ),
+  subscriptions?: ResourceSubscriptionApi,
 ): (req: Request) => Promise<Response> {
   return async (req) => {
     const token = bearerToken(req.headers.get("authorization"));
@@ -272,6 +293,34 @@ export function createMcpHandler(
               },
             ]
           : []),
+        {
+          name: "subscribe",
+          description: SUBSCRIBE_DESCRIPTION,
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              resource: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "GitHub pull request URL or owner/repo#number",
+              },
+              events: {
+                type: "array",
+                minItems: 1,
+                uniqueItems: true,
+                items: {
+                  type: "string",
+                  enum: [...GITHUB_PULL_REQUEST_EVENT_TYPES],
+                },
+                description:
+                  "PR event types to deliver; omit for the conservative default",
+              },
+            },
+            required: ["resource"],
+            additionalProperties: false,
+          },
+        },
       ],
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -752,6 +801,51 @@ export function createMcpHandler(
                 },
               ],
             };
+          },
+        );
+      }
+      if (request.params.name === "subscribe") {
+        const rawResource = request.params.arguments?.resource;
+        const resource =
+          typeof rawResource === "string" ? rawResource.trim() : "";
+        if (!resource) return toolError("resource is required");
+        const rawEvents = request.params.arguments?.events;
+        if (
+          rawEvents !== undefined &&
+          (!Array.isArray(rawEvents) ||
+            rawEvents.length === 0 ||
+            rawEvents.some((event) => typeof event !== "string"))
+        ) {
+          return toolError("events must be a non-empty list of event types");
+        }
+        const events = Array.isArray(rawEvents)
+          ? rawEvents.map((event) => String(event))
+          : undefined;
+        if (!subscriptions) {
+          return toolError("resource subscriptions are unavailable");
+        }
+        return tokens.runOnce(
+          token,
+          `subscribe:${JSON.stringify({ resource, events })}`,
+          extra.requestId,
+          async () => {
+            try {
+              const result = await subscriptions.subscribe(
+                caller.threadId,
+                resource,
+                events,
+              );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(result),
+                  },
+                ],
+              };
+            } catch (error) {
+              return toolError((error as Error).message);
+            }
           },
         );
       }

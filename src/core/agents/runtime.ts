@@ -218,6 +218,11 @@ export class AgentRuntime {
     );
   }
 
+  async defaultAgentForThread(threadId: string): Promise<string> {
+    const routing = await this.routeUserContent("", threadId);
+    return routing.routedTo[0] ?? DEFAULT_AGENT_NAME;
+  }
+
   // The agent an unmentioned reply falls back to: the last agent that
   // answered in the thread, so a follow-up continues the conversation with
   // whoever just spoke. Before any agent has replied, the thread belongs to

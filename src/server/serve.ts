@@ -50,6 +50,7 @@ import {
   SchedulerService,
   type ScheduledTaskDefinition,
 } from "@/core/scheduler";
+import { SubscriptionService } from "@/core/subscriptions";
 
 const DEFAULT_PORT = 3141;
 const DEFAULT_HOST = "127.0.0.1";
@@ -131,6 +132,11 @@ export async function startServer(): Promise<void> {
     await reflection.runOnce();
   });
   scheduler.upsertTask(reflectionTaskDefinition());
+  const subscriptions = new SubscriptionService(store, scheduler, {
+    threadAgent: (threadId) => runtime.defaultAgentForThread(threadId),
+    onEvent: (message, routedTo) =>
+      runtime.handleSystemMessage(message, routedTo),
+  });
   scheduler.start();
   const fileHandler = createFileHandler(workspace.rootPath, store);
   const deviceAuth = new DeviceAuth(store.rootPath);
@@ -146,6 +152,7 @@ export async function startServer(): Promise<void> {
     messageSearch,
     (message, routedTo) => runtime.handleAgentMessage(message, routedTo),
     harnessCapabilities,
+    subscriptions,
   );
   runtime.recoverInterruptedTurns();
 
