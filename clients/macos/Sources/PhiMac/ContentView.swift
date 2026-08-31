@@ -3,9 +3,15 @@ import PhiClientCore
 
 struct ContentView: View {
   @ObservedObject var controller: ConnectionController
+  @StateObject private var session: WindowSession
   @State private var editingServer: ServerConnection?
   @State private var navigationError: String?
   @State private var pendingRemoval: ServerConnection?
+
+  init(controller: ConnectionController) {
+    _controller = ObservedObject(wrappedValue: controller)
+    _session = StateObject(wrappedValue: WindowSession(controller: controller))
+  }
 
   var body: some View {
     NavigationSplitView {
@@ -28,7 +34,7 @@ struct ContentView: View {
       .navigationSplitViewColumnWidth(min: 180, ideal: 220)
       .toolbar {
         Button {
-          controller.presentAddServer()
+          session.presentAddServer()
         } label: {
           Label("Add Server", systemImage: "plus")
         }
@@ -38,7 +44,7 @@ struct ContentView: View {
     }
     .sheet(item: addServerRequest) { request in
       ServerEditorView(mode: .add(request)) { name, origin, token in
-        try await controller.add(name: name, origin: origin, token: token)
+        try await session.add(name: name, origin: origin, token: token)
       }
     }
     .sheet(item: $editingServer) { connection in
@@ -73,29 +79,30 @@ struct ContentView: View {
     } message: {
       Text("This removes the saved server and deletes its device token from Keychain.")
     }
-    .task(id: controller.selectedID) {
+    .task(id: session.connectionTaskID) {
       navigationError = nil
-      await controller.connectSelected()
+      await session.connect()
     }
     .background {
-      MainWindowReader { controller.registerMainWindow($0) }
+      MainWindowReader { session.window = $0 }
         .frame(width: 0, height: 0)
     }
   }
 
   @ViewBuilder
   private var detail: some View {
-    if let connection = controller.selectedConnection {
+    if let connection = session.selectedConnection {
       ZStack(alignment: .top) {
-        if case .connected = controller.status {
+        if case .connected = session.status {
           ServerWebView(
             connection: connection,
-            token: controller.selectedToken,
-            navigationRequest: controller.navigationRequest,
-            onNavigationConsumed: { controller.consumeNavigationRequest($0) },
+            token: session.selectedToken,
+            navigationRequest: session.navigationRequest,
+            onNavigationConsumed: { session.consumeNavigationRequest($0) },
             onNavigationError: { navigationError = $0 }
           )
-        } else if case .connecting = controller.status {
+          .id(connection.id)
+        } else if case .connecting = session.status {
           ProgressView("Connecting to \(connection.name)…")
         } else {
           connectionFailure(connection)
@@ -108,7 +115,7 @@ struct ContentView: View {
       .navigationTitle(connection.name)
       .toolbar {
         Button {
-          Task { await controller.connectSelected() }
+          Task { await session.connect() }
         } label: {
           Label("Reconnect", systemImage: "arrow.clockwise")
         }
@@ -129,14 +136,14 @@ struct ContentView: View {
         .foregroundStyle(.secondary)
       Text("Could not connect to \(connection.name)")
         .font(.headline)
-      if case .failed(let message) = controller.status {
+      if case .failed(let message) = session.status {
         Text(message)
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.center)
           .frame(maxWidth: 440)
       }
       Button("Try Again") {
-        Task { await controller.connectSelected() }
+        Task { await session.connect() }
       }
     }
   }
@@ -156,15 +163,15 @@ struct ContentView: View {
 
   private var selection: Binding<UUID?> {
     Binding(
-      get: { controller.selectedID },
-      set: { controller.select($0) }
+      get: { session.selectedID },
+      set: { session.select($0) }
     )
   }
 
   private var addServerRequest: Binding<AddServerRequest?> {
     Binding(
-      get: { controller.addServerRequest },
-      set: { if $0 == nil { controller.dismissAddServer() } }
+      get: { session.addServerRequest },
+      set: { if $0 == nil { session.dismissAddServer() } }
     )
   }
 }

@@ -103,7 +103,7 @@ import Testing
     token: ""
   )
 
-  let edited = try #require(controller.selectedConnection)
+  let edited = try #require(controller.connection(id: remote.id))
   #expect(edited.id == remote.id)
   #expect(edited.name == "Renamed")
   #expect(edited.origin == remote.origin)
@@ -143,7 +143,7 @@ import Testing
   )
   #expect(try credentials.token(for: sandbox.id) == "sandbox-secret")
 
-  let renamed = try #require(controller.selectedConnection)
+  let renamed = try #require(controller.connection(id: sandbox.id))
   try await controller.edit(
     renamed,
     name: renamed.name,

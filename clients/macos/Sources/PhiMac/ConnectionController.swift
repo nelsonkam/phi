@@ -32,13 +32,9 @@ final class ConnectionController: ObservableObject {
   }
 
   @Published private(set) var connections: [ServerConnection]
-  @Published private(set) var selectedID: UUID?
-  @Published private(set) var selectedToken: String?
-  @Published private(set) var status: Status = .idle
+  @Published private(set) var defaultSelectionID: UUID?
   @Published private(set) var waitingCount = 0
   @Published private(set) var notificationsEnabled: Bool
-  @Published private(set) var navigationRequest: ServerNavigationRequest?
-  @Published private(set) var addServerRequest: AddServerRequest?
 
   private let repository: ConnectionRepository
   private let credentials: CredentialStore
@@ -50,10 +46,9 @@ final class ConnectionController: ObservableObject {
   private let settings: UserDefaults
   private let notificationsKey = "phi.notifications-enabled.v1"
 
-  private var liveTask: Task<Void, Never>?
-  private var refreshTask: Task<Void, Never>?
-  private var notificationTracker = ActivityNotificationTracker()
-  private weak var mainWindow: NSWindow?
+  private var sessions: [UUID: WeakSession] = [:]
+  private var monitors: [UUID: ServerActivityMonitor] = [:]
+  private var pendingAddServerRequest: AddServerRequest?
 
   init(
     repository: ConnectionRepository = ConnectionRepository(),
@@ -77,50 +72,54 @@ final class ConnectionController: ObservableObject {
     let loaded = repository.loadConnections()
     connections = loaded
     let persisted = repository.loadSelection()
-    selectedID = loaded.contains(where: { $0.id == persisted })
+    defaultSelectionID = loaded.contains(where: { $0.id == persisted })
       ? persisted
       : loaded.first?.id
-    selectedToken = selectedID.flatMap { try? credentials.token(for: $0) }
   }
 
-  var selectedConnection: ServerConnection? {
-    connections.first { $0.id == selectedID }
+  func connection(id: UUID?) -> ServerConnection? {
+    guard let id else { return nil }
+    return connections.first { $0.id == id }
   }
 
-  func select(_ id: UUID?) {
-    guard selectedID != id else { return }
-    stopMonitoring(clearBadge: true)
-    navigationRequest = nil
-    selectedID = id
-    selectedToken = id.flatMap { try? credentials.token(for: $0) }
+  func token(for id: UUID?) -> String? {
+    guard let id else { return nil }
+    return try? credentials.token(for: id)
+  }
+
+  func rememberSelection(_ id: UUID?) {
+    defaultSelectionID = id
     repository.saveSelection(id)
-    status = .idle
   }
 
-  func connectSelected() async {
-    guard let connection = selectedConnection else { return }
-    let connectionID = connection.id
-    let token = selectedToken
-    stopMonitoring(clearBadge: true)
-    status = .connecting
-    do {
-      try await api.validate(connection: connection, token: token)
-      guard selectedID == connectionID else { return }
-      status = .connected
-      await refreshActivity(
-        connection: connection,
-        token: token,
-        connectionID: connectionID,
-        allowNotifications: false
-      )
-      startLive(connection: connection, token: token, connectionID: connectionID)
-    } catch {
-      guard selectedID == connectionID else { return }
-      status = .failed(error.localizedDescription)
+  func register(_ session: WindowSession) {
+    sessions[session.id] = WeakSession(session: session)
+    if let pendingAddServerRequest {
+      self.pendingAddServerRequest = nil
+      session.presentAddServer(pendingAddServerRequest)
     }
   }
 
-  func add(name: String, origin: String, token: String) async throws {
+  func unregister(_ id: UUID) {
+    sessions[id] = nil
+    sessionSelectionChanged()
+  }
+
+  var keySession: WindowSession? {
+    let keyWindow = NSApplication.shared.keyWindow
+    return liveSessions.first { $0.window === keyWindow } ?? liveSessions.first
+  }
+
+  func reconnectKeyWindow() async {
+    await keySession?.connect()
+  }
+
+  func validate(connection: ServerConnection, token: String?) async throws {
+    try await api.validate(connection: connection, token: token)
+  }
+
+  @discardableResult
+  func add(name: String, origin: String, token: String) async throws -> ServerConnection {
     let connection = try ServerConnection(name: name, origin: origin)
     let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
     try await api.validate(
@@ -135,9 +134,7 @@ final class ConnectionController: ObservableObject {
     updated.append(connection)
     try repository.saveConnections(updated)
     connections = updated
-    select(connection.id)
-    selectedToken = trimmedToken.isEmpty ? nil : trimmedToken
-    status = .connected
+    return connection
   }
 
   func edit(
@@ -180,23 +177,10 @@ final class ConnectionController: ObservableObject {
     }
 
     connections = updated
-    if selectedID == candidate.id {
-      selectedToken = nextToken
-      if originChanged || tokenChanged {
-        stopMonitoring(clearBadge: true)
-        status = .connected
-        await refreshActivity(
-          connection: candidate,
-          token: nextToken,
-          connectionID: candidate.id,
-          allowNotifications: false
-        )
-        startLive(
-          connection: candidate,
-          token: nextToken,
-          connectionID: candidate.id
-        )
-      }
+    notifySessions()
+    if originChanged || tokenChanged {
+      stopMonitor(candidate.id)
+      await ensureMonitors()
     }
   }
 
@@ -206,9 +190,11 @@ final class ConnectionController: ObservableObject {
     let updated = connections.filter { $0.id != connection.id }
     connections = updated.isEmpty ? [.local] : updated
     try repository.saveConnections(connections)
-    if selectedID == connection.id {
-      select(connections.first?.id)
+    if defaultSelectionID == connection.id {
+      rememberSelection(connections.first?.id)
     }
+    notifySessions()
+    sessionSelectionChanged()
   }
 
   func setNotificationsEnabled(_ enabled: Bool) {
@@ -220,21 +206,13 @@ final class ConnectionController: ObservableObject {
     }
   }
 
-  func presentAddServer(_ request: AddServerRequest = AddServerRequest()) {
-    addServerRequest = request
-  }
-
-  func dismissAddServer() {
-    addServerRequest = nil
-  }
-
   func handleDeepLink(_ url: URL) {
     guard let request = AddServerRequest(deepLink: url) else { return }
-    presentAddServer(request)
-  }
-
-  func registerMainWindow(_ window: NSWindow) {
-    mainWindow = window
+    if let session = keySession {
+      session.presentAddServer(request)
+    } else {
+      pendingAddServerRequest = request
+    }
   }
 
   func openNotification(serverID: UUID, path: String) {
@@ -243,47 +221,108 @@ final class ConnectionController: ObservableObject {
     else { return }
 
     NSApplication.shared.activate(ignoringOtherApps: true)
-    mainWindow?.makeKeyAndOrderFront(nil)
-    if selectedID != serverID { select(serverID) }
-    enqueueNavigation(request)
+    let session = liveSessions.first { $0.selectedID == serverID }
+      ?? keySession
+      ?? liveSessions.first
+    session?.window?.makeKeyAndOrderFront(nil)
+    session?.open(request)
   }
 
-  func enqueueNavigation(_ request: ServerNavigationRequest) {
-    navigationRequest = request
+  func sessionSelectionChanged() {
+    pruneMonitors()
+    publishBadge()
   }
 
-  func consumeNavigationRequest(_ id: UUID) {
-    guard navigationRequest?.id == id else { return }
-    navigationRequest = nil
+  func sessionDidConnect(_ session: WindowSession) async {
+    guard session.status == .connected,
+      let connection = session.selectedConnection
+    else { return }
+    rememberSelection(connection.id)
+    await ensureMonitor(connection: connection, token: session.selectedToken)
+    publishBadge()
   }
 
-  private func startLive(
-    connection: ServerConnection,
-    token: String?,
-    connectionID: UUID
-  ) {
-    liveTask?.cancel()
+  private var liveSessions: [WindowSession] {
+    sessions.values.compactMap(\.session)
+  }
+
+  private func notifySessions() {
+    for session in liveSessions {
+      session.handleConnectionsChanged()
+    }
+  }
+
+  private func desiredMonitorIDs() -> Set<UUID> {
+    Set(liveSessions.compactMap(\.selectedID))
+  }
+
+  private func pruneMonitors() {
+    let needed = desiredMonitorIDs()
+    for id in monitors.keys where !needed.contains(id) {
+      stopMonitor(id)
+    }
+  }
+
+  private func ensureMonitors() async {
+    pruneMonitors()
+    for session in liveSessions where session.status == .connected {
+      guard let connection = session.selectedConnection else { continue }
+      await ensureMonitor(connection: connection, token: session.selectedToken)
+    }
+    publishBadge()
+  }
+
+  private func ensureMonitor(connection: ServerConnection, token: String?) async {
+    if let existing = monitors[connection.id],
+      existing.token == token,
+      existing.connection.origin == connection.origin
+    {
+      return
+    }
+    stopMonitor(connection.id)
+    await startMonitor(connection: connection, token: token)
+  }
+
+  private func startMonitor(connection: ServerConnection, token: String?) async {
+    let monitor = ServerActivityMonitor(
+      connection: connection,
+      token: token
+    )
+    monitors[connection.id] = monitor
+    await refreshActivity(monitor: monitor, allowNotifications: false)
+    guard monitors[connection.id] === monitor else { return }
+    startLive(monitor: monitor)
+  }
+
+  private func stopMonitor(_ connectionID: UUID) {
+    monitors[connectionID]?.cancel()
+    monitors[connectionID] = nil
+  }
+
+  private func startLive(monitor: ServerActivityMonitor) {
+    monitor.liveTask?.cancel()
+    let connection = monitor.connection
+    let token = monitor.token
     let events = liveClient.events(connection: connection, token: token)
-    liveTask = Task { [weak self] in
+    monitor.liveTask = Task { [weak self, weak monitor] in
+      guard let monitor else { return }
       for await event in events {
-        guard !Task.isCancelled, let self, self.selectedID == connectionID else {
+        guard !Task.isCancelled, let self,
+          self.monitors[connection.id] === monitor
+        else {
           break
         }
         switch event {
         case .connected:
-          self.notificationTracker.reset()
+          monitor.tracker.reset()
           self.scheduleRefresh(
-            connection: connection,
-            token: token,
-            connectionID: connectionID,
+            monitor: monitor,
             allowNotifications: false,
             delayNanoseconds: 0
           )
         case .invalidated:
           self.scheduleRefresh(
-            connection: connection,
-            token: token,
-            connectionID: connectionID,
+            monitor: monitor,
             allowNotifications: true,
             delayNanoseconds: 150_000_000
           )
@@ -295,48 +334,47 @@ final class ConnectionController: ObservableObject {
   }
 
   private func scheduleRefresh(
-    connection: ServerConnection,
-    token: String?,
-    connectionID: UUID,
+    monitor: ServerActivityMonitor,
     allowNotifications: Bool,
     delayNanoseconds: UInt64
   ) {
-    refreshTask?.cancel()
-    refreshTask = Task { [weak self] in
+    monitor.refreshTask?.cancel()
+    monitor.refreshTask = Task { [weak self, weak monitor] in
       if delayNanoseconds > 0 {
         try? await Task.sleep(nanoseconds: delayNanoseconds)
       }
-      guard !Task.isCancelled, let self else { return }
+      guard !Task.isCancelled, let self, let monitor,
+        self.monitors[monitor.connection.id] === monitor
+      else { return }
       await self.refreshActivity(
-        connection: connection,
-        token: token,
-        connectionID: connectionID,
+        monitor: monitor,
         allowNotifications: allowNotifications
       )
     }
   }
 
   private func refreshActivity(
-    connection: ServerConnection,
-    token: String?,
-    connectionID: UUID,
+    monitor: ServerActivityMonitor,
     allowNotifications: Bool
   ) async {
+    let connection = monitor.connection
     do {
       let page = try await api.fetchActivity(
         connection: connection,
-        token: token,
+        token: monitor.token,
         limit: 50
       )
-      guard selectedID == connectionID else { return }
-      setWaitingCount(page.waitingCount)
-      let candidates = notificationTracker.ingest(
+      guard !Task.isCancelled, monitors[connection.id] === monitor else { return }
+      monitor.waitingCount = max(0, page.waitingCount)
+      publishBadge()
+      let candidates = monitor.tracker.ingest(
         page,
         allowNotifications: allowNotifications && notificationsEnabled,
         appIsActive: NSApplication.shared.isActive
       )
       for candidate in candidates {
-        await notifications.deliver(candidate, serverID: connectionID)
+        guard monitors[connection.id] === monitor else { return }
+        await notifications.deliver(candidate, serverID: connection.id)
       }
     } catch {
       // The web UI remains authoritative. A failed background activity refresh
@@ -344,17 +382,8 @@ final class ConnectionController: ObservableObject {
     }
   }
 
-  private func stopMonitoring(clearBadge: Bool) {
-    liveTask?.cancel()
-    liveTask = nil
-    refreshTask?.cancel()
-    refreshTask = nil
-    notificationTracker.reset()
-    if clearBadge { setWaitingCount(0) }
-  }
-
-  private func setWaitingCount(_ count: Int) {
-    waitingCount = max(0, count)
+  private func publishBadge() {
+    waitingCount = monitors.values.reduce(0) { $0 + $1.waitingCount }
     dockBadge.setWaitingCount(waitingCount)
   }
 }
@@ -365,4 +394,30 @@ enum ConnectionControllerError: LocalizedError {
   var errorDescription: String? {
     "That saved server no longer exists."
   }
+}
+
+@MainActor
+private final class ServerActivityMonitor {
+  let connection: ServerConnection
+  let token: String?
+  var waitingCount = 0
+  var liveTask: Task<Void, Never>?
+  var refreshTask: Task<Void, Never>?
+  var tracker = ActivityNotificationTracker()
+
+  init(connection: ServerConnection, token: String?) {
+    self.connection = connection
+    self.token = token
+  }
+
+  func cancel() {
+    liveTask?.cancel()
+    refreshTask?.cancel()
+    liveTask = nil
+    refreshTask = nil
+  }
+}
+
+private struct WeakSession {
+  weak var session: WindowSession?
 }

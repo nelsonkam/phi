@@ -5,13 +5,17 @@ authentication-cookie injection, and the existing server-served React UI in a
 `WKWebView`. It never starts or stops `phi serve`. Run the server with
 `phi serve` or `phi service install`.
 
+Each window has its own selected server, so File → New Window can sit on a
+different saved connection. The server list, tokens, and cookies stay shared.
+
 The app also provides bridge-free desktop notifications and a Dock badge for
-the selected server. Enable notifications in **Phi → Settings**. A native
-WebSocket watches for server deltas, refetches Activity, and notifies only for a
-new waiting agent response while Phi is inactive. Initial connection and
-reconnection establish a baseline instead of replaying old responses. Clicking
-a notification loads the server's `/t/<thread-id>` URL directly in the existing
-webview; there is no native/web command bridge or alternate app shell.
+every server that is open in a window. Enable notifications in **Phi → Settings**.
+A native WebSocket watches each of those servers for deltas, refetches Activity,
+and notifies only for a new waiting agent response while Phi is inactive. Initial
+connection and reconnection establish a baseline instead of replaying old
+responses. Clicking a notification focuses a window already showing that server
+when one exists and loads `/t/<thread-id>` in its webview; there is no
+native/web command bridge or alternate app shell.
 Badge permission is requested with notification permission, and existing
 opted-in installations refresh that capability on launch.
 

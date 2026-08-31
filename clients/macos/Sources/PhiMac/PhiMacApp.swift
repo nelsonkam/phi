@@ -35,7 +35,7 @@ struct PhiMacApp: App {
     .commands {
       CommandGroup(after: .appInfo) {
         Button("Reconnect") {
-          Task { await controller.connectSelected() }
+          Task { await controller.reconnectKeyWindow() }
         }
         .keyboardShortcut("r", modifiers: [.command, .shift])
       }

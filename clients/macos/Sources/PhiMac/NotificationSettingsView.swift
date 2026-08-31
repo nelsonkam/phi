@@ -13,7 +13,7 @@ struct NotificationSettingsView: View {
         )
       )
       Text(
-        "Phi asks macOS for permission only when this is enabled. Notifications and the Dock badge monitor the selected server while Phi is running."
+        "Phi asks macOS for permission only when this is enabled. Notifications and the Dock badge cover every server that is open in a window."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
