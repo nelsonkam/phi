@@ -230,6 +230,19 @@ test("desktop layout leaves the sidebar open without needing the menu", async ()
   happy.close();
 });
 
+test("page can shrink inside the outlet shell so its body remains scrollable", async () => {
+  const happy = installDom(1024);
+  const root = mountApp(happy);
+  await flush();
+
+  const page = happy.document.querySelector("main");
+  expect(page).toBeTruthy();
+  expect(page!.classList.contains("min-h-0")).toBe(true);
+
+  root.unmount();
+  happy.close();
+});
+
 test("Cmd-K while the drawer is closed does not skip the next focus restore", async () => {
   const happy = installDom(390);
   const root = mountApp(happy);

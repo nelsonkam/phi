@@ -256,7 +256,7 @@ export function Page({
 }) {
   const nav = useContext(MobileNavContext);
   return (
-    <main className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3 md:gap-3 md:px-4">
         {nav && (
           <button
