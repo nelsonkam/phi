@@ -52,6 +52,28 @@ On Linux the service starts when you log in. Start it at boot without logging
 in with `phi service install --linger`. After `phi update`, run
 `phi service restart`.
 
+## Backup and restore
+
+Copy the Phi root (database, workspace, uploads, device token, and git-remote)
+to a gzipped archive. The model cache is skipped. The archive contains secrets.
+
+```bash
+phi backup
+phi backup /path/to/phi.tar.gz
+```
+
+The database snapshot is consistent while Phi is running. Restore replaces the
+current root and requires that Phi is stopped:
+
+```bash
+phi service stop
+phi restore /path/to/phi.tar.gz --confirm
+```
+
+If the database is still open, restore refuses and tells you to stop the
+service or quit `phi serve`. Channel folders attached outside the Phi root are
+not in the archive.
+
 ## Docker Sandbox
 
 Phi can run as a persistent computer inside Docker Sandboxes. Install `sbx`

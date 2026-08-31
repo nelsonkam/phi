@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { runBackup, runRestore } from "@/commands/backup";
 import { runUpdate } from "@/commands/update";
 import { runSandbox } from "@/commands/sandbox";
 import { runPair } from "@/commands/pair";
@@ -24,6 +25,8 @@ Commands:
   update   Update the compiled binary to the latest GitHub release
   sandbox  Manage Phi's Docker Sandbox
   pair     Show a device token and macOS Add Server link
+  backup   Write an archive of this Phi root
+  restore  Replace this Phi root from a backup archive
   help     Show this help message
   version  Show the phi version
 
@@ -38,6 +41,8 @@ export interface CliDependencies {
   update(output: CliOutput, args: readonly string[]): Promise<number>;
   sandbox(output: CliOutput, args: readonly string[]): Promise<number>;
   pair(output: CliOutput, args: readonly string[]): Promise<number> | number;
+  backup(output: CliOutput, args: readonly string[]): Promise<number>;
+  restore(output: CliOutput, args: readonly string[]): Promise<number>;
 }
 
 const defaultDependencies: CliDependencies = {
@@ -51,6 +56,8 @@ const defaultDependencies: CliDependencies = {
   update: (output, args) => runUpdate(output, {}, [...args]),
   sandbox: (output, args) => runSandbox(output, args),
   pair: (output, args) => runPair(output, args),
+  backup: (output, args) => runBackup(output, args),
+  restore: (output, args) => runRestore(output, args),
 };
 
 export async function runCli(
@@ -130,6 +137,26 @@ export async function runCli(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       output.stderr(`phi pair failed: ${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === "backup") {
+    try {
+      return await dependencies.backup(output, args.slice(1));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.stderr(`phi backup failed: ${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === "restore") {
+    try {
+      return await dependencies.restore(output, args.slice(1));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.stderr(`phi restore failed: ${message}\n`);
       return 1;
     }
   }

@@ -32,6 +32,8 @@ function unusedDependencies(
     update: async () => 0,
     sandbox: async () => 0,
     pair: async () => 0,
+    backup: async () => 0,
+    restore: async () => 0,
     ...overrides,
   };
 }
@@ -75,6 +77,8 @@ describe("runCli", () => {
       expect(served).toBe(false);
       expect(capture.stdout()).toContain("Usage: phi [command]");
       expect(capture.stdout()).toContain("service  Install and manage Phi as a background service");
+      expect(capture.stdout()).toContain("backup   Write an archive of this Phi root");
+      expect(capture.stdout()).toContain("restore  Replace this Phi root from a backup archive");
       expect(capture.stderr()).toBe("");
     },
   );
@@ -198,6 +202,40 @@ describe("runCli", () => {
     ).toBe(1);
     expect(received).toEqual(["--server", "https://phi.example.com"]);
     expect(capture.stderr()).toBe("phi pair failed: --server is required\n");
+  });
+
+  test("forwards backup arguments and reports failures", async () => {
+    const capture = captureOutput();
+    let received: readonly string[] | undefined;
+    const dependencies = unusedDependencies({
+      backup: async (_output, args) => {
+        received = args;
+        throw new Error("no phi database at /tmp/phi.db");
+      },
+    });
+
+    expect(await runCli(["backup", "phi.tar.gz"], capture.output, dependencies)).toBe(1);
+    expect(received).toEqual(["phi.tar.gz"]);
+    expect(capture.stderr()).toBe("phi backup failed: no phi database at /tmp/phi.db\n");
+  });
+
+  test("forwards restore arguments and reports failures", async () => {
+    const capture = captureOutput();
+    let received: readonly string[] | undefined;
+    const dependencies = unusedDependencies({
+      restore: async (_output, args) => {
+        received = args;
+        throw new Error("pass --confirm to restore into /tmp/phi");
+      },
+    });
+
+    expect(
+      await runCli(["restore", "phi.tar.gz"], capture.output, dependencies),
+    ).toBe(1);
+    expect(received).toEqual(["phi.tar.gz"]);
+    expect(capture.stderr()).toBe(
+      "phi restore failed: pass --confirm to restore into /tmp/phi\n",
+    );
   });
 
   test("rejects an unknown command", async () => {
