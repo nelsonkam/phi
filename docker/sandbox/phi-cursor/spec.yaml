@@ -1,7 +1,7 @@
 schemaVersion: "2"
 kind: mixin
 name: phi-cursor
-version: 0.2.7
+version: 0.2.8
 displayName: Phi Cursor network policy
 description: Cursor service egress for Phi
 requires:

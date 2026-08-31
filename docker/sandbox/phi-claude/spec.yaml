@@ -1,7 +1,7 @@
 schemaVersion: "2"
 kind: mixin
 name: phi-claude
-version: 0.2.7
+version: 0.2.8
 displayName: Phi Claude network policy
 description: Claude Code service egress for Phi
 requires:
