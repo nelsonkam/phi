@@ -88,6 +88,17 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
+async function waitFor(
+  predicate: () => boolean,
+  label: string,
+): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 function nav(happy: Window): HTMLElement {
   const el = happy.document.getElementById("app-nav");
   if (!el) throw new Error("missing #app-nav");
@@ -116,7 +127,10 @@ test("narrow viewport keeps the sidebar closed until the menu is opened", async 
   ).toBeNull();
 
   menuButton(happy).click();
-  await flush();
+  await waitFor(
+    () => aside.getAttribute("data-state") === "open",
+    "drawer to open",
+  );
 
   expect(aside.getAttribute("data-state")).toBe("open");
   expect(aside.getAttribute("role")).toBe("dialog");
@@ -140,17 +154,20 @@ test("opening a channel from the drawer closes the navigation", async () => {
   await flush();
 
   menuButton(happy).click();
-  await flush();
-  expect(nav(happy).getAttribute("data-state")).toBe("open");
+  await waitFor(
+    () => nav(happy).getAttribute("data-state") === "open",
+    "drawer to open",
+  );
 
   const link = [...happy.document.querySelectorAll("a")].find((el) =>
     el.textContent?.includes("general"),
   );
   expect(link).toBeTruthy();
   link!.click();
-  await flush();
-
-  expect(nav(happy).getAttribute("data-state")).toBe("closed");
+  await waitFor(
+    () => nav(happy).getAttribute("data-state") === "closed",
+    "drawer to close after navigation",
+  );
   expect(happy.document.body.textContent).toContain("channel-body");
   expect(menuButton(happy).getAttribute("aria-expanded")).toBe("false");
   expect(happy.document.activeElement as unknown).toBe(menuButton(happy));
@@ -165,8 +182,10 @@ test("Escape closes the drawer and prevents the bubble-phase keydown", async () 
   await flush();
 
   menuButton(happy).click();
-  await flush();
-  expect(nav(happy).getAttribute("data-state")).toBe("open");
+  await waitFor(
+    () => nav(happy).getAttribute("data-state") === "open",
+    "drawer to open",
+  );
 
   const unprevented: boolean[] = [];
   const onBubble = (event: Event) => {
@@ -185,7 +204,10 @@ test("Escape closes the drawer and prevents the bubble-phase keydown", async () 
   await flush();
 
   happy.window.removeEventListener("keydown", onBubble as never);
-  expect(nav(happy).getAttribute("data-state")).toBe("closed");
+  await waitFor(
+    () => nav(happy).getAttribute("data-state") === "closed",
+    "drawer to close on Escape",
+  );
   expect(unprevented).toEqual([false]);
 
   root.unmount();
@@ -235,17 +257,20 @@ test("Cmd-K while the drawer is closed does not skip the next focus restore", as
   await flush();
 
   menuButton(happy).click();
-  await flush();
-  expect(nav(happy).getAttribute("data-state")).toBe("open");
+  await waitFor(
+    () => nav(happy).getAttribute("data-state") === "open",
+    "drawer to open",
+  );
 
   (
     happy.document.querySelector(
       '[aria-label="Close navigation"]',
     ) as unknown as HTMLButtonElement
   ).click();
-  await flush();
-
-  expect(nav(happy).getAttribute("data-state")).toBe("closed");
+  await waitFor(
+    () => nav(happy).getAttribute("data-state") === "closed",
+    "drawer to close",
+  );
   expect(happy.document.activeElement as unknown).toBe(menuButton(happy));
 
   root.unmount();

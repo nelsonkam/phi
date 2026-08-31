@@ -35,7 +35,9 @@ export function App() {
   const skipNavFocusRestore = useRef(false);
   const wasNavOpen = useRef(false);
   const mdUp = useMdUp();
+  const wasMdUp = useRef(mdUp);
   const location = useLocation();
+  const prevPathname = useRef(location.pathname);
   const drawerOpen = navOpen && !mdUp;
 
   useEffect(() => {
@@ -59,10 +61,14 @@ export function App() {
   }, [drawerOpen]);
 
   useEffect(() => {
+    if (prevPathname.current === location.pathname) return;
+    prevPathname.current = location.pathname;
     setNavOpen(false);
   }, [location.pathname]);
 
   useEffect(() => {
+    if (wasMdUp.current === mdUp) return;
+    wasMdUp.current = mdUp;
     if (mdUp) setNavOpen(false);
   }, [mdUp]);
 
