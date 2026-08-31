@@ -149,6 +149,28 @@ struct ServerWebView: NSViewRepresentable {
       return nil
     }
 
+    // WKWebView does not open <input type="file"> itself. Without this
+    // hook the composer paperclip click is a no-op.
+    func webView(
+      _ webView: WKWebView,
+      runOpenPanelWith parameters: WKOpenPanelParameters,
+      initiatedByFrame _: WKFrameInfo,
+      completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void
+    ) {
+      let panel = fileOpenPanel(
+        allowsMultipleSelection: parameters.allowsMultipleSelection,
+        allowsDirectories: parameters.allowsDirectories
+      )
+      let finish: @MainActor @Sendable (NSApplication.ModalResponse) -> Void = { response in
+        completionHandler(fileOpenPanelURLs(response: response, urls: panel.urls))
+      }
+      if let window = webView.window {
+        panel.beginSheetModal(for: window, completionHandler: finish)
+      } else {
+        panel.begin(completionHandler: finish)
+      }
+    }
+
     func webView(
       _ webView: WKWebView,
       didFail navigation: WKNavigation!,
@@ -194,4 +216,24 @@ struct ServerWebView: NSViewRepresentable {
       url.port ?? (url.scheme == "https" ? 443 : url.scheme == "http" ? 80 : nil)
     }
   }
+}
+
+@MainActor
+func fileOpenPanel(
+  allowsMultipleSelection: Bool,
+  allowsDirectories: Bool
+) -> NSOpenPanel {
+  let panel = NSOpenPanel()
+  panel.canChooseFiles = true
+  panel.canChooseDirectories = allowsDirectories
+  panel.allowsMultipleSelection = allowsMultipleSelection
+  panel.resolvesAliases = true
+  return panel
+}
+
+func fileOpenPanelURLs(
+  response: NSApplication.ModalResponse,
+  urls: [URL]
+) -> [URL]? {
+  response == .OK ? urls : nil
 }
