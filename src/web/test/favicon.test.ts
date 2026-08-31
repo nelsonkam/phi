@@ -8,6 +8,7 @@ test("html shell links the brand favicon assets", async () => {
   const html = await Bun.file(new URL("../index.html", import.meta.url)).text();
   expect(html).toContain('rel="icon" href="./favicon.png"');
   expect(html).toContain('rel="apple-touch-icon" href="./apple-touch-icon.png"');
+  expect(html).toContain("viewport-fit=cover");
 });
 
 test("favicon assets are pngs derived from the brand logo", async () => {

@@ -71,7 +71,7 @@ export function Onboarding() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-4">
+    <div className="flex min-h-dvh flex-col items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="mb-8 flex items-center gap-2.5">
           <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-semibold">

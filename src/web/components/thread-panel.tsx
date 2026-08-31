@@ -26,6 +26,7 @@ import { useFileViewerOutlet } from "@/web/lib/file-link-context";
 import { workspaceFileUrl } from "@/web/lib/file-links";
 import { threadUntaggedAgent } from "@/web/lib/thread-agent";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
+import { useMdUp } from "@/web/lib/use-md-up";
 import { cn } from "@/web/lib/utils";
 
 // Slack-style thread detail: opens beside the channel flow.
@@ -47,6 +48,7 @@ export function ThreadPanel({
   // Where the close button navigates; defaults to the thread's channel.
   closeTo?: string;
 }) {
+  const mdUp = useMdUp();
   const { data } = useMessages(threadId);
   const { data: agentData } = useAgents();
   const send = useSendMessage(threadId);
@@ -113,7 +115,7 @@ export function ThreadPanel({
   }, [markReadMutate, threadId, channelId, committedId]);
 
   return (
-    <aside className="flex min-h-0 w-1/2 shrink-0 flex-col overflow-hidden border-l bg-background">
+    <aside className="flex min-h-0 w-full flex-col overflow-hidden bg-background max-md:fixed max-md:inset-0 max-md:z-20 max-md:safe-area-insets md:relative md:w-1/2 md:shrink-0 md:border-l">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
         <h2 className="text-sm font-semibold">Thread</h2>
         {channelName && (
@@ -226,7 +228,7 @@ export function ThreadPanel({
       <Composer
         placeholder="Reply…"
         draftKey={`thread:${threadId}`}
-        autoFocus
+        autoFocus={mdUp}
         onSend={(input) => void send.mutateAsync(input)}
         onSteer={async (input) => {
           await cancel.mutateAsync();

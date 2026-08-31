@@ -26,6 +26,7 @@ import {
 } from "@/web/lib/thread-status";
 import { relativeTime } from "@/web/lib/time";
 import { useStickToBottom } from "@/web/lib/use-stick-to-bottom";
+import { useMdUp } from "@/web/lib/use-md-up";
 import { EmptyState, Page } from "../app";
 
 // Slack-style channel: a chronological flow of thread root messages, with
@@ -90,6 +91,7 @@ export function ChannelPage() {
     [data?.threads],
   );
 
+  const mdUp = useMdUp();
   const { scrollProps, pinned, hasNew, scrollToBottom } = useStickToBottom(
     threads.length,
     channelId,
@@ -158,7 +160,7 @@ export function ChannelPage() {
             placeholder={`Message #${channel?.name ?? ""}`}
             disabled={create.isPending}
             draftKey={`channel:${channelId}`}
-            autoFocus={!openPanel && !browseFile}
+            autoFocus={mdUp && !openPanel && !browseFile}
             onSend={(input) => void startThread(input)}
           />
         </div>

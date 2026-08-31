@@ -69,6 +69,7 @@ export function SearchDialog({
       onOpenChange={onOpenChange}
       title="Search"
       description="Jump to a channel or search messages"
+      className="max-md:top-[max(1rem,env(safe-area-inset-top))] max-md:right-[max(1rem,env(safe-area-inset-right))] max-md:left-[max(1rem,env(safe-area-inset-left))] max-md:w-auto max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:max-h-[min(36rem,calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom)))]"
     >
       <Command shouldFilter={false}>
         <CommandInput
