@@ -1,10 +1,12 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 // Everything phi owns lives under one root directory. PHI_ROOT overrides it
-// for development and tests.
+// for development and tests. Relative values are resolved against cwd so ACP
+// session `cwd` (which requires an absolute path) is never `./data`.
 export function phiRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return env.PHI_ROOT ?? join(homedir(), ".phi");
+  const override = env.PHI_ROOT?.trim();
+  return override ? resolve(override) : join(homedir(), ".phi");
 }
 
 export function dbPath(root: string = phiRoot()): string {
