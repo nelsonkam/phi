@@ -28,6 +28,7 @@ import { cn } from "@/web/lib/utils";
 export function Onboarding() {
   const navigate = useNavigate();
   const [form, setForm] = useState<CreateDefaultAgentInput>({
+    name: "default",
     harness: "claude-code",
     model: "",
     config: {},
@@ -41,7 +42,12 @@ export function Onboarding() {
       harnesses.length > 0 &&
       !harnesses.some((harness) => harness.id === form.harness)
     ) {
-      setForm({ harness: harnesses[0]!.id, model: "", config: {} });
+      setForm((f) => ({
+        ...f,
+        harness: harnesses[0]!.id,
+        model: "",
+        config: {},
+      }));
     }
   }, [form.harness, harnesses]);
 
@@ -60,6 +66,7 @@ export function Onboarding() {
     setError(null);
     const result = await createAgent.mutateAsync({
       ...form,
+      name: form.name?.trim() || undefined,
       model: form.model?.trim() || undefined,
       config: Object.keys(form.config ?? {}).length ? form.config : undefined,
     });
@@ -74,9 +81,13 @@ export function Onboarding() {
     <div className="flex min-h-dvh flex-col items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="mb-8 flex items-center gap-2.5">
-          <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-semibold">
-            φ
-          </span>
+          <img
+            src="/favicon.png"
+            alt=""
+            width={28}
+            height={28}
+            className="size-7 rounded-md ring-1 ring-border"
+          />
           <span className="text-sm font-semibold tracking-tight">phi</span>
           <div className="ml-auto">
             <ThemeToggle />
@@ -92,6 +103,33 @@ export function Onboarding() {
         </p>
 
         <form onSubmit={submit} className="mt-8 space-y-5">
+          <div className="space-y-1.5">
+            <Label>Name</Label>
+            <div className="relative">
+              <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-muted-foreground">
+                @
+              </span>
+              <input
+                required
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                // Escape the hyphen; HTML pattern attributes use the unicode v flag.
+                pattern={"[a-z0-9][a-z0-9\\-]*"}
+                title="lowercase letters, numbers, and hyphens"
+                placeholder="default"
+                className={cn(inputClass, "pl-7")}
+                value={form.name ?? ""}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    name: e.target.value.toLowerCase(),
+                  }))
+                }
+              />
+            </div>
+          </div>
+
           <div className="space-y-1.5">
             <Label>Harness</Label>
             <Select

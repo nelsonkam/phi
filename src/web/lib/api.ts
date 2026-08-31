@@ -258,6 +258,7 @@ export async function updateAgent(
 }
 
 export interface CreateDefaultAgentInput {
+  name?: string;
   harness: string;
   model?: string;
   config?: Record<string, string | boolean>;

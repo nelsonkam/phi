@@ -17,6 +17,8 @@ export type Harness = (typeof KNOWN_HARNESSES)[number];
 
 export const DEFAULT_AGENT_NAME = "default";
 
+export const AGENT_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
 export interface AgentDefinition extends Agent {
   instructions: string;
   filePath: string;
@@ -26,8 +28,6 @@ export interface AgentRegistry {
   agents: AgentDefinition[];
   errors: AgentLoadError[];
 }
-
-const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 const FrontmatterSchema = strictObject({
   description: string().trim().min(1).nullish(),
@@ -98,6 +98,7 @@ export async function writeAgent(
 }
 
 export interface WriteDefaultAgentInput {
+  name?: string;
   harness: Harness;
   description?: string;
   model?: string;
@@ -105,13 +106,13 @@ export interface WriteDefaultAgentInput {
   instructions?: string;
 }
 
-// Writes the default agent. Description and instructions fall back to the
-// phi defaults.
+// Writes the default agent. The filename is the handle; omit `name` for
+// `default.md`. Description and instructions fall back to the phi defaults.
 export async function writeDefaultAgent(
   workspaceRoot: string,
   input: WriteDefaultAgentInput,
 ): Promise<void> {
-  await writeAgent(workspaceRoot, DEFAULT_AGENT_NAME, {
+  await writeAgent(workspaceRoot, input.name ?? DEFAULT_AGENT_NAME, {
     role: "default",
     harness: input.harness,
     description: input.description ?? DEFAULT_AGENT_DESCRIPTION,
@@ -135,7 +136,7 @@ export async function loadAgents(workspaceRoot: string): Promise<AgentRegistry> 
   for (const file of files.sort()) {
     const filePath = join(dir, file);
     const name = file.slice(0, -".md".length);
-    if (!NAME_PATTERN.test(name)) {
+    if (!AGENT_NAME_PATTERN.test(name)) {
       errors.push({
         file,
         message: "agent filename must be lowercase kebab-case (a-z, 0-9, -)",

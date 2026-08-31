@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "@/testing/tmpdir";
 import { loadAgents, loadDefaultAgent, writeDefaultAgent } from "../registry";
@@ -173,4 +173,14 @@ test("the default role can use a custom agent name", async () => {
     name: "codex",
     role: "default",
   });
+});
+
+test("writeDefaultAgent writes a named handle when given a name", async () => {
+  const root = tempWorkspace();
+  await writeDefaultAgent(root, { name: "grok", harness: "claude-code" });
+
+  const agent = await loadDefaultAgent(root);
+  expect(agent).toMatchObject({ name: "grok", role: "default" });
+  expect(existsSync(join(root, ".agents", "agents", "grok.md"))).toBe(true);
+  expect(existsSync(join(root, ".agents", "agents", "default.md"))).toBe(false);
 });
