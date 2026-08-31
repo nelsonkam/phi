@@ -238,6 +238,10 @@ test("page can shrink inside the outlet shell so its body remains scrollable", a
   const page = happy.document.querySelector("main");
   expect(page).toBeTruthy();
   expect(page!.classList.contains("min-h-0")).toBe(true);
+  const body = page!.querySelector("section");
+  expect(body).toBeTruthy();
+  expect(body!.classList.contains("overflow-y-auto")).toBe(true);
+  expect(body!.classList.contains("min-h-0")).toBe(true);
 
   root.unmount();
   happy.close();

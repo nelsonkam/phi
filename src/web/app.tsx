@@ -273,7 +273,9 @@ export function Page({
         <h1 className="min-w-0 truncate text-sm font-medium">{title}</h1>
         {titleExtra}
       </header>
-      <section className="flex min-h-0 flex-1 flex-col">{children}</section>
+      <section className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        {children}
+      </section>
     </main>
   );
 }
