@@ -341,6 +341,8 @@ export async function runUpdate(
   }
 
   output.stdout(`Updated to ${latest.release.tag_name}.\n`);
-  output.stdout("Restart phi to run the new version.\n");
+  output.stdout(
+    "Restart phi to run the new version. If it is installed as a service, run `phi service restart`.\n",
+  );
   return 0;
 }

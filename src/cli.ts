@@ -3,6 +3,7 @@
 import { runUpdate } from "@/commands/update";
 import { runSandbox } from "@/commands/sandbox";
 import { runPair } from "@/commands/pair";
+import { runService } from "@/commands/service";
 import { VERSION } from "@/version";
 
 export interface CliOutput {
@@ -19,6 +20,7 @@ const help = `Usage: phi [command]
 
 Commands:
   serve    Start the phi server and UI (default)
+  service  Install and manage Phi as a background service
   update   Update the compiled binary to the latest GitHub release
   sandbox  Manage Phi's Docker Sandbox
   pair     Show a device token and macOS Add Server link
@@ -32,6 +34,7 @@ Options:
 
 export interface CliDependencies {
   serve(): Promise<number>;
+  service(output: CliOutput, args: readonly string[]): Promise<number>;
   update(output: CliOutput, args: readonly string[]): Promise<number>;
   sandbox(output: CliOutput, args: readonly string[]): Promise<number>;
   pair(output: CliOutput, args: readonly string[]): Promise<number> | number;
@@ -43,6 +46,8 @@ const defaultDependencies: CliDependencies = {
     await startServer();
     return 0;
   },
+  service: (output, args) =>
+    runService(output, args, { cliPath: import.meta.path }),
   update: (output, args) => runUpdate(output, {}, [...args]),
   sandbox: (output, args) => runSandbox(output, args),
   pair: (output, args) => runPair(output, args),
@@ -85,6 +90,16 @@ export async function runCli(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       output.stderr(`phi failed to start: ${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === "service") {
+    try {
+      return await dependencies.service(output, args.slice(1));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.stderr(`phi service failed: ${message}\n`);
       return 1;
     }
   }

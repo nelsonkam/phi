@@ -2,7 +2,8 @@
 
 M1 is the connection shell: saved/editable servers, token validation, Keychain storage,
 authentication-cookie injection, and the existing server-served React UI in a
-`WKWebView`. It never starts or stops `phi serve`.
+`WKWebView`. It never starts or stops `phi serve`. Run the server with
+`phi serve` or `phi service install`.
 
 The app also provides bridge-free desktop notifications and a Dock badge for
 the selected server. Enable notifications in **Phi → Settings**. A native

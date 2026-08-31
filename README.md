@@ -36,6 +36,22 @@ relied on Bun's wildcard bind default; the explicit loopback default is a
 security hardening change for native installations that were reachable from
 the local network.
 
+To keep it running in the background, install a user-level service (systemd on
+Linux, launchd on macOS):
+
+```bash
+phi service install
+```
+
+That writes a per-user definition, enables it, and starts it. It runs as your
+user with data in `~/.phi`. `PHI_HOST`, `PHI_PORT`, and `PHI_ROOT` are baked in
+if they are set when you install. Other subcommands: `status`, `stop`, `start`,
+`restart`, `uninstall`.
+
+On Linux the service starts when you log in. Start it at boot without logging
+in with `phi service install --linger`. After `phi update`, run
+`phi service restart`.
+
 ## Docker Sandbox
 
 Phi can run as a persistent computer inside Docker Sandboxes. Install `sbx`
@@ -99,8 +115,9 @@ Compiled macOS and Linux binaries update themselves from the latest GitHub relea
 phi update
 ```
 
-Restart phi afterward to run the new version. `phi update` only works for the
-compiled binary; it refuses a source checkout before any network call.
+Restart phi afterward to run the new version. If it is installed as a service,
+run `phi service restart`. `phi update` only works for the compiled binary; it
+refuses a source checkout before any network call.
 
 Set `PHI_UPDATE_REPO` to an alternate `owner/repository`. `phi update` reads
 private releases with `GITHUB_TOKEN` or authenticated `gh`. The installer

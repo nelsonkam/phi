@@ -28,6 +28,7 @@ function unusedDependencies(
 ): CliDependencies {
   return {
     serve: async () => 0,
+    service: async () => 0,
     update: async () => 0,
     sandbox: async () => 0,
     pair: async () => 0,
@@ -73,6 +74,7 @@ describe("runCli", () => {
       expect(await runCli(args, capture.output, dependencies)).toBe(0);
       expect(served).toBe(false);
       expect(capture.stdout()).toContain("Usage: phi [command]");
+      expect(capture.stdout()).toContain("service  Install and manage Phi as a background service");
       expect(capture.stderr()).toBe("");
     },
   );
@@ -119,6 +121,21 @@ describe("runCli", () => {
 
     expect(await runCli(["serve"], capture.output, dependencies)).toBe(1);
     expect(capture.stderr()).toBe("phi failed to start: database is locked\n");
+  });
+
+  test("forwards service subcommands and reports failures", async () => {
+    const capture = captureOutput();
+    let received: readonly string[] | undefined;
+    const dependencies = unusedDependencies({
+      service: async (_output, args) => {
+        received = args;
+        throw new Error("systemctl was not found");
+      },
+    });
+
+    expect(await runCli(["service", "install"], capture.output, dependencies)).toBe(1);
+    expect(received).toEqual(["install"]);
+    expect(capture.stderr()).toBe("phi service failed: systemctl was not found\n");
   });
 
   test("forwards remaining args to update", async () => {

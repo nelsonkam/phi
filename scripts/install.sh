@@ -113,4 +113,4 @@ case ":$PATH:" in
   *) printf '\n%s is not on your PATH. Add it:\n  export PATH="%s:$PATH"\n' "$INSTALL_DIR" "$INSTALL_DIR" ;;
 esac
 
-printf '\nNext: phi serve\n'
+printf '\nNext: phi serve\nOr run in the background: phi service install\n'
