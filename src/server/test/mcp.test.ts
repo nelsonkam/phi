@@ -366,7 +366,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(9);
+  expect(body.result.tools).toHaveLength(11);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.description).toContain(
@@ -391,20 +391,27 @@ test("advertises messaging and workspace search without a thread argument", asyn
   const listChannelThreads = body.result.tools[4]!;
   expect(listChannelThreads.name).toBe("list_channel_threads");
   expect(listChannelThreads.inputSchema.properties.channel).toBeDefined();
-  const readThread = body.result.tools[5]!;
+  const getCheckpoint = body.result.tools[5]!;
+  expect(getCheckpoint.name).toBe("get_reflection_checkpoint");
+  expect(getCheckpoint.inputSchema.properties.channel).toBeDefined();
+  const setCheckpoint = body.result.tools[6]!;
+  expect(setCheckpoint.name).toBe("set_reflection_checkpoint");
+  expect(setCheckpoint.inputSchema.properties.channel).toBeDefined();
+  expect(setCheckpoint.inputSchema.properties.through_seq).toBeDefined();
+  const readThread = body.result.tools[7]!;
   expect(readThread.name).toBe("read_thread");
   expect(readThread.inputSchema.properties.thread_id).toBeDefined();
-  const readAttachment = body.result.tools[6]!;
+  const readAttachment = body.result.tools[8]!;
   expect(readAttachment.name).toBe("read_attachment");
   expect(readAttachment.inputSchema.properties.attachment_id).toBeDefined();
-  const search = body.result.tools[7]!;
+  const search = body.result.tools[9]!;
   expect(search.name).toBe("search_messages");
   expect(search.inputSchema.properties.threadId).toBeUndefined();
   expect(search.inputSchema.properties.channelId).toBeUndefined();
   expect(search.inputSchema.properties.channel).toBeDefined();
   expect(search.inputSchema.properties.includeCurrentThread).toBeDefined();
   expect(search.inputSchema.properties.author).toBeDefined();
-  const subscribe = body.result.tools[8]!;
+  const subscribe = body.result.tools[10]!;
   expect(subscribe.name).toBe("subscribe");
   expect(subscribe.description).toContain("GitHub pull requests");
   expect(subscribe.inputSchema.properties.resource).toBeDefined();
@@ -510,6 +517,8 @@ test("list_channel_threads surveys a channel and read_thread reads any workspace
   };
   const toolNames = listedTools.result.tools.map((tool) => tool.name);
   expect(toolNames).toContain("list_channel_threads");
+  expect(toolNames).toContain("get_reflection_checkpoint");
+  expect(toolNames).toContain("set_reflection_checkpoint");
   expect(toolNames).toContain("search_messages");
   expect(toolNames).not.toContain("read_channel_thread");
 
@@ -543,7 +552,7 @@ test("list_channel_threads surveys a channel and read_thread reads any workspace
     messageCount: 2,
   });
 
-  // The run's own channel is surveyable but its reflection thread is excluded.
+  // The run's own channel is surveyable, including its reflection thread.
   const ownChannel = await callTool(
     handler,
     runToken,
@@ -556,9 +565,9 @@ test("list_channel_threads surveys a channel and read_thread reads any workspace
   };
   expect(
     (JSON.parse(ownBody.result.content[0]!.text) as {
-      threads: unknown[];
+      threads: Array<{ threadId: string }>;
     }).threads,
-  ).toHaveLength(0);
+  ).toEqual([expect.objectContaining({ threadId: run.thread.id })]);
 
   const seqBounded = await callTool(
     handler,
@@ -597,6 +606,70 @@ test("list_channel_threads surveys a channel and read_thread reads any workspace
   expect(
     ((await unknownThread.json()) as { result: { isError: boolean } }).result
       .isError,
+  ).toBe(true);
+
+  const listedCheckpoints = await callTool(
+    handler,
+    runToken,
+    66,
+    "get_reflection_checkpoint",
+    {},
+  );
+  const listedCheckpointBody = (await listedCheckpoints.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(
+    JSON.parse(listedCheckpointBody.result.content[0]!.text) as {
+      checkpoints: Array<{ channel: string; throughSeq: number }>;
+    },
+  ).toMatchObject({
+    checkpoints: expect.arrayContaining([
+      { channel: channel.name, throughSeq: 0 },
+      { channel: reflectionChannel.name, throughSeq: 0 },
+    ]),
+  });
+
+  const setCheckpoint = await callTool(
+    handler,
+    runToken,
+    67,
+    "set_reflection_checkpoint",
+    { channel: channel.name, through_seq: second.message.seq },
+  );
+  const setCheckpointBody = (await setCheckpoint.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(setCheckpointBody.result.content[0]!.text)).toEqual({
+    channel: channel.name,
+    throughSeq: second.message.seq,
+  });
+  expect(store.getReflectionCheckpoint(channel.id)).toBe(second.message.seq);
+
+  const staleWrite = await callTool(
+    handler,
+    runToken,
+    69,
+    "set_reflection_checkpoint",
+    { channel: channel.name, through_seq: 1 },
+  );
+  const staleBody = (await staleWrite.json()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  expect(JSON.parse(staleBody.result.content[0]!.text)).toEqual({
+    channel: channel.name,
+    throughSeq: second.message.seq,
+  });
+  expect(store.getReflectionCheckpoint(channel.id)).toBe(second.message.seq);
+
+  const pastSeq = await callTool(
+    handler,
+    runToken,
+    68,
+    "set_reflection_checkpoint",
+    { channel: channel.name, through_seq: second.message.seq + 10 },
+  );
+  expect(
+    ((await pastSeq.json()) as { result: { isError: boolean } }).result.isError,
   ).toBe(true);
 
   const attachmentRead = await callTool(

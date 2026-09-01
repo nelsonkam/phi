@@ -50,10 +50,10 @@ export interface CreateChannelInput {
   folders?: string[];
 }
 
-export interface ReflectionWindow {
-  fromSeq: number;
+export interface ChannelCheckpoint {
+  channelId: string;
+  channelName: string;
   throughSeq: number;
-  messageCount: number;
 }
 
 export interface ChannelThreadSummary {
@@ -217,41 +217,74 @@ export class PhiStore {
       .map(channelFromRow);
   }
 
-  reflectionWindow(
-    channelId: string,
-    options: { minMessages: number; limit: number },
-  ): ReflectionWindow | null {
-    const cursor = this.db
-      .query<{ through_seq: number }, [string]>(
-        `SELECT through_seq FROM reflection_runs
-         WHERE channel_id = ? ORDER BY through_seq DESC LIMIT 1`,
+  channelLastSeq(channelId: string): number {
+    return (
+      this.db
+        .query<{ last_seq: number | null }, [string]>(
+          "SELECT MAX(seq) AS last_seq FROM messages WHERE channel_id = ?",
+        )
+        .get(channelId)?.last_seq ?? 0
+    );
+  }
+
+  getReflectionCheckpoint(channelId: string): number {
+    return (
+      this.db
+        .query<{ through_seq: number }, [string]>(
+          "SELECT through_seq FROM channel_checkpoints WHERE channel_id = ?",
+        )
+        .get(channelId)?.through_seq ?? 0
+    );
+  }
+
+  listReflectionCheckpoints(workspaceId: string): ChannelCheckpoint[] {
+    return this.db
+      .query<
+        { channel_id: string; channel_name: string; through_seq: number },
+        [string]
+      >(
+        `SELECT c.id AS channel_id, c.name AS channel_name,
+                COALESCE(cp.through_seq, 0) AS through_seq
+         FROM channels c
+         LEFT JOIN channel_checkpoints cp ON cp.channel_id = c.id
+         WHERE c.workspace_id = ?
+         ORDER BY c.name`,
       )
-      .get(channelId)?.through_seq ?? 0;
-    const rows = this.db
-      .query<{ seq: number }, [string, number, number]>(
-        `SELECT m.seq
-         FROM messages m
-         JOIN threads t ON t.id = m.thread_id
-         WHERE m.channel_id = ? AND m.seq > ?
-           AND t.kind = 'chat'
-           AND NOT EXISTS (
-             SELECT 1 FROM messages root
-             WHERE root.thread_id = t.id
-               AND (
-                 root.kind = 'reflection'
-                 OR root.content LIKE '%<!-- phi:reflection-proposal -->%'
-               )
-           )
-         ORDER BY m.seq ASC
-         LIMIT ?`,
+      .all(workspaceId)
+      .map((row) => ({
+        channelId: row.channel_id,
+        channelName: row.channel_name,
+        throughSeq: row.through_seq,
+      }));
+  }
+
+  setReflectionCheckpoint(channelId: string, throughSeq: number): number {
+    if (!Number.isSafeInteger(throughSeq) || throughSeq < 0) {
+      throw new Error("through_seq must be a non-negative integer");
+    }
+    if (!this.getChannel(channelId)) {
+      throw new Error(`no channel "${channelId}"`);
+    }
+    const lastSeq = this.channelLastSeq(channelId);
+    if (throughSeq > lastSeq) {
+      throw new Error(
+        `through_seq ${throughSeq} is past channel last seq ${lastSeq}`,
+      );
+    }
+    this.db
+      .query(
+        `INSERT INTO channel_checkpoints (channel_id, through_seq, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(channel_id) DO UPDATE SET
+           through_seq = MAX(channel_checkpoints.through_seq, excluded.through_seq),
+           updated_at = CASE
+             WHEN excluded.through_seq >= channel_checkpoints.through_seq
+             THEN excluded.updated_at
+             ELSE channel_checkpoints.updated_at
+           END`,
       )
-      .all(channelId, cursor, options.limit);
-    if (rows.length < options.minMessages) return null;
-    return {
-      fromSeq: rows[0]!.seq,
-      throughSeq: rows.at(-1)!.seq,
-      messageCount: rows.length,
-    };
+      .run(channelId, throughSeq, new Date().toISOString());
+    return this.getReflectionCheckpoint(channelId);
   }
 
   channelThreadSummaries(
@@ -269,14 +302,6 @@ export class PhiStore {
          JOIN threads t ON t.id = m.thread_id
          WHERE m.channel_id = ? AND m.seq BETWEEN ? AND ?
            AND t.kind = 'chat'
-           AND NOT EXISTS (
-             SELECT 1 FROM messages root
-             WHERE root.thread_id = t.id
-               AND (
-                 root.kind = 'reflection'
-                 OR root.content LIKE '%<!-- phi:reflection-proposal -->%'
-               )
-           )
          ORDER BY m.seq ASC`,
       )
       .all(channelId, fromSeq, throughSeq);
@@ -320,26 +345,6 @@ export class PhiStore {
         latestMessage: messageFromRow(latest),
       };
     });
-  }
-
-  recordReflectionRun(
-    channelId: string,
-    throughSeq: number,
-    threadId: string,
-  ): void {
-    this.db
-      .query(
-        `INSERT INTO reflection_runs
-           (id, channel_id, through_seq, thread_id, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        newId("reflection"),
-        channelId,
-        throughSeq,
-        threadId,
-        new Date().toISOString(),
-      );
   }
 
   reconcileChannelFolders(): void {

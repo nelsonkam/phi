@@ -1377,7 +1377,7 @@ function routedPrompt(
   recipient: string,
   hasContext: boolean,
 ): string {
-  if (message.author === "system" && message.kind === "reflection") {
+  if (message.author === "system") {
     return message.content;
   }
   if (message.author !== "user") {

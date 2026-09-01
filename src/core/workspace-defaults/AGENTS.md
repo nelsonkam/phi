@@ -20,7 +20,8 @@ by workspace-relative path.
 - `.agents/agents/` — agent definitions. To create or change one, follow
   `.agents/skills/manage-agents/SKILL.md`.
 - `.agents/skills/` — reusable how-to guides. Read the relevant SKILL.md
-  before doing that kind of task.
+  before doing that kind of task. Distill recent channel history with
+  `.agents/skills/reflect/SKILL.md`.
 - `.agents/memories/` — shared, harness-neutral durable facts. Read
   `.agents/memories/MEMORY.md` before asking the user to repeat something or
   re-deriving workspace knowledge. Store one fact per file and keep the index
