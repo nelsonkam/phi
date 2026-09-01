@@ -15,7 +15,7 @@ import { HarnessCapabilityService } from "@/core/agents/capabilities";
 import type { AgentHarnessCapabilityList } from "@/core/agents/capabilities";
 import type { MessageSearchApi } from "@/core/search/message-search";
 import type { PhiStore } from "@/core/store/store";
-import { GITHUB_PULL_REQUEST_EVENT_TYPES } from "@/core/subscriptions";
+import { SUBSCRIPTION_EVENT_TYPES } from "@/core/subscriptions";
 import type { McpTokenRegistry } from "@/server/mcp-token-registry";
 import { attachmentsFromMetadata, resolveUploadFile } from "@/server/uploads";
 import type { Attachment, Message } from "@/shared/types";
@@ -30,7 +30,7 @@ export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of you
 export const LIST_CHANNEL_THREADS_DESCRIPTION = `List chat threads in a channel with compact previews, outcome tags, and message counts, optionally limited to a message sequence range. Use it to survey a channel before reading specific threads with read_thread. The channel defaults to your current thread's channel.`;
 export const GET_REFLECTION_CHECKPOINT_DESCRIPTION = `Read the last distilled message sequence for a channel so later reflection passes can skip already-processed messages. Omit channel to list every channel. A missing checkpoint is through_seq 0.`;
 export const SET_REFLECTION_CHECKPOINT_DESCRIPTION = `Store the last distilled message sequence for a channel so later reflection passes skip already-processed messages. through_seq is the latest sequence you fully covered. A lower value is ignored so overlapping passes cannot rewind the cursor.`;
-export const SUBSCRIBE_DESCRIPTION = `Subscribe the current thread to selected events from an external resource. The resource is validated and its current state is captured as a baseline, so only later changes create thread events. Events are posted as one batched system message per poll and wake the agent that handles untagged replies in this thread. Currently supports GitHub pull requests, specified as a PR URL or owner/repo#number, using the authenticated gh CLI. Supported events: state_changed (open/closed/reopened/merged), draft_changed, review_decision_changed, checks_failed, checks_passed (the whole rollup becomes green), new_review, new_comment, new_commit, labels_changed, assignees_changed, and mergeability_changed. Omit events for the conservative default: state, draft, review decision, failed/passed checks, new reviews, and new commits. Calling subscribe again for the same resource replaces its selected events.`;
+export const SUBSCRIBE_DESCRIPTION = `Subscribe the current thread to selected events from an external resource. The resource is validated and its current state is captured as a baseline, so only later changes create thread events. Events are posted as one batched system message per poll and wake the agent that handles untagged replies in this thread. GitHub pull requests use a PR URL or owner/repo#number and the authenticated gh CLI; events are github.* — github.state_changed (open/closed/reopened/merged), github.draft_changed, github.review_decision_changed, github.checks_failed, github.checks_passed (the whole rollup becomes green), github.new_review, github.new_comment, github.new_commit, github.labels_changed, github.assignees_changed, and github.mergeability_changed. Omit events for the conservative default: state, draft, review decision, failed/passed checks, new reviews, and new commits. Cursor cloud agents use an agent ID (bc-…) or https://cursor.com/agents/… URL and CURSOR_API_KEY; events are cursor.* — cursor.status_changed (ACTIVE/IDLE/ARCHIVED), cursor.new_run, cursor.run_status_changed, cursor.run_finished, cursor.run_failed, cursor.run_cancelled, cursor.pr_opened, and cursor.branch_changed. Omit events for the conservative default: status, finished, failed, and PR opened. Calling subscribe again for the same resource replaces its selected events.`;
 
 export interface AgentHarnessCapabilityApi {
   list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
@@ -343,7 +343,7 @@ export function createMcpHandler(
                 type: "string",
                 minLength: 1,
                 description:
-                  "GitHub pull request URL or owner/repo#number",
+                  "GitHub pull request URL or owner/repo#number, or a Cursor cloud agent ID (bc-…) or https://cursor.com/agents/… URL",
               },
               events: {
                 type: "array",
@@ -351,10 +351,10 @@ export function createMcpHandler(
                 uniqueItems: true,
                 items: {
                   type: "string",
-                  enum: [...GITHUB_PULL_REQUEST_EVENT_TYPES],
+                  enum: [...SUBSCRIPTION_EVENT_TYPES],
                 },
                 description:
-                  "PR event types to deliver; omit for the conservative default",
+                  "Event types to deliver; github.* for pull requests, cursor.* for cloud agents. Omit for the conservative default of that resource",
               },
             },
             required: ["resource"],
