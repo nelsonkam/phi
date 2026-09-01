@@ -63,6 +63,9 @@ test("persists task definitions and runs an overdue task once", async () => {
     lastError: null,
     failureCount: 0,
   });
+  expect(resumed.deleteTask("test.heartbeat")).toBe(true);
+  expect(resumed.getTask("test.heartbeat")).toBeNull();
+  expect(resumed.deleteTask("test.heartbeat")).toBe(false);
   resumed.close();
   reopened.close();
 });

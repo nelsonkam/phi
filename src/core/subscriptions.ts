@@ -104,6 +104,11 @@ export interface SubscribeResult {
   created: boolean;
 }
 
+export interface UnsubscribeResult {
+  unsubscribed: true;
+  subscription: ResourceSubscription;
+}
+
 interface SubscriptionRow {
   id: string;
   workspace_id: string;
@@ -118,6 +123,7 @@ interface SubscriptionRow {
   last_polled_at: string | null;
   last_event_at: string | null;
   last_error: string | null;
+  poll_generation: number;
   created_at: string;
   updated_at: string;
 }
@@ -295,7 +301,8 @@ export class SubscriptionService {
           .query(
             `UPDATE resource_subscriptions
              SET resource_url = ?, state_json = ?, events_json = ?, active = 1,
-                 last_polled_at = ?, last_error = NULL, updated_at = ?
+                 last_polled_at = ?, last_error = NULL,
+                 poll_generation = poll_generation + 1, updated_at = ?
              WHERE id = ?`,
           )
           .run(
@@ -343,21 +350,53 @@ export class SubscriptionService {
     return { subscription: subscriptionFromRow(this.get(id)!), created: true };
   }
 
+  async unsubscribe(
+    threadId: string,
+    resource: string,
+  ): Promise<UnsubscribeResult> {
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error("Current thread no longer exists");
+    const ref = parseSubscriptionResource(resource);
+    const existing = this.find(
+      threadId,
+      ref.provider,
+      ref.resourceKind,
+      ref.key,
+    );
+    if (!existing) {
+      throw new Error("no subscription for this resource in the current thread");
+    }
+    const now = this.now().toISOString();
+    this.store.db
+      .query(
+        `UPDATE resource_subscriptions
+         SET active = 0, poll_generation = poll_generation + 1, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(now, existing.id);
+    this.scheduler.deleteTask(`subscription.${existing.id}`);
+    return {
+      unsubscribed: true,
+      subscription: subscriptionFromRow(this.get(existing.id)!),
+    };
+  }
+
   async poll(id: string): Promise<void> {
     const row = this.get(id);
     if (!row || !row.active) return;
+    const generation = row.poll_generation;
     try {
       const previous = JSON.parse(row.state_json) as ResourceSnapshot;
       const current = await this.readSnapshotForRow(row);
+      if (!this.pollStillCurrent(id, generation)) return;
       const polledAt = this.now().toISOString();
       if (JSON.stringify(current) === JSON.stringify(previous)) {
-        this.store.db
-          .query(
-            `UPDATE resource_subscriptions
-             SET last_polled_at = ?, last_error = NULL, updated_at = ?
-             WHERE id = ?`,
-          )
-          .run(polledAt, polledAt, id);
+        this.commitPollWrite(
+          `UPDATE resource_subscriptions
+           SET last_polled_at = ?, last_error = NULL, updated_at = ?
+           WHERE poll_generation = ? AND active = 1 AND id = ?`,
+          [polledAt, polledAt, generation, id],
+        );
         return;
       }
 
@@ -365,24 +404,29 @@ export class SubscriptionService {
       const events = (
         await this.resourceEvents(row, previous, current)
       ).filter((event) => selected.has(event.type));
-      this.store.db
-        .query(
+      if (
+        !this.commitPollWrite(
           `UPDATE resource_subscriptions
            SET state_json = ?, resource_url = ?, last_polled_at = ?,
                last_event_at = COALESCE(?, last_event_at),
                last_error = NULL, updated_at = ?
-           WHERE id = ?`,
+           WHERE poll_generation = ? AND active = 1 AND id = ?`,
+          [
+            JSON.stringify(current),
+            snapshotUrl(current, row.resource_url),
+            polledAt,
+            events.length > 0 ? polledAt : null,
+            polledAt,
+            generation,
+            id,
+          ],
         )
-        .run(
-          JSON.stringify(current),
-          snapshotUrl(current, row.resource_url),
-          polledAt,
-          events.length > 0 ? polledAt : null,
-          polledAt,
-          id,
-        );
+      ) {
+        return;
+      }
       if (events.length === 0) return;
       const agent = await this.options.threadAgent(row.thread_id);
+      if (!this.pollStillCurrent(id, generation)) return;
       const message = this.store.appendMessage(row.thread_id, {
         author: "system",
         kind: "resource_event",
@@ -399,14 +443,16 @@ export class SubscriptionService {
       });
       this.options.onEvent(message, [agent]);
     } catch (error) {
-      const failedAt = this.now().toISOString();
-      this.store.db
-        .query(
+      if (this.pollStillCurrent(id, generation)) {
+        const failedAt = this.now().toISOString();
+        this.commitPollWrite(
           `UPDATE resource_subscriptions
-           SET last_polled_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(failedAt, errorText(error), failedAt, id);
-      throw error;
+           SET last_polled_at = ?, last_error = ?, updated_at = ?
+           WHERE poll_generation = ? AND active = 1 AND id = ?`,
+          [failedAt, errorText(error), failedAt, generation, id],
+        );
+        throw error;
+      }
     }
   }
 
@@ -427,6 +473,18 @@ export class SubscriptionService {
       payload: { subscriptionId: id },
       catchUp: "run_once",
     });
+  }
+
+  private pollStillCurrent(id: string, generation: number): boolean {
+    const row = this.get(id);
+    return Boolean(row && row.active === 1 && row.poll_generation === generation);
+  }
+
+  private commitPollWrite(
+    sql: string,
+    params: Array<string | number | null>,
+  ): boolean {
+    return this.store.db.query(sql).run(...params).changes === 1;
   }
 
   private get(id: string): SubscriptionRow | null {

@@ -274,6 +274,7 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
     resource: string;
     events?: string[];
   }> = [];
+  const unsubscribeCalls: Array<{ threadId: string; resource: string }> = [];
   const subscriptions = {
     async subscribe(threadId: string, resource: string, events?: string[]) {
       subscriptionCalls.push({ threadId, resource, events });
@@ -289,6 +290,21 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
         },
       };
     },
+    async unsubscribe(threadId: string, resource: string) {
+      unsubscribeCalls.push({ threadId, resource });
+      return {
+        unsubscribed: true as const,
+        subscription: {
+          id: "sub_test",
+          provider: "github",
+          resourceKind: "pull_request",
+          resourceKey: "openai/phi#42",
+          resourceUrl: "https://github.com/openai/phi/pull/42",
+          events: ["github.state_changed"],
+          active: false,
+        },
+      };
+    },
   };
   return {
     store,
@@ -298,6 +314,7 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
     searchCalls,
     harnessCalls,
     subscriptionCalls,
+    unsubscribeCalls,
     workspace,
     handler: createMcpHandler(
       store,
@@ -366,7 +383,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
     };
   };
 
-  expect(body.result.tools).toHaveLength(11);
+  expect(body.result.tools).toHaveLength(12);
   expect(body.result.tools[0]!.name).toBe("send_message");
   expect(body.result.tools[0]!.description).toContain("your only voice");
   expect(body.result.tools[0]!.description).toContain(
@@ -448,6 +465,11 @@ test("advertises messaging and workspace search without a thread argument", asyn
     "cursor.pr_opened",
     "cursor.branch_changed",
   ]);
+  const unsubscribe = body.result.tools[11]!;
+  expect(unsubscribe.name).toBe("unsubscribe");
+  expect(unsubscribe.description).toContain("Polling stops");
+  expect(unsubscribe.inputSchema.properties.resource).toBeDefined();
+  expect(unsubscribe.inputSchema.properties.events).toBeUndefined();
   store.close();
 });
 
@@ -475,6 +497,25 @@ test("subscribe binds a resource to the caller's current thread", async () => {
       resourceKey: "openai/phi#42",
       events: ["github.state_changed", "github.checks_failed"],
     },
+  });
+  store.close();
+});
+
+test("unsubscribe stops the caller's current-thread subscription", async () => {
+  const { store, thread, token, handler, unsubscribeCalls } = fixture();
+  const response = await callTool(handler, token, 3, "unsubscribe", {
+    resource: "openai/phi#42",
+  });
+  const body = (await response.json()) as {
+    result: { isError?: boolean; content: Array<{ text: string }> };
+  };
+  expect(body.result.isError).toBeUndefined();
+  expect(unsubscribeCalls).toEqual([
+    { threadId: thread.id, resource: "openai/phi#42" },
+  ]);
+  expect(JSON.parse(body.result.content[0]!.text)).toMatchObject({
+    unsubscribed: true,
+    subscription: { id: "sub_test", active: false },
   });
   store.close();
 });

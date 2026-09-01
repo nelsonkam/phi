@@ -146,6 +146,14 @@ export class SchedulerService {
     return row ? taskFromRow(row) : null;
   }
 
+  deleteTask(id: string): boolean {
+    const existing = this.getTask(id);
+    if (!existing) return false;
+    this.store.db.query("DELETE FROM scheduled_tasks WHERE id = ?").run(id);
+    this.reschedule();
+    return true;
+  }
+
   listTasks(): ScheduledTask[] {
     return this.store.db
       .query<ScheduledTaskRow, []>("SELECT * FROM scheduled_tasks ORDER BY id")

@@ -20,6 +20,17 @@ import type { Message } from "@/shared/types";
 
 const AGENT_ID = "bc-00000000-0000-0000-0000-000000000001";
 
+function defer<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 function pullRequest(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     number: 42,
@@ -289,6 +300,318 @@ test("captures a gh baseline and makes duplicate subscriptions idempotent", asyn
     handler: "resource-subscription",
     schedule: { kind: "interval", everyMs: 30_000 },
   });
+  scheduler.close();
+  store.close();
+});
+
+test("unsubscribe deactivates the row, drops the poller, and lets subscribe resume", async () => {
+  const { store, thread, scheduler, service, events, ghCalls } = githubFixture([
+    pullRequest(),
+    pullRequest({
+      state: "MERGED",
+      updatedAt: "2026-08-30T00:01:00Z",
+    }),
+    pullRequest({
+      state: "MERGED",
+      updatedAt: "2026-08-30T00:02:00Z",
+      comments: [{ id: "comment-1" }],
+    }),
+  ]);
+  const { subscription } = await service.subscribe(thread.id, "openai/phi#42", [
+    "github.state_changed",
+    "github.new_comment",
+  ]);
+  const stopped = await service.unsubscribe(
+    thread.id,
+    "https://github.com/openai/phi/pull/42",
+  );
+  expect(stopped).toMatchObject({
+    unsubscribed: true,
+    subscription: { id: subscription.id, active: false },
+  });
+  expect(scheduler.getTask(`subscription.${subscription.id}`)).toBeNull();
+  await service.poll(subscription.id);
+  expect(events).toEqual([]);
+
+  const again = await service.unsubscribe(thread.id, "openai/phi#42");
+  expect(again.subscription.id).toBe(subscription.id);
+  expect(again.subscription.active).toBe(false);
+
+  const resumed = await service.subscribe(thread.id, "openai/phi#42", [
+    "github.new_comment",
+  ]);
+  expect(resumed.created).toBe(false);
+  expect(resumed.subscription.active).toBe(true);
+  expect(scheduler.getTask(`subscription.${subscription.id}`)).not.toBeNull();
+  await service.poll(subscription.id);
+  expect(events).toHaveLength(1);
+  expect(events[0]!.message.content).toContain("1 new comment");
+  expect(ghCalls).toHaveLength(3);
+
+  await expect(service.unsubscribe(thread.id, "openai/other#1")).rejects.toThrow(
+    "no subscription for this resource in the current thread",
+  );
+  scheduler.close();
+  store.close();
+});
+
+test("unsubscribe of a Cursor agent does not drop a sibling PR subscription", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Watch both",
+  });
+  const scheduler = new SchedulerService(store);
+  const service = new SubscriptionService(store, scheduler, {
+    threadAgent: async () => "codex",
+    onEvent: () => undefined,
+    runGh: async () => pullRequest(),
+    readCursorAgent: async () => cursorAgent(),
+  });
+  const pr = await service.subscribe(thread.id, "openai/phi#42");
+  const agent = await service.subscribe(thread.id, AGENT_ID);
+  await service.unsubscribe(thread.id, AGENT_ID);
+
+  expect(scheduler.getTask(`subscription.${agent.subscription.id}`)).toBeNull();
+  expect(scheduler.getTask(`subscription.${pr.subscription.id}`)).not.toBeNull();
+  const prRow = store.db
+    .query<{ active: number }, [string]>(
+      "SELECT active FROM resource_subscriptions WHERE id = ?",
+    )
+    .get(pr.subscription.id)!;
+  expect(prRow.active).toBe(1);
+  scheduler.close();
+  store.close();
+});
+
+function deferredGithubService(options: {
+  store: PhiStore;
+  threadAgent: () => Promise<string>;
+  runGh: () => Promise<string>;
+  events: Array<{ message: Message; routedTo: string[] }>;
+}) {
+  const scheduler = new SchedulerService(options.store);
+  const service = new SubscriptionService(options.store, scheduler, {
+    threadAgent: options.threadAgent,
+    onEvent: (message, routedTo) => options.events.push({ message, routedTo }),
+    runGh: options.runGh,
+  });
+  return { scheduler, service };
+}
+
+test("in-flight snapshot read does not emit after unsubscribe", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Watch this PR",
+  });
+  const enteredRead = defer();
+  const releaseRead = defer();
+  let reads = 0;
+  const events: Array<{ message: Message; routedTo: string[] }> = [];
+  const { scheduler, service } = deferredGithubService({
+    store,
+    threadAgent: async () => "codex",
+    events,
+    runGh: async () => {
+      reads += 1;
+      if (reads === 1) return pullRequest();
+      enteredRead.resolve();
+      await releaseRead.promise;
+      return pullRequest({
+        state: "MERGED",
+        updatedAt: "2026-08-30T00:01:00Z",
+      });
+    },
+  });
+  const { subscription } = await service.subscribe(thread.id, "openai/phi#42", [
+    "github.state_changed",
+  ]);
+  const polling = service.poll(subscription.id);
+  await enteredRead.promise;
+  await service.unsubscribe(thread.id, "openai/phi#42");
+  releaseRead.resolve();
+  await polling;
+
+  expect(events).toEqual([]);
+  const row = store.db
+    .query<{ state_json: string; active: number }, [string]>(
+      "SELECT state_json, active FROM resource_subscriptions WHERE id = ?",
+    )
+    .get(subscription.id)!;
+  expect(row.active).toBe(0);
+  expect(JSON.parse(row.state_json).state).toBe("OPEN");
+  scheduler.close();
+  store.close();
+});
+
+test("in-flight snapshot read does not clobber a re-subscribe baseline", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Watch this PR",
+  });
+  const enteredRead = defer();
+  const releaseRead = defer();
+  let reads = 0;
+  const events: Array<{ message: Message; routedTo: string[] }> = [];
+  const { scheduler, service } = deferredGithubService({
+    store,
+    threadAgent: async () => "codex",
+    events,
+    runGh: async () => {
+      reads += 1;
+      if (reads === 1) return pullRequest();
+      if (reads === 2) {
+        enteredRead.resolve();
+        await releaseRead.promise;
+        return pullRequest({
+          state: "MERGED",
+          updatedAt: "2026-08-30T00:01:00Z",
+        });
+      }
+      return pullRequest({
+        state: "CLOSED",
+        updatedAt: "2026-08-30T00:02:00Z",
+      });
+    },
+  });
+  const { subscription } = await service.subscribe(thread.id, "openai/phi#42", [
+    "github.state_changed",
+  ]);
+  const polling = service.poll(subscription.id);
+  await enteredRead.promise;
+  await service.unsubscribe(thread.id, "openai/phi#42");
+  await service.subscribe(thread.id, "openai/phi#42", ["github.state_changed"]);
+  releaseRead.resolve();
+  await polling;
+
+  expect(events).toEqual([]);
+  const row = store.db
+    .query<{ state_json: string; active: number; last_error: string | null }, [string]>(
+      "SELECT state_json, active, last_error FROM resource_subscriptions WHERE id = ?",
+    )
+    .get(subscription.id)!;
+  expect(row.active).toBe(1);
+  expect(row.last_error).toBeNull();
+  expect(JSON.parse(row.state_json).state).toBe("CLOSED");
+  scheduler.close();
+  store.close();
+});
+
+test("in-flight threadAgent wait does not emit after unsubscribe", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Watch this PR",
+  });
+  const enteredAgent = defer();
+  const releaseAgent = defer();
+  let ghCalls = 0;
+  const events: Array<{ message: Message; routedTo: string[] }> = [];
+  const { scheduler, service } = deferredGithubService({
+    store,
+    threadAgent: async () => {
+      enteredAgent.resolve();
+      await releaseAgent.promise;
+      return "codex";
+    },
+    events,
+    runGh: async () => {
+      ghCalls += 1;
+      if (ghCalls === 1) return pullRequest();
+      return pullRequest({
+        state: "MERGED",
+        updatedAt: "2026-08-30T00:01:00Z",
+      });
+    },
+  });
+  const { subscription } = await service.subscribe(thread.id, "openai/phi#42", [
+    "github.state_changed",
+  ]);
+  const polling = service.poll(subscription.id);
+  await enteredAgent.promise;
+  await service.unsubscribe(thread.id, "openai/phi#42");
+  releaseAgent.resolve();
+  await polling;
+
+  expect(events).toEqual([]);
+  const row = store.db
+    .query<{ active: number }, [string]>(
+      "SELECT active FROM resource_subscriptions WHERE id = ?",
+    )
+    .get(subscription.id)!;
+  expect(row.active).toBe(0);
+  scheduler.close();
+  store.close();
+});
+
+test("in-flight threadAgent wait does not emit after re-subscribe", async () => {
+  const store = new PhiStore(tempDir());
+  const workspace = store.defaultWorkspace();
+  const channel = store.listChannels(workspace.id)[0]!;
+  const { thread } = store.createThread(channel.id, {
+    author: "user",
+    kind: "message",
+    content: "Watch this PR",
+  });
+  const enteredAgent = defer();
+  const releaseAgent = defer();
+  let ghCalls = 0;
+  const events: Array<{ message: Message; routedTo: string[] }> = [];
+  const { scheduler, service } = deferredGithubService({
+    store,
+    threadAgent: async () => {
+      enteredAgent.resolve();
+      await releaseAgent.promise;
+      return "codex";
+    },
+    events,
+    runGh: async () => {
+      ghCalls += 1;
+      if (ghCalls === 1) return pullRequest();
+      if (ghCalls === 2) {
+        return pullRequest({
+          state: "MERGED",
+          updatedAt: "2026-08-30T00:01:00Z",
+        });
+      }
+      return pullRequest({
+        state: "CLOSED",
+        updatedAt: "2026-08-30T00:02:00Z",
+      });
+    },
+  });
+  const { subscription } = await service.subscribe(thread.id, "openai/phi#42", [
+    "github.state_changed",
+  ]);
+  const polling = service.poll(subscription.id);
+  await enteredAgent.promise;
+  await service.unsubscribe(thread.id, "openai/phi#42");
+  await service.subscribe(thread.id, "openai/phi#42", ["github.state_changed"]);
+  releaseAgent.resolve();
+  await polling;
+
+  expect(events).toEqual([]);
+  const row = store.db
+    .query<{ state_json: string; active: number }, [string]>(
+      "SELECT state_json, active FROM resource_subscriptions WHERE id = ?",
+    )
+    .get(subscription.id)!;
+  expect(row.active).toBe(1);
+  expect(JSON.parse(row.state_json).state).toBe("CLOSED");
   scheduler.close();
   store.close();
 });

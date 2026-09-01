@@ -30,7 +30,8 @@ export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of you
 export const LIST_CHANNEL_THREADS_DESCRIPTION = `List chat threads in a channel with compact previews, outcome tags, and message counts, optionally limited to a message sequence range. Use it to survey a channel before reading specific threads with read_thread. The channel defaults to your current thread's channel.`;
 export const GET_REFLECTION_CHECKPOINT_DESCRIPTION = `Read the last distilled message sequence for a channel so later reflection passes can skip already-processed messages. Omit channel to list every channel. A missing checkpoint is through_seq 0.`;
 export const SET_REFLECTION_CHECKPOINT_DESCRIPTION = `Store the last distilled message sequence for a channel so later reflection passes skip already-processed messages. through_seq is the latest sequence you fully covered. A lower value is ignored so overlapping passes cannot rewind the cursor.`;
-export const SUBSCRIBE_DESCRIPTION = `Subscribe the current thread to selected events from an external resource. The resource is validated and its current state is captured as a baseline, so only later changes create thread events. Events are posted as one batched system message per poll and wake the agent that handles untagged replies in this thread. GitHub pull requests use a PR URL or owner/repo#number and the authenticated gh CLI; events are github.* — github.state_changed (open/closed/reopened/merged), github.draft_changed, github.review_decision_changed, github.checks_failed, github.checks_passed (the whole rollup becomes green), github.new_review, github.new_comment, github.new_commit, github.labels_changed, github.assignees_changed, and github.mergeability_changed. Omit events for the conservative default: state, draft, review decision, failed/passed checks, new reviews, and new commits. Cursor cloud agents use an agent ID (bc-…) or https://cursor.com/agents/… URL and CURSOR_API_KEY; events are cursor.* — cursor.status_changed (ACTIVE/IDLE/ARCHIVED), cursor.new_run, cursor.run_status_changed, cursor.run_finished, cursor.run_failed, cursor.run_cancelled, cursor.pr_opened, and cursor.branch_changed. Omit events for the conservative default: status, finished, failed, and PR opened. Calling subscribe again for the same resource replaces its selected events.`;
+export const SUBSCRIBE_DESCRIPTION = `Subscribe the current thread to selected events from an external resource. The resource is validated and its current state is captured as a baseline, so only later changes create thread events. Events are posted as one batched system message per poll and wake the agent that handles untagged replies in this thread. GitHub pull requests use a PR URL or owner/repo#number and the authenticated gh CLI; events are github.* — github.state_changed (open/closed/reopened/merged), github.draft_changed, github.review_decision_changed, github.checks_failed, github.checks_passed (the whole rollup becomes green), github.new_review, github.new_comment, github.new_commit, github.labels_changed, github.assignees_changed, and github.mergeability_changed. Omit events for the conservative default: state, draft, review decision, failed/passed checks, new reviews, and new commits. Cursor cloud agents use an agent ID (bc-…) or https://cursor.com/agents/… URL and CURSOR_API_KEY; events are cursor.* — cursor.status_changed (ACTIVE/IDLE/ARCHIVED), cursor.new_run, cursor.run_status_changed, cursor.run_finished, cursor.run_failed, cursor.run_cancelled, cursor.pr_opened, and cursor.branch_changed. Omit events for the conservative default: status, finished, failed, and PR opened. Calling subscribe again for the same resource replaces its selected events. Use unsubscribe with the same resource string to stop polling.`;
+export const UNSUBSCRIBE_DESCRIPTION = `Stop delivering events from an external resource to the current thread. Pass the same GitHub pull request URL or owner/repo#number, or Cursor cloud agent ID (bc-…) / https://cursor.com/agents/… URL, used with subscribe. Polling stops immediately. Already-stopped subscriptions are a no-op. Call subscribe later to resume with a fresh baseline.`;
 
 export interface AgentHarnessCapabilityApi {
   list(harnessId?: string): Promise<AgentHarnessCapabilityList>;
@@ -51,6 +52,21 @@ export interface ResourceSubscriptionApi {
       events: string[];
     };
     created: boolean;
+  }>;
+  unsubscribe(
+    threadId: string,
+    resource: string,
+  ): Promise<{
+    unsubscribed: true;
+    subscription: {
+      id: string;
+      provider: string;
+      resourceKind: string;
+      resourceKey: string;
+      resourceUrl: string;
+      events: string[];
+      active: boolean;
+    };
   }>;
 }
 
@@ -355,6 +371,23 @@ export function createMcpHandler(
                 },
                 description:
                   "Event types to deliver; github.* for pull requests, cursor.* for cloud agents. Omit for the conservative default of that resource",
+              },
+            },
+            required: ["resource"],
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "unsubscribe",
+          description: UNSUBSCRIBE_DESCRIPTION,
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              resource: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "The same GitHub pull request or Cursor cloud agent string used with subscribe",
               },
             },
             required: ["resource"],
@@ -977,6 +1010,38 @@ export function createMcpHandler(
                 caller.threadId,
                 resource,
                 events,
+              );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(result),
+                  },
+                ],
+              };
+            } catch (error) {
+              return toolError((error as Error).message);
+            }
+          },
+        );
+      }
+      if (request.params.name === "unsubscribe") {
+        const rawResource = request.params.arguments?.resource;
+        const resource =
+          typeof rawResource === "string" ? rawResource.trim() : "";
+        if (!resource) return toolError("resource is required");
+        if (!subscriptions) {
+          return toolError("resource subscriptions are unavailable");
+        }
+        return tokens.runOnce(
+          token,
+          `unsubscribe:${JSON.stringify({ resource })}`,
+          extra.requestId,
+          async () => {
+            try {
+              const result = await subscriptions.unsubscribe(
+                caller.threadId,
+                resource,
               );
               return {
                 content: [

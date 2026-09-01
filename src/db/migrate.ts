@@ -18,6 +18,7 @@ import m016 from "./migrations/016_scheduled_tasks.sql" with { type: "text" };
 import m017 from "./migrations/017_resource_subscriptions.sql" with { type: "text" };
 import m018 from "./migrations/018_subscription_events.sql" with { type: "text" };
 import m019 from "./migrations/019_channel_checkpoints.sql" with { type: "text" };
+import m020 from "./migrations/020_subscription_poll_generation.sql" with { type: "text" };
 
 // Explicit list keeps migrations ordered and bundle-safe (no directory scan).
 const MIGRATIONS: Array<{ id: string; sql: string }> = [
@@ -40,6 +41,7 @@ const MIGRATIONS: Array<{ id: string; sql: string }> = [
   { id: "017_resource_subscriptions", sql: m017 },
   { id: "018_subscription_events", sql: m018 },
   { id: "019_channel_checkpoints", sql: m019 },
+  { id: "020_subscription_poll_generation", sql: m020 },
 ];
 
 export function migrate(db: Database): void {
