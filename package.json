@@ -1,6 +1,6 @@
 {
   "name": "phi",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "type": "module",
   "private": true,
   "scripts": {
@@ -14,7 +14,7 @@
     "validate:sandbox-kits": "sh ./scripts/validate-sandbox-kits"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.70.0",
+    "@agentclientprotocol/claude-agent-acp": "^0.73.0",
     "@agentclientprotocol/codex-acp": "^1.6.2",
     "@agentclientprotocol/sdk": "^1.4.0",
     "@assistant-ui/react": "^0.15.16",
