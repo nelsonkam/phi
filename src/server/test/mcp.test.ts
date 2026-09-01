@@ -285,7 +285,7 @@ function fixture(onAgentMessage?: (message: Message, routedTo: string[]) => void
           resourceKind: "pull_request",
           resourceKey: "openai/phi#42",
           resourceUrl: "https://github.com/openai/phi/pull/42",
-          events: events ?? ["state_changed"],
+          events: events ?? ["github.state_changed"],
         },
       };
     },
@@ -407,6 +407,7 @@ test("advertises messaging and workspace search without a thread argument", asyn
   const subscribe = body.result.tools[8]!;
   expect(subscribe.name).toBe("subscribe");
   expect(subscribe.description).toContain("GitHub pull requests");
+  expect(subscribe.description).toContain("Cursor cloud agents");
   expect(subscribe.inputSchema.properties.resource).toBeDefined();
   expect(subscribe.inputSchema.properties.events).toMatchObject({
     type: "array",
@@ -420,17 +421,25 @@ test("advertises messaging and workspace search without a thread argument", asyn
       }
     ).items.enum,
   ).toEqual([
-    "state_changed",
-    "draft_changed",
-    "review_decision_changed",
-    "checks_failed",
-    "checks_passed",
-    "new_review",
-    "new_comment",
-    "new_commit",
-    "labels_changed",
-    "assignees_changed",
-    "mergeability_changed",
+    "github.state_changed",
+    "github.draft_changed",
+    "github.review_decision_changed",
+    "github.checks_failed",
+    "github.checks_passed",
+    "github.new_review",
+    "github.new_comment",
+    "github.new_commit",
+    "github.labels_changed",
+    "github.assignees_changed",
+    "github.mergeability_changed",
+    "cursor.status_changed",
+    "cursor.new_run",
+    "cursor.run_status_changed",
+    "cursor.run_finished",
+    "cursor.run_failed",
+    "cursor.run_cancelled",
+    "cursor.pr_opened",
+    "cursor.branch_changed",
   ]);
   store.close();
 });
@@ -439,7 +448,7 @@ test("subscribe binds a resource to the caller's current thread", async () => {
   const { store, thread, token, handler, subscriptionCalls } = fixture();
   const response = await callTool(handler, token, 2, "subscribe", {
     resource: "openai/phi#42",
-    events: ["state_changed", "checks_failed"],
+    events: ["github.state_changed", "github.checks_failed"],
   });
   const body = (await response.json()) as {
     result: { isError?: boolean; content: Array<{ text: string }> };
@@ -449,7 +458,7 @@ test("subscribe binds a resource to the caller's current thread", async () => {
     {
       threadId: thread.id,
       resource: "openai/phi#42",
-      events: ["state_changed", "checks_failed"],
+      events: ["github.state_changed", "github.checks_failed"],
     },
   ]);
   expect(JSON.parse(body.result.content[0]!.text)).toMatchObject({
@@ -457,7 +466,7 @@ test("subscribe binds a resource to the caller's current thread", async () => {
     subscription: {
       id: "sub_test",
       resourceKey: "openai/phi#42",
-      events: ["state_changed", "checks_failed"],
+      events: ["github.state_changed", "github.checks_failed"],
     },
   });
   store.close();
