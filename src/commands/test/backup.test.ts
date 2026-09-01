@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 import type { CliOutput } from "@/cli";
 import {
@@ -18,7 +19,7 @@ import {
   runRestore,
   unsafeArchivePath,
 } from "@/commands/backup";
-import { linkEscapesArchive, hardlinkEscapesArchive, assertSafeBackupMembers } from "@/commands/backup-archive";
+import { linkEscapesArchive, hardlinkEscapesArchive, assertSafeBackupMembers, listTarMembers } from "@/commands/backup-archive";
 import { PhiStore } from "@/core/store/store";
 import { tempDir } from "@/testing/tmpdir";
 
@@ -97,6 +98,39 @@ async function tarList(archive: string): Promise<string> {
   ]);
   expect(exitCode).toBe(0);
   return stdout;
+}
+
+function tarHeader(name: string, size: number): Buffer {
+  const block = Buffer.alloc(512);
+  block.write(name, 0, Math.min(name.length, 99), "utf8");
+  block.write("0000644\0", 100, 8, "utf8");
+  block.write("0000000\0", 108, 8, "utf8");
+  block.write("0000000\0", 116, 8, "utf8");
+  block.write(`${size.toString(8).padStart(11, "0")}\0`, 124, 12, "utf8");
+  block.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, "0")}\0`, 136, 12, "utf8");
+  block.write("        ", 148, 8, "utf8");
+  block[156] = "0".charCodeAt(0);
+  block.write("ustar\0", 257, 6, "utf8");
+  block.write("00", 263, 2, "utf8");
+  let sum = 0;
+  for (const byte of block) sum += byte;
+  block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "utf8");
+  return block;
+}
+
+function writeGzipTar(
+  archive: string,
+  files: Array<{ name: string; content: string }>,
+): void {
+  const parts: Buffer[] = [];
+  for (const file of files) {
+    const body = Buffer.from(file.content);
+    const padded = Buffer.alloc(Math.ceil(body.length / 512) * 512);
+    body.copy(padded);
+    parts.push(tarHeader(file.name, body.length), padded);
+  }
+  parts.push(Buffer.alloc(1024));
+  writeFileSync(archive, gzipSync(Buffer.concat(parts)));
 }
 
 describe("backup and restore", () => {
@@ -364,20 +398,15 @@ describe("backup and restore", () => {
   });
 
   test("restore refuses archives with parent paths", async () => {
-    const box = scratch("phi-evil-box-");
-    writeFileSync(join(box, "manifest.json"), '{"format":1,"phiVersion":"0","createdAt":"x"}\n');
-    writeFileSync(join(box, "phi.db"), "not-sql");
-    writeFileSync(join(box, "pwned"), "pwn");
-    const nested = join(box, "nested");
-    mkdirSync(nested);
     const archive = join(scratch("phi-evil-out-"), "evil.tar.gz");
-    const child = Bun.spawn(
-      ["tar", "-czf", archive, "-C", nested, ".", "../pwned", "../manifest.json", "../phi.db"],
-      { stdout: "pipe", stderr: "pipe" },
+    writeGzipTar(archive, [
+      { name: "../pwned", content: "pwn" },
+      { name: "manifest.json", content: '{"format":1,"phiVersion":"0","createdAt":"x"}\n' },
+      { name: "phi.db", content: "not-sql" },
+    ]);
+    expect((await listTarMembers(archive)).map((member) => member.name)).toContain(
+      "../pwned",
     );
-    expect(await child.exited).toBe(0);
-    const listing = await tarList(archive);
-    expect(listing).toContain("../pwned");
 
     const target = scratch("phi-evil-target-");
     await expect(
