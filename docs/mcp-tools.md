@@ -205,7 +205,9 @@ Following `send_message`, the read slice:
 | `list_threads` | resolve channel name, then `listThreads(channelId)` | agents pass a channel name, never its ID |
 | `read_thread` | `listMessages(threadId)` | any thread in the caller's workspace |
 | `search_messages` | hybrid FTS5 + local embeddings | workspace/current thread resolved server-side; optional channel name, author, and current-thread opt-in; never channel/thread IDs |
-| `list_channel_threads` | `channelThreadSummaries(channelId, fromSeq, throughSeq)` | compact previews, outcomes, and counts; optional sequence bounds; excludes reflection and proposal threads |
+| `list_channel_threads` | `channelThreadSummaries(channelId, fromSeq, throughSeq)` | compact previews, outcomes, and counts; optional sequence bounds |
+| `get_reflection_checkpoint` | `listReflectionCheckpoints` / `getReflectionCheckpoint` | last distilled `through_seq` per channel; omit channel to list all |
+| `set_reflection_checkpoint` | `setReflectionCheckpoint(channelId, throughSeq)` | store a per-channel cursor; writes are monotonic so a stale pass cannot rewind |
 
 `read_thread` accepts any thread in the caller's workspace. Phi is
 single-user and `search_messages` already exposes all message content, so a
@@ -228,11 +230,11 @@ matching; internal rank scores are not exposed. If local model inference is
 unavailable, the tool degrades to lexical results and reports
 `semanticAvailable: false`.
 
-Scheduled reflection uses the same tools as every other run: its prompt
-names the source channel and `fromSeq`/`throughSeq` window, and the agent is
-instructed — not capability-forced — to base changes on evidence inside it.
-Cursor advancement is computed server-side from the durable window, so an
-agent reading outside the bounds cannot corrupt scheduling state.
+Scheduled reflection is a short system prompt that tells the default agent to
+run the seeded `reflect` skill. The agent uses the ordinary read tools plus
+`get_reflection_checkpoint` / `set_reflection_checkpoint` to avoid
+re-distilling the same messages. Cursor advancement is the agent's
+responsibility, not a frozen window computed server-side.
 
 ### 5.4 `create_channel` and attached folders
 

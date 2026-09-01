@@ -27,7 +27,9 @@ export const READ_ATTACHMENT_DESCRIPTION = `Read a text attachment by id. Use th
 export const LIST_AGENT_HARNESSES_DESCRIPTION = `List agent harnesses available on this machine and the exact model and config values they accept. Model IDs and config values are copied verbatim from ACP and can be used directly in phi agent files or anonymous-agent dispatch arguments. Omit harness to inspect every known harness, including unavailable ones; pass a harness ID to inspect only that harness.`;
 export const CREATE_CHANNEL_DESCRIPTION = `Create a channel in your current phi workspace. A channel can attach existing folders outside phi's managed workspace; those folders become writable workspace roots for agent sessions in the channel. Folder paths must be absolute directories. Names use lowercase letters, numbers, and hyphens.`;
 export const CREATE_THREAD_DESCRIPTION = `Start a new thread in a channel of your phi workspace, authored by you. Use it to spin a separate topic out of the current conversation or to file work in the channel it belongs to; you stay in your current thread and the new thread runs independently. Untagged user replies in the new thread come back to you, so omit \`to\` when the thread is yours to own. The optional \`to\` list hands the new thread's first turn to peer agents, exactly like send_message: message text never routes, and a leading @handle without \`to\` is rejected. The channel defaults to your current thread's channel.`;
-export const LIST_CHANNEL_THREADS_DESCRIPTION = `List chat threads in a channel with compact previews, outcome tags, and message counts, optionally limited to a message sequence range. Use it to survey a channel before reading specific threads with read_thread. Reflection audit threads and reflection-proposal threads are excluded. The channel defaults to your current thread's channel.`;
+export const LIST_CHANNEL_THREADS_DESCRIPTION = `List chat threads in a channel with compact previews, outcome tags, and message counts, optionally limited to a message sequence range. Use it to survey a channel before reading specific threads with read_thread. The channel defaults to your current thread's channel.`;
+export const GET_REFLECTION_CHECKPOINT_DESCRIPTION = `Read the last distilled message sequence for a channel so later reflection passes can skip already-processed messages. Omit channel to list every channel. A missing checkpoint is through_seq 0.`;
+export const SET_REFLECTION_CHECKPOINT_DESCRIPTION = `Store the last distilled message sequence for a channel so later reflection passes skip already-processed messages. through_seq is the latest sequence you fully covered. A lower value is ignored so overlapping passes cannot rewind the cursor.`;
 export const SUBSCRIBE_DESCRIPTION = `Subscribe the current thread to selected events from an external resource. The resource is validated and its current state is captured as a baseline, so only later changes create thread events. Events are posted as one batched system message per poll and wake the agent that handles untagged replies in this thread. Currently supports GitHub pull requests, specified as a PR URL or owner/repo#number, using the authenticated gh CLI. Supported events: state_changed (open/closed/reopened/merged), draft_changed, review_decision_changed, checks_failed, checks_passed (the whole rollup becomes green), new_review, new_comment, new_commit, labels_changed, assignees_changed, and mergeability_changed. Omit events for the conservative default: state, draft, review decision, failed/passed checks, new reviews, and new commits. Calling subscribe again for the same resource replaces its selected events.`;
 
 export interface AgentHarnessCapabilityApi {
@@ -217,6 +219,44 @@ export function createMcpHandler(
                 description: "Only include messages at or before this sequence",
               },
             },
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "get_reflection_checkpoint",
+          description: GET_REFLECTION_CHECKPOINT_DESCRIPTION,
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              channel: {
+                type: "string",
+                minLength: 1,
+                description:
+                  "Channel name to read; omit to list every channel",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "set_reflection_checkpoint",
+          description: SET_REFLECTION_CHECKPOINT_DESCRIPTION,
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              channel: {
+                type: "string",
+                minLength: 1,
+                description: "Channel name to store a checkpoint for",
+              },
+              through_seq: {
+                type: "integer",
+                minimum: 0,
+                description:
+                  "Latest message sequence fully processed in that channel",
+              },
+            },
+            required: ["channel", "through_seq"],
             additionalProperties: false,
           },
         },
@@ -622,6 +662,109 @@ export function createMcpHandler(
           },
         );
       }
+      if (request.params.name === "get_reflection_checkpoint") {
+        const callerThread = store.getThread(caller.threadId);
+        if (!callerThread) return toolError("Current thread no longer exists");
+        const rawChannel = request.params.arguments?.channel;
+        if (rawChannel !== undefined && typeof rawChannel !== "string") {
+          return toolError("channel must be a string");
+        }
+        const channelName =
+          typeof rawChannel === "string" ? rawChannel.trim() : "";
+        if (rawChannel !== undefined && !channelName) {
+          return toolError("channel must not be empty");
+        }
+        return tokens.runOnce(
+          token,
+          `get_reflection_checkpoint:${channelName || "*"}`,
+          extra.requestId,
+          () => {
+            if (!channelName) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      checkpoints: store
+                        .listReflectionCheckpoints(callerThread.workspaceId)
+                        .map((item) => ({
+                          channel: item.channelName,
+                          throughSeq: item.throughSeq,
+                        })),
+                    }),
+                  },
+                ],
+              };
+            }
+            const channel = findChannelByName(
+              store,
+              callerThread.workspaceId,
+              channelName,
+            );
+            if (!channel) {
+              return toolError(`Unknown channel "${channelName}"`);
+            }
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({
+                    channel: channel.name,
+                    throughSeq: store.getReflectionCheckpoint(channel.id),
+                  }),
+                },
+              ],
+            };
+          },
+        );
+      }
+      if (request.params.name === "set_reflection_checkpoint") {
+        const callerThread = store.getThread(caller.threadId);
+        if (!callerThread) return toolError("Current thread no longer exists");
+        const rawChannel = request.params.arguments?.channel;
+        const channelName =
+          typeof rawChannel === "string" ? rawChannel.trim() : "";
+        if (!channelName) return toolError("channel is required");
+        const rawThroughSeq = request.params.arguments?.through_seq;
+        if (
+          !Number.isSafeInteger(rawThroughSeq) ||
+          Number(rawThroughSeq) < 0
+        ) {
+          return toolError("through_seq must be a non-negative integer");
+        }
+        const channel = findChannelByName(
+          store,
+          callerThread.workspaceId,
+          channelName,
+        );
+        if (!channel) return toolError(`Unknown channel "${channelName}"`);
+        return tokens.runOnce(
+          token,
+          `set_reflection_checkpoint:${channel.id}:${rawThroughSeq}`,
+          extra.requestId,
+          () => {
+            try {
+              const throughSeq = store.setReflectionCheckpoint(
+                channel.id,
+                Number(rawThroughSeq),
+              );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      channel: channel.name,
+                      throughSeq,
+                    }),
+                  },
+                ],
+              };
+            } catch (error) {
+              return toolError((error as Error).message);
+            }
+          },
+        );
+      }
       if (request.params.name === "search_messages" && messageSearch) {
         const rawQuery = request.params.arguments?.query;
         const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
@@ -1000,6 +1143,19 @@ function toolError(message: string) {
     isError: true,
     content: [{ type: "text" as const, text: message }],
   };
+}
+
+function findChannelByName(
+  store: PhiStore,
+  workspaceId: string,
+  name: string,
+) {
+  return store
+    .listChannels(workspaceId)
+    .find(
+      (candidate) =>
+        candidate.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+    );
 }
 
 const READ_THREAD_MAX = 50;

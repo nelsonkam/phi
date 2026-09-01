@@ -56,6 +56,23 @@ test("seeds the default channel-management skill without overwriting it", () => 
   expect(readFileSync(skill, "utf8")).toBe("workspace customization\n");
 });
 
+test("seeds the default reflect skill without overwriting it", () => {
+  const root = tempDir();
+  const skill = join(root, ".agents", "skills", "reflect", "SKILL.md");
+
+  ensureWorkspace(root);
+  const seeded = readFileSync(skill, "utf8");
+  expect(seeded).toContain("name: reflect");
+  expect(seeded).toContain("set_reflection_checkpoint");
+  expect(readFileSync(join(root, "AGENTS.md"), "utf8")).toContain(
+    ".agents/skills/reflect/SKILL.md",
+  );
+
+  writeFileSync(skill, "workspace customization\n");
+  ensureWorkspace(root);
+  expect(readFileSync(skill, "utf8")).toBe("workspace customization\n");
+});
+
 test("seeds the workspace AGENTS.md without overwriting it", () => {
   const root = tempDir();
   const guide = join(root, "AGENTS.md");

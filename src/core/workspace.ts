@@ -15,6 +15,9 @@ import manageAgentsSkill from "@/core/workspace-defaults/skills/manage-agents/SK
 import manageChannelsSkill from "@/core/workspace-defaults/skills/manage-channels/SKILL.md" with {
   type: "text",
 };
+import reflectSkill from "@/core/workspace-defaults/skills/reflect/SKILL.md" with {
+  type: "text",
+};
 import workspaceGuide from "@/core/workspace-defaults/AGENTS.md" with {
   type: "text",
 };
@@ -69,6 +72,10 @@ const DEFAULT_SKILLS = [
   {
     name: "manage-channels",
     content: manageChannelsSkill,
+  },
+  {
+    name: "reflect",
+    content: reflectSkill,
   },
 ] as const;
 

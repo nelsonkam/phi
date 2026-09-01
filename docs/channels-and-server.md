@@ -348,20 +348,15 @@ adding another timer or cron runtime.
 
 Reflection is the first built-in scheduled task (`system.reflection`). It runs
 at `0 3 * * *` by default, may be configured by cron/timezone, and retains the
-legacy interval override. Its handler owns reflection semantics only; schedule,
-wake-up, persistence, and retry belong to the shared scheduler.
-
-Reflection runs are centralized as auditable threads in an automatically
-created `#reflection` channel, which is itself excluded as a reflection source.
-Each run records the source channel and message-sequence bounds in its root
-metadata; per-source-channel cursors still advance only after a durable agent
-reply. The source transcript is not copied into the system message. Instead,
-the prompt names the window and the run uses the ordinary read tools —
-`list_channel_threads` with the window's sequence bounds, then `read_thread`
-on the threads worth inspecting. The bounds are guidance, not an enforced
-capability: phi is single-user, every agent can already search all message
-content, and cursor advancement is computed server-side, so a scoped token
-would add machinery without adding safety.
+legacy interval override. The handler starts one agent turn in `#reflection`
+telling the default agent to run the seeded `reflect` skill; schedule, wake-up,
+persistence, and retry belong to the shared scheduler. The skill is what any
+agent follows — including when a person asks for reflection in an ordinary
+thread. Per-channel cursors live in `channel_checkpoints` and are read and
+written with `get_reflection_checkpoint` / `set_reflection_checkpoint`, so the
+same pass can stop early and resume later without re-distilling messages.
+Checkpoint writes keep the highest `through_seq` so a stale finisher cannot
+rewind a newer cursor.
 
 ## 10. Server transport and clients
 
