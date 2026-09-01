@@ -9,7 +9,8 @@ Claude Code, Codex, and Cursor inside Docker Sandboxes' microVM boundary.
 - Docker Sandboxes `sbx` v0.42.0-rc1 or newer. Phi requires the no-workspace
   create flow and rejects older releases that predate the relevant isolation,
   OAuth callback, and egress fixes.
-- A Phi release with matching OCI kit and multi-architecture image tags.
+- Official OCI kit and sandbox image tags matching this Phi version, published
+  to GHCR separately from the GitHub binary release.
 
 The official Phi kit declares proxy-managed subscription OAuth for Claude and
 Codex. Authentication belongs to sbx: real OAuth tokens stay in its host-side
@@ -183,5 +184,5 @@ bun run validate:sandbox-kits
 
 The release workflow builds Linux x64 and arm64 standalones, probes the native
 ONNX binding, performs an ACP initialize/shutdown handshake for every supported
-harness, publishes SHA-256 checksum assets, verifies the matching checksum while
-building each image architecture, and signs the image and kit digests.
+harness, and publishes SHA-256 checksum assets. It does not build or sign the
+sandbox image or kits.
