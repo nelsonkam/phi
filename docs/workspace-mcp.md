@@ -37,9 +37,10 @@ auto-registration entirely.
 
 ## Schema
 
-The top-level object accepts only `mcpServers`. Server names contain letters,
-numbers, `_`, or `-`; `phi` is reserved case-insensitively. Duplicate names in
-the file fail the turn — JSON's last-key-wins merge is not treated as valid.
+The top-level object accepts only `mcpServers`. Server names start with a
+letter or number, then letters, numbers, `_`, or `-`; `phi` is reserved
+case-insensitively. Duplicate names in the file fail the turn — JSON's
+last-key-wins merge is not treated as valid.
 
 - Stdio servers set `command` and may set `args` and `env`. `command` may be a
   PATH name (`npx`, `uvx`, `python`), an absolute path, or a path relative to
@@ -48,9 +49,10 @@ the file fail the turn — JSON's last-key-wins merge is not treated as valid.
 - Remote servers set `url` and may set `headers`. Transport defaults to
   streamable HTTP. Set `"type": "sse"` when the endpoint is SSE.
 - `"type": "stdio" | "http" | "sse"` is optional when `command` or `url` is
-  present. `"disabled": true` skips a server without deleting it.
-- Do not set `command` and `url` on the same server. `envFile` and OAuth
-  `auth` blocks are not supported.
+  present. `"disabled": true` skips a server without deleting it; a disabled
+  entry may omit `command` and `url`.
+- Do not set `command` and `url` on the same server. `envFile` and `auth` are
+  unsupported keys.
 
 `command`, `args`, `env`, `url`, and `headers` interpolate:
 

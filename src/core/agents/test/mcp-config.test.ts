@@ -78,12 +78,21 @@ test("a user-configured sbx server overrides the sandbox gateway", async () => {
 });
 
 test("a disabled user sbx server disables automatic registration", async () => {
-  const root = writeConfig({
+  const withUrl = writeConfig({
     mcpServers: {
       sbx: { url: "https://example.com/other-gateway", disabled: true },
     },
   });
-  const result = await loadWorkspaceMcpConfig(root, GATEWAY_ENV);
+  const withUrlResult = await loadWorkspaceMcpConfig(withUrl, GATEWAY_ENV);
+  expect(withUrlResult.sandboxGateway).toBe(false);
+  expect(withUrlResult.servers).toEqual([]);
+
+  const disableOnly = writeConfig({
+    mcpServers: {
+      sbx: { disabled: true },
+    },
+  });
+  const result = await loadWorkspaceMcpConfig(disableOnly, GATEWAY_ENV);
   expect(result.sandboxGateway).toBe(false);
   expect(result.servers).toEqual([]);
 });
@@ -172,6 +181,9 @@ test("skips disabled servers and keeps absolute commands", async () => {
   const root = writeConfig({
     mcpServers: {
       off: {
+        disabled: true,
+      },
+      alsoOff: {
         url: "https://example.com/off",
         disabled: true,
       },
@@ -249,6 +261,15 @@ test("rejects reserved names, unknown commands, and unknown properties", async (
     '"phi" is reserved',
   );
 
+  const leadingUnderscore = writeConfig({
+    mcpServers: {
+      _tools: { command: "env" },
+    },
+  });
+  await expect(loadWorkspaceMcpConfig(leadingUnderscore)).rejects.toThrow(
+    "Invalid key in record",
+  );
+
   const missing = writeConfig({
     mcpServers: {
       local: { command: "phi-mcp-server-not-on-path" },
@@ -285,7 +306,7 @@ test("rejects { fromEnv } objects in favor of ${env:NAME}", async () => {
   );
 });
 
-test("rejects mixed transports and unsupported envFile", async () => {
+test("rejects mixed transports and unsupported envFile or auth", async () => {
   const mixed = writeConfig({
     mcpServers: {
       both: {
@@ -307,6 +328,18 @@ test("rejects mixed transports and unsupported envFile", async () => {
     },
   });
   await expect(loadWorkspaceMcpConfig(envFile)).rejects.toThrow(
+    "Unrecognized key",
+  );
+
+  const auth = writeConfig({
+    mcpServers: {
+      remote: {
+        url: "https://example.com/mcp",
+        auth: { CLIENT_ID: "example" },
+      },
+    },
+  });
+  await expect(loadWorkspaceMcpConfig(auth)).rejects.toThrow(
     "Unrecognized key",
   );
 });

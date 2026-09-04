@@ -73,6 +73,20 @@ test("seeds the default reflect skill without overwriting it", () => {
   expect(readFileSync(skill, "utf8")).toBe("workspace customization\n");
 });
 
+test("seeds the default MCP-management skill without overwriting it", () => {
+  const root = tempDir();
+  const skill = join(root, ".agents", "skills", "manage-mcp", "SKILL.md");
+
+  ensureWorkspace(root);
+  const seeded = readFileSync(skill, "utf8");
+  expect(seeded).toContain("name: manage-mcp");
+  expect(seeded).toContain(".agents/mcp.json");
+
+  writeFileSync(skill, "workspace customization\n");
+  ensureWorkspace(root);
+  expect(readFileSync(skill, "utf8")).toBe("workspace customization\n");
+});
+
 test("seeds the workspace AGENTS.md without overwriting it", () => {
   const root = tempDir();
   const guide = join(root, "AGENTS.md");
@@ -82,6 +96,7 @@ test("seeds the workspace AGENTS.md without overwriting it", () => {
   expect(seeded).toContain("phi workspace");
   expect(seeded).toContain("send_message");
   expect(seeded).toContain("[rules.md](rules.md)");
+  expect(seeded).toContain(".agents/skills/manage-mcp/SKILL.md");
   expect(readFileSync(join(root, "rules.md"), "utf8")).toContain(
     "Workspace rules and preferences",
   );
@@ -134,6 +149,7 @@ test("uses the sandbox topology guide only for a new sandbox workspace", () => {
   expect(guide).toContain(".agents/memories/MEMORY.md");
   expect(guide).toContain("channels/<name>/rules.md");
   expect(guide).toContain("channels/<name>/skills/");
+  expect(guide).toContain("manage-mcp");
   expect(readFileSync(join(root, "rules.md"), "utf8")).toContain(
     "Workspace rules and preferences",
   );

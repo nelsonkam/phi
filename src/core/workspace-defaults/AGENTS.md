@@ -19,6 +19,8 @@ by workspace-relative path.
   workspace. Treat these as instructions.
 - `.agents/agents/` — agent definitions. To create or change one, follow
   `.agents/skills/manage-agents/SKILL.md`.
+- `.agents/mcp.json` — workspace MCP servers. To add or change one, follow
+  `.agents/skills/manage-mcp/SKILL.md`.
 - `.agents/skills/` — reusable how-to guides. Read the relevant SKILL.md
   before doing that kind of task. Distill recent channel history with
   `.agents/skills/reflect/SKILL.md`.

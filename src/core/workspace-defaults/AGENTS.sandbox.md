@@ -42,6 +42,8 @@ relative to this managed workspace.
   workspace. Treat these as instructions.
 - `.agents/agents/` — agent definitions. Follow the bundled `manage-agents`
   skill before changing them.
+- `.agents/mcp.json` — workspace MCP servers. Follow the bundled `manage-mcp`
+  skill before adding or changing one.
 - `.agents/skills/` — reusable guides. Read the relevant `SKILL.md` first.
   Distill recent channel history with the bundled `reflect` skill.
 - `.agents/memories/` — shared, harness-neutral durable facts. Read

@@ -8,3 +8,5 @@ clients/macos/.swiftpm/
 *.db
 *.db-shm
 *.db-wal
+.env
+data/

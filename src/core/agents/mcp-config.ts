@@ -37,7 +37,7 @@ const serverSchema = z
         code: "custom",
         message: "must set either command or url, not both",
       });
-    } else if (!hasCommand && !hasUrl) {
+    } else if (!hasCommand && !hasUrl && server.disabled !== true) {
       ctx.addIssue({
         code: "custom",
         message:
