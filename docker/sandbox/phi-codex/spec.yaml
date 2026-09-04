@@ -1,7 +1,7 @@
 schemaVersion: "2"
 kind: mixin
 name: phi-codex
-version: 0.2.11
+version: 0.2.12
 displayName: Phi Codex network policy
 description: Codex service egress for Phi
 requires:

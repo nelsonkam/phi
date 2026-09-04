@@ -5,11 +5,11 @@ LABEL org.opencontainers.image.source="https://github.com/nelsonkam/phi" \
       org.opencontainers.image.licenses="MIT"
 
 ARG TARGETARCH
-ARG PHI_VERSION=0.2.11
+ARG PHI_VERSION=0.2.12
 ARG PHI_RELEASE_REPO=nelsonkam/phi
 ARG PHI_HARNESSES=claude-code,codex,cursor
 ARG CLAUDE_CODE_VERSION=2.1.257
-ARG CODEX_VERSION=0.148.0
+ARG CODEX_VERSION=0.153.3
 ARG CURSOR_VERSION=2026.08.25-3e8eec8
 
 USER root
